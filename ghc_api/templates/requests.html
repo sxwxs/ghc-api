@@ -1,0 +1,1028 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copilot API Proxy - Request Browser</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .navbar h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .navbar-actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .navbar-actions a, .navbar-actions button {
+            color: white;
+            text-decoration: none;
+            padding: 0.4rem 0.75rem;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
+            transition: background 0.2s;
+            border: none;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+
+        .navbar-actions a:hover, .navbar-actions button:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .main-container {
+            display: flex;
+            height: calc(100vh - 52px);
+        }
+
+        /* Left panel - Detail view */
+        .detail-panel {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            background: white;
+            border-right: 1px solid #e0e0e0;
+        }
+
+        .detail-header {
+            padding: 1rem;
+            border-bottom: 1px solid #eee;
+            background: #fafafa;
+        }
+
+        .detail-header h2 {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .detail-tabs {
+            display: flex;
+            border-bottom: 1px solid #eee;
+            background: #fafafa;
+        }
+
+        .detail-tab {
+            padding: 0.6rem 1rem;
+            border: none;
+            background: none;
+            cursor: pointer;
+            color: #666;
+            font-size: 0.8125rem;
+            font-weight: 500;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+        }
+
+        .detail-tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .detail-tab:hover:not(.active) {
+            color: #333;
+        }
+
+        .detail-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+
+        .detail-empty {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #999;
+            font-size: 0.9375rem;
+        }
+
+        .tab-pane {
+            display: none;
+        }
+
+        .tab-pane.active {
+            display: block;
+        }
+
+        .overview-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .overview-item {
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+
+        .overview-item label {
+            font-size: 0.6875rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .overview-item .value {
+            font-size: 0.875rem;
+            font-weight: 500;
+            margin-top: 0.25rem;
+            word-break: break-all;
+        }
+
+        pre.json-display {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.75rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            word-break: break-all;
+            margin: 0;
+        }
+
+        .json-key { color: #9cdcfe; }
+        .json-string { color: #ce9178; }
+        .json-number { color: #b5cea8; }
+        .json-boolean { color: #569cd6; }
+        .json-null { color: #569cd6; }
+
+        /* Right panel - Request list */
+        .list-panel {
+            width: 480px;
+            min-width: 380px;
+            max-width: 600px;
+            display: flex;
+            flex-direction: column;
+            background: #fafafa;
+            resize: horizontal;
+            overflow: hidden;
+        }
+
+        .list-controls {
+            padding: 0.75rem;
+            border-bottom: 1px solid #e0e0e0;
+            background: white;
+        }
+
+        .search-row {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .search-box {
+            flex: 1;
+            position: relative;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 0.5rem 0.75rem;
+            padding-left: 2rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.8125rem;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+
+        .search-box input:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.15);
+        }
+
+        .search-box::before {
+            content: "🔍";
+            position: absolute;
+            left: 0.5rem;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 0.75rem;
+        }
+
+        .search-type-toggle {
+            display: flex;
+            gap: 0.25rem;
+        }
+
+        .search-type-btn {
+            padding: 0.5rem 0.75rem;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .search-type-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .search-type-btn:hover:not(.active) {
+            background: #f0f0f0;
+        }
+
+        .controls-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+        }
+
+        .per-page-select {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .per-page-select label {
+            color: #666;
+        }
+
+        .per-page-select select {
+            padding: 0.25rem 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            background: white;
+            cursor: pointer;
+        }
+
+        .request-count {
+            color: #666;
+        }
+
+        .request-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .request-item {
+            padding: 0.75rem 1rem;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+            transition: background 0.15s;
+            background: white;
+        }
+
+        .request-item:hover {
+            background: #f5f5f5;
+        }
+
+        .request-item.selected {
+            background: #e8edff;
+            border-left: 3px solid #667eea;
+            padding-left: calc(1rem - 3px);
+        }
+
+        .request-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+
+        .request-item-time {
+            font-size: 0.6875rem;
+            color: #999;
+        }
+
+        .request-item-badges {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .model-badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            background: #e3e8ff;
+            color: #667eea;
+            border-radius: 12px;
+            font-size: 0.6875rem;
+            font-weight: 600;
+        }
+
+        .endpoint-badge {
+            display: inline-block;
+            padding: 0.15rem 0.4rem;
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-radius: 3px;
+            font-size: 0.6875rem;
+            font-family: monospace;
+        }
+
+        .state-badge {
+            display: inline-block;
+            padding: 0.15rem 0.4rem;
+            border-radius: 3px;
+            font-size: 0.6875rem;
+            font-weight: 600;
+        }
+
+        .state-badge.pending {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .state-badge.sending {
+            background: #e3f2fd;
+            color: #1565c0;
+            animation: pulse 1.5s infinite;
+        }
+
+        .state-badge.receiving {
+            background: #f3e5f5;
+            color: #7b1fa2;
+            animation: pulse 1.5s infinite;
+        }
+
+        .state-badge.completed {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .state-badge.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .request-item-stats {
+            font-size: 0.6875rem;
+            color: #666;
+            display: flex;
+            gap: 0.75rem;
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.75rem;
+            border-top: 1px solid #e0e0e0;
+            background: white;
+            flex-wrap: wrap;
+        }
+
+        .pagination button {
+            padding: 0.35rem 0.6rem;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            transition: all 0.2s;
+        }
+
+        .pagination button:hover:not(:disabled) {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .pagination button.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .pagination-info {
+            color: #666;
+            font-size: 0.75rem;
+            margin: 0 0.5rem;
+        }
+
+        .empty-list {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
+            color: #666;
+            text-align: center;
+            padding: 1rem;
+        }
+
+        .empty-list h3 {
+            font-size: 0.9375rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .empty-list p {
+            font-size: 0.8125rem;
+        }
+
+        /* File input styling */
+        .file-input-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            cursor: pointer;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* Highlight for search matches */
+        .search-highlight {
+            background: #fff3cd;
+            padding: 0 2px;
+            border-radius: 2px;
+        }
+
+        @media (max-width: 900px) {
+            .main-container {
+                flex-direction: column-reverse;
+            }
+
+            .list-panel {
+                width: 100%;
+                max-width: none;
+                height: 50%;
+                resize: none;
+            }
+
+            .detail-panel {
+                height: 50%;
+                border-right: none;
+                border-top: 1px solid #e0e0e0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <h1>Request Browser</h1>
+        <div class="navbar-actions">
+            <a href="/">Dashboard</a>
+            <a href="/api/stats">API Stats</a>
+            <button onclick="downloadRequests()" title="Download all requests as JSON Lines">Download .jl</button>
+            <div class="file-input-wrapper">
+                <button title="Load requests from JSON Lines file">Load .jl</button>
+                <input type="file" id="file-input" accept=".jl,.jsonl" onchange="uploadRequests(this)">
+            </div>
+        </div>
+    </nav>
+
+    <div class="main-container">
+        <!-- Left: Detail panel -->
+        <div class="detail-panel">
+            <div class="detail-header" id="detail-header">
+                <h2>Select a request to view details</h2>
+            </div>
+            <div class="detail-tabs" id="detail-tabs" style="display: none;">
+                <button class="detail-tab active" data-tab="overview">Overview</button>
+                <button class="detail-tab" data-tab="request">Request</button>
+                <button class="detail-tab" data-tab="response">Response</button>
+            </div>
+            <div class="detail-content">
+                <div class="detail-empty" id="detail-empty">
+                    <span>Click on a request from the list to view its details</span>
+                </div>
+                <div id="detail-panes" style="display: none;">
+                    <div class="tab-pane active" id="pane-overview">
+                        <div class="overview-grid" id="overview-content"></div>
+                    </div>
+                    <div class="tab-pane" id="pane-request">
+                        <pre class="json-display" id="request-json"></pre>
+                    </div>
+                    <div class="tab-pane" id="pane-response">
+                        <pre class="json-display" id="response-json"></pre>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right: Request list -->
+        <div class="list-panel">
+            <div class="list-controls">
+                <div class="search-row">
+                    <div class="search-box">
+                        <input type="text" id="search-input" placeholder="Search requests...">
+                    </div>
+                    <div class="search-type-toggle">
+                        <button class="search-type-btn active" data-type="basic" title="Search by model, endpoint">Basic</button>
+                        <button class="search-type-btn" data-type="fulltext" title="Full-text search in request/response bodies">Full-text</button>
+                    </div>
+                </div>
+                <div class="controls-row">
+                    <div class="per-page-select">
+                        <label for="per-page">Show:</label>
+                        <select id="per-page">
+                            <option value="25">25</option>
+                            <option value="50" selected>50</option>
+                            <option value="100">100</option>
+                        </select>
+                    </div>
+                    <div class="request-count" id="request-count">0 requests</div>
+                </div>
+            </div>
+
+            <div class="request-list" id="request-list">
+                <div class="empty-list" id="empty-state">
+                    <h3>No requests yet</h3>
+                    <p>Requests will appear here as they are made.</p>
+                </div>
+            </div>
+
+            <div class="pagination" id="pagination"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        let perPage = 50;
+        let totalPages = 1;
+        let searchQuery = '';
+        let searchType = 'basic';
+        let searchTimeout = null;
+        let selectedRequestId = null;
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatNumber(num) {
+            return new Intl.NumberFormat().format(num);
+        }
+
+        function getStateLabel(state) {
+            const labels = {
+                'pending': 'Pending',
+                'sending': 'Sending',
+                'receiving': 'Receiving',
+                'completed': 'Completed',
+                'error': 'Error'
+            };
+            return labels[state] || state || 'Unknown';
+        }
+
+        function syntaxHighlight(json) {
+            if (json === null || json === undefined) {
+                return '<span class="json-null">null</span>';
+            }
+            if (typeof json !== 'string') {
+                json = JSON.stringify(json, null, 2);
+            }
+            // Escape HTML
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                let cls = 'json-number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        async function loadRequests() {
+            try {
+                const params = new URLSearchParams({
+                    page: currentPage,
+                    per_page: perPage,
+                });
+
+                let endpoint = '/api/requests';
+                if (searchQuery) {
+                    if (searchType === 'fulltext') {
+                        endpoint = '/api/requests/search';
+                        params.set('q', searchQuery);
+                    } else {
+                        params.set('search', searchQuery);
+                    }
+                }
+
+                const response = await fetch(endpoint + '?' + params.toString());
+                const data = await response.json();
+
+                totalPages = data.total_pages || 1;
+
+                const listContainer = document.getElementById('request-list');
+                const emptyState = document.getElementById('empty-state');
+                const requestCount = document.getElementById('request-count');
+
+                requestCount.textContent = `${data.total || 0} requests`;
+
+                if (data.items && data.items.length > 0) {
+                    emptyState.style.display = 'none';
+
+                    // Build list HTML
+                    let html = '';
+                    for (const item of data.items) {
+                        const state = item.state || 'completed';
+                        const isSelected = item.id === selectedRequestId;
+                        const duration = item.duration !== null ? `${item.duration}s` : '-';
+                        const timestamp = new Date(item.timestamp).toLocaleTimeString();
+                        const date = new Date(item.timestamp).toLocaleDateString();
+
+                        html += `
+                            <div class="request-item ${isSelected ? 'selected' : ''}" data-id="${item.id}" onclick="selectRequest('${item.id}')">
+                                <div class="request-item-header">
+                                    <span class="request-item-time">${date} ${timestamp}</span>
+                                    <span class="state-badge ${state}">${getStateLabel(state)}</span>
+                                </div>
+                                <div class="request-item-badges">
+                                    <span class="model-badge">${item.model}</span>
+                                    <span class="endpoint-badge">${item.endpoint}</span>
+                                </div>
+                                <div class="request-item-stats">
+                                    <span>Duration: ${duration}</span>
+                                    <span>In: ${formatNumber(item.input_tokens)} / Out: ${formatNumber(item.output_tokens)}</span>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    // Preserve scroll position if possible
+                    const scrollTop = listContainer.scrollTop;
+                    listContainer.innerHTML = html;
+                    listContainer.scrollTop = scrollTop;
+                } else {
+                    listContainer.innerHTML = '';
+                    listContainer.appendChild(emptyState);
+                    emptyState.style.display = 'flex';
+                }
+
+                renderPagination(data.total);
+            } catch (error) {
+                console.error('Failed to load requests:', error);
+            }
+        }
+
+        function renderPagination(total) {
+            const pagination = document.getElementById('pagination');
+            pagination.innerHTML = '';
+
+            if (totalPages <= 1) return;
+
+            // Previous button
+            const prevBtn = document.createElement('button');
+            prevBtn.textContent = '←';
+            prevBtn.disabled = currentPage === 1;
+            prevBtn.onclick = () => {
+                if (currentPage > 1) {
+                    currentPage--;
+                    loadRequests();
+                }
+            };
+            pagination.appendChild(prevBtn);
+
+            // Page numbers
+            const maxVisible = 5;
+            let startPage = Math.max(1, currentPage - Math.floor(maxVisible / 2));
+            let endPage = Math.min(totalPages, startPage + maxVisible - 1);
+
+            if (endPage - startPage < maxVisible - 1) {
+                startPage = Math.max(1, endPage - maxVisible + 1);
+            }
+
+            if (startPage > 1) {
+                pagination.appendChild(createPageButton(1));
+                if (startPage > 2) {
+                    const ellipsis = document.createElement('span');
+                    ellipsis.textContent = '...';
+                    ellipsis.className = 'pagination-info';
+                    pagination.appendChild(ellipsis);
+                }
+            }
+
+            for (let i = startPage; i <= endPage; i++) {
+                pagination.appendChild(createPageButton(i));
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const ellipsis = document.createElement('span');
+                    ellipsis.textContent = '...';
+                    ellipsis.className = 'pagination-info';
+                    pagination.appendChild(ellipsis);
+                }
+                pagination.appendChild(createPageButton(totalPages));
+            }
+
+            // Next button
+            const nextBtn = document.createElement('button');
+            nextBtn.textContent = '→';
+            nextBtn.disabled = currentPage === totalPages;
+            nextBtn.onclick = () => {
+                if (currentPage < totalPages) {
+                    currentPage++;
+                    loadRequests();
+                }
+            };
+            pagination.appendChild(nextBtn);
+        }
+
+        function createPageButton(page) {
+            const btn = document.createElement('button');
+            btn.textContent = page;
+            btn.className = page === currentPage ? 'active' : '';
+            btn.onclick = () => {
+                currentPage = page;
+                loadRequests();
+            };
+            return btn;
+        }
+
+        async function selectRequest(requestId) {
+            selectedRequestId = requestId;
+
+            // Update selection in list
+            document.querySelectorAll('.request-item').forEach(item => {
+                item.classList.toggle('selected', item.dataset.id === requestId);
+            });
+
+            try {
+                const response = await fetch(`/api/request/${requestId}`);
+                const data = await response.json();
+
+                showRequestDetails(data);
+            } catch (error) {
+                console.error('Failed to load request details:', error);
+            }
+        }
+
+        function showRequestDetails(data) {
+            document.getElementById('detail-empty').style.display = 'none';
+            document.getElementById('detail-panes').style.display = 'block';
+            document.getElementById('detail-tabs').style.display = 'flex';
+
+            const state = data.state || 'completed';
+            const statusCode = data.status_code !== null ? data.status_code : '-';
+            const duration = data.duration !== null ? `${data.duration}s` : '-';
+
+            document.getElementById('detail-header').innerHTML = `
+                <h2>
+                    <span class="model-badge">${data.model}</span>
+                    <span class="endpoint-badge">${data.endpoint}</span>
+                    <span class="state-badge ${state}">${getStateLabel(state)}</span>
+                </h2>
+            `;
+
+            const overviewContent = document.getElementById('overview-content');
+            overviewContent.innerHTML = `
+                <div class="overview-item">
+                    <label>Request ID</label>
+                    <div class="value">${data.id}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Timestamp</label>
+                    <div class="value">${new Date(data.timestamp).toLocaleString()}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Model</label>
+                    <div class="value">${data.model}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Endpoint</label>
+                    <div class="value">${data.endpoint}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Status Code</label>
+                    <div class="value">${statusCode}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Duration</label>
+                    <div class="value">${duration}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Request Size</label>
+                    <div class="value">${formatBytes(data.request_size)}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Response Size</label>
+                    <div class="value">${formatBytes(data.response_size)}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Input Tokens</label>
+                    <div class="value">${formatNumber(data.input_tokens)}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Output Tokens</label>
+                    <div class="value">${formatNumber(data.output_tokens)}</div>
+                </div>
+            `;
+
+            document.getElementById('request-json').innerHTML = syntaxHighlight(data.request_body);
+            document.getElementById('response-json').innerHTML = syntaxHighlight(data.response_body);
+
+            // Reset to overview tab
+            document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+            document.querySelector('.detail-tab[data-tab="overview"]').classList.add('active');
+            document.getElementById('pane-overview').classList.add('active');
+        }
+
+        // Tab switching
+        document.querySelectorAll('.detail-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+
+                tab.classList.add('active');
+                document.getElementById('pane-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Search type toggle
+        document.querySelectorAll('.search-type-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.search-type-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                searchType = btn.dataset.type;
+
+                // Update placeholder
+                const input = document.getElementById('search-input');
+                if (searchType === 'fulltext') {
+                    input.placeholder = 'Search in request/response bodies...';
+                } else {
+                    input.placeholder = 'Search by model, endpoint...';
+                }
+
+                // Trigger search if there's a query
+                if (searchQuery) {
+                    currentPage = 1;
+                    loadRequests();
+                }
+            });
+        });
+
+        // Search input with debounce
+        document.getElementById('search-input').addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                searchQuery = e.target.value.trim();
+                currentPage = 1;
+                loadRequests();
+            }, 300);
+        });
+
+        // Per page selector
+        document.getElementById('per-page').addEventListener('change', (e) => {
+            perPage = parseInt(e.target.value);
+            currentPage = 1;
+            loadRequests();
+        });
+
+        // Download requests as JSON Lines
+        async function downloadRequests() {
+            try {
+                const response = await fetch('/api/requests/export');
+                const blob = await response.blob();
+
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `requests_${new Date().toISOString().slice(0, 10)}.jl`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+            } catch (error) {
+                console.error('Failed to download requests:', error);
+                alert('Failed to download requests: ' + error.message);
+            }
+        }
+
+        // Upload requests from JSON Lines
+        async function uploadRequests(input) {
+            const file = input.files[0];
+            if (!file) return;
+
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const response = await fetch('/api/requests/import', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+
+                if (response.ok) {
+                    alert(`Successfully imported ${result.imported} requests`);
+                    loadRequests();
+                } else {
+                    alert('Failed to import: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Failed to upload requests:', error);
+                alert('Failed to upload requests: ' + error.message);
+            } finally {
+                // Reset file input
+                input.value = '';
+            }
+        }
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Navigate list with arrow keys when no input is focused
+            if (document.activeElement.tagName !== 'INPUT') {
+                if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    const items = document.querySelectorAll('.request-item');
+                    if (items.length === 0) return;
+
+                    let currentIndex = -1;
+                    items.forEach((item, index) => {
+                        if (item.classList.contains('selected')) {
+                            currentIndex = index;
+                        }
+                    });
+
+                    let newIndex;
+                    if (e.key === 'ArrowDown') {
+                        newIndex = currentIndex < items.length - 1 ? currentIndex + 1 : 0;
+                    } else {
+                        newIndex = currentIndex > 0 ? currentIndex - 1 : items.length - 1;
+                    }
+
+                    const newItem = items[newIndex];
+                    selectRequest(newItem.dataset.id);
+                    newItem.scrollIntoView({ block: 'nearest' });
+                }
+            }
+
+            // Focus search with /
+            if (e.key === '/' && document.activeElement.tagName !== 'INPUT') {
+                e.preventDefault();
+                document.getElementById('search-input').focus();
+            }
+        });
+
+        // Initial load
+        loadRequests();
+
+        // Auto-refresh every 5 seconds
+        setInterval(loadRequests, 5000);
+    </script>
+</body>
+</html>

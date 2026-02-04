@@ -1,0 +1,4 @@
+Flask>=2.0.0
+requests>=2.25.0
+PyYAML>=5.4.0
+tiktoken>=0.3.0

@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copilot API Proxy - Dashboard</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .navbar h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .navbar-actions {
+            display: flex;
+            gap: 1rem;
+        }
+
+        .navbar-actions a {
+            color: white;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
+            transition: background 0.2s;
+        }
+
+        .navbar-actions a:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+
+        .stat-card h3 {
+            color: #666;
+            font-size: 0.875rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-card .value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #333;
+        }
+
+        .stat-card .subtext {
+            color: #888;
+            font-size: 0.875rem;
+            margin-top: 0.25rem;
+        }
+
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 2rem;
+        }
+
+        .section h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #333;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 0.5rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #555;
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        tbody tr {
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        tbody tr:hover {
+            background: #f8f9fa;
+        }
+
+        .model-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            background: #e3e8ff;
+            color: #667eea;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .endpoint-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-family: monospace;
+        }
+
+        .state-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .state-badge.pending {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .state-badge.sending {
+            background: #e3f2fd;
+            color: #1565c0;
+            animation: pulse 1.5s infinite;
+        }
+
+        .state-badge.receiving {
+            background: #f3e5f5;
+            color: #7b1fa2;
+            animation: pulse 1.5s infinite;
+        }
+
+        .state-badge.completed {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .state-badge.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        .refresh-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            transition: background 0.2s;
+        }
+
+        .refresh-btn:hover {
+            background: #5a6fd6;
+        }
+
+        .header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        /* Modal Styles */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 12px;
+            width: 90%;
+            max-width: 900px;
+            max-height: 85vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .modal-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            font-size: 1.125rem;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #666;
+            padding: 0.25rem;
+        }
+
+        .modal-close:hover {
+            color: #333;
+        }
+
+        .modal-tabs {
+            display: flex;
+            border-bottom: 1px solid #eee;
+            padding: 0 1.5rem;
+        }
+
+        .modal-tab {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            background: none;
+            cursor: pointer;
+            color: #666;
+            font-size: 0.875rem;
+            font-weight: 500;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -1px;
+        }
+
+        .modal-tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+
+        .modal-body {
+            padding: 1.5rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .overview-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1rem;
+        }
+
+        .overview-item {
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border-radius: 6px;
+        }
+
+        .overview-item label {
+            font-size: 0.75rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .overview-item .value {
+            font-size: 0.9375rem;
+            font-weight: 500;
+            margin-top: 0.25rem;
+            word-break: break-all;
+        }
+
+        pre.json-display {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+            max-height: 400px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            word-break: break-all;
+        }
+
+        .json-key { color: #9cdcfe; }
+        .json-string { color: #ce9178; }
+        .json-number { color: #b5cea8; }
+        .json-boolean { color: #569cd6; }
+        .json-null { color: #569cd6; }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .modal-content {
+                width: 95%;
+                max-height: 90vh;
+            }
+
+            .overview-grid {
+                grid-template-columns: 1fr;
+            }
+
+            table {
+                font-size: 0.875rem;
+            }
+
+            th, td {
+                padding: 0.5rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <h1>Copilot API Proxy</h1>
+        <div class="navbar-actions">
+            <a href="/requests">Request Browser</a>
+            <a href="/api/stats">API Stats</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="stats-grid" id="stats-cards">
+            <div class="stat-card">
+                <h3>Total Requests</h3>
+                <div class="value" id="total-requests">-</div>
+            </div>
+            <div class="stat-card">
+                <h3>Data Sent</h3>
+                <div class="value" id="bytes-sent">-</div>
+            </div>
+            <div class="stat-card">
+                <h3>Data Received</h3>
+                <div class="value" id="bytes-received">-</div>
+            </div>
+            <div class="stat-card">
+                <h3>Cached Requests</h3>
+                <div class="value" id="cached-requests">-</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="header-row">
+                <h2>Model Statistics</h2>
+                <button class="refresh-btn" onclick="loadStats()">Refresh</button>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Requests</th>
+                        <th>Input Tokens</th>
+                        <th>Output Tokens</th>
+                        <th>Data Sent</th>
+                        <th>Data Received</th>
+                    </tr>
+                </thead>
+                <tbody id="model-stats-body">
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>Endpoint Statistics</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Endpoint</th>
+                        <th>Requests</th>
+                        <th>Data Sent</th>
+                        <th>Data Received</th>
+                    </tr>
+                </thead>
+                <tbody id="endpoint-stats-body">
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <div class="header-row">
+                <h2>Recent Requests</h2>
+                <a href="/requests" class="refresh-btn">View All</a>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Timestamp</th>
+                        <th>Model</th>
+                        <th>Endpoint</th>
+                        <th>State</th>
+                        <th>Status</th>
+                        <th>Duration</th>
+                        <th>Request Size</th>
+                        <th>Response Size</th>
+                    </tr>
+                </thead>
+                <tbody id="recent-requests-body">
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Modal for request details -->
+    <div class="modal" id="request-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Request Details</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-tabs">
+                <button class="modal-tab active" data-tab="overview">Overview</button>
+                <button class="modal-tab" data-tab="request">Request Body</button>
+                <button class="modal-tab" data-tab="response">Response Body</button>
+            </div>
+            <div class="modal-body">
+                <div class="tab-content active" id="tab-overview">
+                    <div class="overview-grid" id="overview-content"></div>
+                </div>
+                <div class="tab-content" id="tab-request">
+                    <pre class="json-display" id="request-json"></pre>
+                </div>
+                <div class="tab-content" id="tab-response">
+                    <pre class="json-display" id="response-json"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function formatNumber(num) {
+            return new Intl.NumberFormat().format(num);
+        }
+
+        function getStateLabel(state) {
+            const labels = {
+                'pending': 'Pending',
+                'sending': 'Sending',
+                'receiving': 'Receiving',
+                'completed': 'Completed',
+                'error': 'Error'
+            };
+            return labels[state] || state || 'Unknown';
+        }
+
+        function syntaxHighlight(json) {
+            if (typeof json !== 'string') {
+                json = JSON.stringify(json, null, 2);
+            }
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                let cls = 'json-number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch('/api/stats');
+                const stats = await response.json();
+
+                document.getElementById('total-requests').textContent = formatNumber(stats.total_requests);
+                document.getElementById('bytes-sent').textContent = formatBytes(stats.bytes_sent);
+                document.getElementById('bytes-received').textContent = formatBytes(stats.bytes_received);
+                document.getElementById('cached-requests').textContent = formatNumber(stats.cached_requests);
+
+                // Model stats
+                const modelBody = document.getElementById('model-stats-body');
+                modelBody.innerHTML = '';
+                for (const [model, data] of Object.entries(stats.model_stats || {})) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td><span class="model-badge">${model}</span></td>
+                        <td>${formatNumber(data.request_count)}</td>
+                        <td>${formatNumber(data.input_tokens)}</td>
+                        <td>${formatNumber(data.output_tokens)}</td>
+                        <td>${formatBytes(data.bytes_sent)}</td>
+                        <td>${formatBytes(data.bytes_received)}</td>
+                    `;
+                    modelBody.appendChild(row);
+                }
+
+                // Endpoint stats
+                const endpointBody = document.getElementById('endpoint-stats-body');
+                endpointBody.innerHTML = '';
+                for (const [endpoint, data] of Object.entries(stats.endpoint_stats || {})) {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td><span class="endpoint-badge">${endpoint}</span></td>
+                        <td>${formatNumber(data.request_count)}</td>
+                        <td>${formatBytes(data.bytes_sent)}</td>
+                        <td>${formatBytes(data.bytes_received)}</td>
+                    `;
+                    endpointBody.appendChild(row);
+                }
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+            }
+        }
+
+        async function loadRecentRequests() {
+            try {
+                const response = await fetch('/api/requests?per_page=50');
+                const data = await response.json();
+
+                const tbody = document.getElementById('recent-requests-body');
+                tbody.innerHTML = '';
+
+                for (const item of data.items || []) {
+                    const row = document.createElement('tr');
+                    row.onclick = () => showRequestDetails(item.id);
+                    const state = item.state || 'completed';
+                    const statusCode = item.status_code !== null ? item.status_code : '-';
+                    const duration = item.duration !== null ? `${item.duration}s` : '-';
+                    row.innerHTML = `
+                        <td>${new Date(item.timestamp).toLocaleString()}</td>
+                        <td><span class="model-badge">${item.model}</span></td>
+                        <td><span class="endpoint-badge">${item.endpoint}</span></td>
+                        <td><span class="state-badge ${state}">${getStateLabel(state)}</span></td>
+                        <td>${statusCode}</td>
+                        <td>${duration}</td>
+                        <td>${formatBytes(item.request_size)}</td>
+                        <td>${formatBytes(item.response_size)}</td>
+                    `;
+                    tbody.appendChild(row);
+                }
+            } catch (error) {
+                console.error('Failed to load recent requests:', error);
+            }
+        }
+
+        async function showRequestDetails(requestId) {
+            try {
+                const response = await fetch(`/api/request/${requestId}`);
+                const data = await response.json();
+
+                const state = data.state || 'completed';
+                const statusCode = data.status_code !== null ? data.status_code : '-';
+                const duration = data.duration !== null ? `${data.duration}s` : '-';
+
+                const overviewContent = document.getElementById('overview-content');
+                overviewContent.innerHTML = `
+                    <div class="overview-item">
+                        <label>Request ID</label>
+                        <div class="value">${data.id}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Timestamp</label>
+                        <div class="value">${new Date(data.timestamp).toLocaleString()}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Model</label>
+                        <div class="value">${data.model}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Endpoint</label>
+                        <div class="value">${data.endpoint}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>State</label>
+                        <div class="value"><span class="state-badge ${state}">${getStateLabel(state)}</span></div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Status Code</label>
+                        <div class="value">${statusCode}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Duration</label>
+                        <div class="value">${duration}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Request Size</label>
+                        <div class="value">${formatBytes(data.request_size)}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Response Size</label>
+                        <div class="value">${formatBytes(data.response_size)}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Input Tokens</label>
+                        <div class="value">${formatNumber(data.input_tokens)}</div>
+                    </div>
+                    <div class="overview-item">
+                        <label>Output Tokens</label>
+                        <div class="value">${formatNumber(data.output_tokens)}</div>
+                    </div>
+                `;
+
+                document.getElementById('request-json').innerHTML = syntaxHighlight(data.request_body || {});
+                document.getElementById('response-json').innerHTML = syntaxHighlight(data.response_body || {});
+
+                document.getElementById('request-modal').classList.add('active');
+            } catch (error) {
+                console.error('Failed to load request details:', error);
+            }
+        }
+
+        function closeModal() {
+            document.getElementById('request-modal').classList.remove('active');
+        }
+
+        // Tab switching
+        document.querySelectorAll('.modal-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.modal-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+                tab.classList.add('active');
+                document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // Close modal on backdrop click
+        document.getElementById('request-modal').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) {
+                closeModal();
+            }
+        });
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                closeModal();
+            }
+        });
+
+        // Initial load
+        loadStats();
+        loadRecentRequests();
+
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            loadStats();
+            loadRecentRequests();
+        }, 30000);
+    </script>
+</body>
+</html>
