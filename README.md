@@ -35,12 +35,12 @@ Start the server with the `ghc-api` command:
 ghc-api
 ```
 
-By default, the server will start on `http://127.0.0.1:5000`.
+By default, the server will start on `http://localhost:8313`.
 
 ### Command Line Options
 
-- `-p PORT` or `--port PORT`: Specify the port to listen on (default: 5000)
-- `-h HOST` or `--host HOST`: Specify the host to listen on (default: 127.0.0.1)
+- `-p PORT` or `--port PORT`: Specify the port to listen on (default: 8313)
+- `-h HOST` or `--host HOST`: Specify the host to listen on (default: localhost)
 - `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
 - `--help`: Show help message
 
@@ -54,8 +54,8 @@ ghc-api --config
 
 The config file contains:
 ```yaml
-address: 127.0.0.1
-port: 5000
+address: localhost
+port: 8313
 account_type: individual
 ```
 
@@ -98,7 +98,7 @@ The application follows this priority for getting the GitHub token:
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:5000/v1",
+    base_url="http://localhost:8313/v1",
     api_key="not-needed"  # Token is managed by the proxy
 )
 
@@ -115,7 +115,7 @@ print(response.choices[0].message.content)
 import anthropic
 
 client = anthropic.Anthropic(
-    base_url="http://localhost:5000",
+    base_url="http://localhost:8313",
     api_key="not-needed"  # Token is managed by the proxy
 )
 
@@ -131,7 +131,7 @@ print(message.content[0].text)
 
 ```bash
 # Chat completions
-curl http://localhost:5000/v1/chat/completions \
+curl http://localhost:8313/v1/chat/completions \
   -H "Content-Type": application/json" \
   -d '{
     "model": "gpt-4o",
@@ -139,12 +139,12 @@ curl http://localhost:5000/v1/chat/completions \
   }'
 
 # List models
-curl http://localhost:5000/v1/models
+curl http://localhost:8313/v1/models
 ```
 
 ## Dashboard
 
-Access the web dashboard at `http://localhost:5000/` to:
+Access the web dashboard at `http://localhost:8313/` to:
 
 - View overall statistics (total requests, data transfer)
 - See per-model usage statistics
