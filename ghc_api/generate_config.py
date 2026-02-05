@@ -85,21 +85,17 @@ model_mappings:
 #
 # Example:
 # system_prompt_remove:
-#   - "<unwanted-tag>"
-#   - "Some text to filter out"
+#   - "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases."
 #
 # tool_result_suffix_remove:
-#   - "</tool-output>"
-#   - "<end-marker/>"
+#   - "<system-reminder>\\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\\n</system-reminder>\\n"
 #
 # system_prompt_add:
 #   - "Additional instruction for the model."
 #   - "Another instruction to append."
 
-system_prompt_remove:
-    - "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases."
-tool_result_suffix_remove:
-    - "<system-reminder>\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\n</system-reminder>\n"
+system_prompt_remove: []    
+tool_result_suffix_remove: []
 system_prompt_add: []
 
 """.format(
