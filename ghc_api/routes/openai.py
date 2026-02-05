@@ -16,6 +16,7 @@ from ..cache import cache
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
+from ..utils import log_error_request
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -130,6 +131,7 @@ def chat_completions():
 
             return jsonify(result)
         else:
+            log_error_request("/v1/chat/completions", payload, response.text, response.status_code)
             return Response(response.text, status=response.status_code, mimetype="application/json")
 
     except Exception as e:
