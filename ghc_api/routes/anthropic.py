@@ -39,14 +39,6 @@ def anthropic_messages():
             for msg in anthropic_payload.get("messages", [])
         )
 
-        is_agent_call = any(
-            msg.get("role") in ("assistant", "tool")
-            for msg in openai_payload.get("messages", [])
-        )
-
-        headers = get_copilot_headers(enable_vision)
-        headers["X-Initiator"] = "agent" if is_agent_call else "user"
-
         request_size = len(json.dumps(anthropic_payload))
 
         max_retries = 3
@@ -56,6 +48,13 @@ def anthropic_messages():
         for attempt in range(max_retries + 1):
             # Translate to OpenAI format
             openai_payload = translate_anthropic_to_openai(current_payload)
+            is_agent_call = any(
+            msg.get("role") in ("assistant", "tool")
+                for msg in openai_payload.get("messages", [])
+            )
+
+            headers = get_copilot_headers(enable_vision)
+            headers["X-Initiator"] = "agent" if is_agent_call else "user"
             if anthropic_payload.get("stream"):
                 return stream_anthropic_messages(openai_payload, headers, request_id,
                                                 anthropic_payload, request_size, start_time,
