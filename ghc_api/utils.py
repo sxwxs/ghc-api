@@ -1,7 +1,8 @@
+from datetime import datetime
 import json
 import os
 import platform
-from datetime import datetime
+from typing import Dict, List
 
 
 from .config import model_mappings
@@ -90,3 +91,136 @@ def print_available_models():
         supports_tool_calls = capabilities.get("supports", {}).get("tool_calls", False)
         print(f"{model_id:30}\tctx: {max_context_window_tokens} in: {max_input_tokens or 'N/A'}\t out: {max_output_tokens or 'N/A'}\t({'Vision,' if supports_vision else ''}{'Tool,' if supports_tool_calls else ''}{'Preview' if preview else ''})")
     print("\n" + "=" * 60 + "\n")
+
+
+# ============================================================================
+# Orphaned Tool Result Handling
+# ============================================================================
+
+# Log file for orphaned tool_result cleanup events
+TOOL_RESULT_CLEANUP_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_result_cleanup.jl")
+
+def log_tool_result_cleanup(log_entry: Dict) -> None:
+    """
+    Write a cleanup event to the JSON Lines log file.
+
+    Log entry contains:
+    - timestamp: when the cleanup occurred
+    - original_request: the original request payload
+    - error_response: the error response from backend
+    - orphaned_ids: list of orphaned tool_use_ids found
+    - modified_request: the cleaned request payload
+    - final_status_code: status code after retry
+    - final_response: response after retry (success or error)
+    """
+    try:
+        log_entry["timestamp"] = datetime.now().isoformat()
+        with open(TOOL_RESULT_CLEANUP_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[Tool Result Cleanup] Failed to write log: {e}")
+
+
+def extract_orphaned_tool_use_ids(error_response: str) -> List[str]:
+    """
+    Extract orphaned tool_use_id(s) from an Anthropic error response.
+
+    Error format example:
+    {"error":{"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",
+    \"message\":\"messages.0.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_xxx.
+    Each `tool_result` block must have a corresponding `tool_use` block in the previous message.\"}}"}}
+    """
+    orphaned_ids = []
+
+    # Look for the specific error pattern without regex
+    # Pattern: "unexpected `tool_use_id` found in `tool_result` blocks: <id>"
+    marker = "unexpected `tool_use_id` found in `tool_result` blocks: "
+    start_idx = error_response.find(marker)
+    if start_idx != -1:
+        start_idx += len(marker)
+        # Find the end of the ID (ends with period, space, quote, or backslash)
+        end_idx = start_idx
+        while end_idx < len(error_response):
+            char = error_response[end_idx]
+            if char in ".  \"\\'\\n":
+                break
+            end_idx += 1
+        tool_id = error_response[start_idx:end_idx].strip()
+        if tool_id:
+            orphaned_ids.append(tool_id)
+
+    # Fallback: find all toolu_ prefixed IDs in the error
+    if not orphaned_ids:
+        search_str = error_response
+        prefix = "toolu_"
+        while prefix in search_str:
+            idx = search_str.find(prefix)
+            # Extract the ID (alphanumeric, underscore, hyphen)
+            end_idx = idx + len(prefix)
+            while end_idx < len(search_str):
+                char = search_str[end_idx]
+                if char.isalnum() or char in "_-":
+                    end_idx += 1
+                else:
+                    break
+            tool_id = search_str[idx:end_idx]
+            if tool_id and tool_id not in orphaned_ids:
+                orphaned_ids.append(tool_id)
+            search_str = search_str[end_idx:]
+
+    return orphaned_ids
+
+
+def remove_orphaned_tool_results(messages: List[Dict], orphaned_ids: List[str]) -> List[Dict]:
+    """
+    Remove tool_result blocks with orphaned tool_use_ids from messages.
+
+    This modifies the messages to remove tool_result blocks that don't have
+    a corresponding tool_use block in a previous assistant message.
+    """
+    if not orphaned_ids:
+        return messages
+
+    orphaned_set = set(orphaned_ids)
+    cleaned_messages = []
+
+    for msg in messages:
+        if msg.get("role") != "user":
+            cleaned_messages.append(msg)
+            continue
+
+        content = msg.get("content")
+        if not isinstance(content, list):
+            cleaned_messages.append(msg)
+            continue
+
+        # Filter out orphaned tool_result blocks
+        cleaned_content = []
+        removed_count = 0
+        for block in content:
+            if block.get("type") == "tool_result":
+                tool_use_id = block.get("tool_use_id", "")
+                if tool_use_id in orphaned_set:
+                    print(f"[Tool Result Cleanup] Removing orphaned tool_result with id: {tool_use_id}")
+                    removed_count += 1
+                    continue
+            cleaned_content.append(block)
+
+        if removed_count > 0:
+            if cleaned_content:
+                # Keep the message with remaining content
+                cleaned_msg = dict(msg)
+                cleaned_msg["content"] = cleaned_content
+                cleaned_messages.append(cleaned_msg)
+            # If no content left, skip the message entirely
+        else:
+            cleaned_messages.append(msg)
+
+    return cleaned_messages
+
+
+def is_orphaned_tool_result_error(status_code: int, response_text: str) -> bool:
+    """Check if the error is about orphaned tool_result blocks"""
+    if status_code != 400:
+        return False
+    return "tool_use_id" in response_text and "tool_result" in response_text

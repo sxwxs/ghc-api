@@ -14,7 +14,7 @@ from ..api_helpers import ensure_copilot_token, get_copilot_base_url, get_copilo
 from ..cache import cache
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
 from ..translator import translate_anthropic_to_openai, translate_model_name, translate_openai_to_anthropic
-from ..utils import log_error_request
+from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup
 
 anthropic_bp = Blueprint('anthropic', __name__)
 
@@ -31,9 +31,6 @@ def anthropic_messages():
         # Get the original and translated model names
         original_model = anthropic_payload.get("model", "unknown")
         translated_model = translate_model_name(original_model)
-
-        # Translate to OpenAI format
-        openai_payload = translate_anthropic_to_openai(anthropic_payload)
 
         # Check for vision content
         enable_vision = any(
@@ -52,44 +49,78 @@ def anthropic_messages():
 
         request_size = len(json.dumps(anthropic_payload))
 
-        if anthropic_payload.get("stream"):
-            return stream_anthropic_messages(openai_payload, headers, request_id,
-                                             anthropic_payload, request_size, start_time,
-                                             original_model, translated_model)
-
-        # Non-streaming request
-        response = requests.post(
-            f"{get_copilot_base_url()}/chat/completions",
-            headers=headers,
-            json=openai_payload,
-            timeout=1200,
-        )
-
+        max_retries = 3
+        current_payload = anthropic_payload
         duration = round(time.time() - start_time, 2)
+        cleanup_log_entry = None
+        for attempt in range(max_retries + 1):
+            # Translate to OpenAI format
+            openai_payload = translate_anthropic_to_openai(current_payload)
+            if anthropic_payload.get("stream"):
+                return stream_anthropic_messages(openai_payload, headers, request_id,
+                                                anthropic_payload, request_size, start_time,
+                                                original_model, translated_model)
+            # Non-streaming request
+            response = requests.post(
+                f"{get_copilot_base_url()}/chat/completions",
+                headers=headers,
+                json=openai_payload,
+                timeout=1200,
+            )
+            
+            if response.ok:
+                openai_response = response.json()
+                anthropic_response = translate_openai_to_anthropic(openai_response)
 
-        if response.ok:
-            openai_response = response.json()
-            anthropic_response = translate_openai_to_anthropic(openai_response)
+                # Cache the request/response
+                usage = openai_response.get("usage", {})
+                cache.add_request(request_id, {
+                    "request_body": current_payload,
+                    "response_body": anthropic_response,
+                    "model": original_model,
+                    "translated_model": translated_model if translated_model != original_model else None,
+                    "endpoint": "/v1/messages",
+                    "status_code": response.status_code,
+                    "request_size": request_size,
+                    "response_size": len(json.dumps(anthropic_response)),
+                    "input_tokens": usage.get("prompt_tokens", 0),
+                    "output_tokens": usage.get("completion_tokens", 0),
+                    "duration": duration,
+                })
 
-            # Cache the request/response
-            usage = openai_response.get("usage", {})
-            cache.add_request(request_id, {
-                "request_body": anthropic_payload,
-                "response_body": anthropic_response,
-                "model": original_model,
-                "translated_model": translated_model if translated_model != original_model else None,
-                "endpoint": "/v1/messages",
-                "status_code": response.status_code,
-                "request_size": request_size,
-                "response_size": len(json.dumps(anthropic_response)),
-                "input_tokens": usage.get("prompt_tokens", 0),
-                "output_tokens": usage.get("completion_tokens", 0),
-                "duration": duration,
-            })
+                return jsonify(anthropic_response)
+            else:
+                log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
+                if is_orphaned_tool_result_error(response.status_code, response.text):
+                    orphaned_ids = extract_orphaned_tool_use_ids(response.text)
+                    if orphaned_ids:
+                        print(f"[Anthropic API] Attempt {attempt + 1}: Found orphaned tool_result IDs: {orphaned_ids}")
 
-            return jsonify(anthropic_response)
-        else:
-            log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
+                        # Start building log entry on first cleanup attempt
+                        if cleanup_log_entry is None:
+                            cleanup_log_entry = {
+                                "request_id": request_id,
+                                "original_request": anthropic_payload,
+                                "error_response": response.text,
+                                "error_status_code": response.status_code,
+                                "orphaned_ids": orphaned_ids,
+                            }
+                        else:
+                            # Append additional orphaned IDs if multiple retries needed
+                            cleanup_log_entry["orphaned_ids"].extend(orphaned_ids)
+
+                        cleaned_messages = remove_orphaned_tool_results(
+                            current_payload.get("messages", []), orphaned_ids
+                        )
+                        current_payload = dict(current_payload)
+                        current_payload["messages"] = cleaned_messages
+                        print(f"[Anthropic API] Retrying with cleaned messages...")
+                        continue
+            if cleanup_log_entry is not None:
+                cleanup_log_entry["modified_request"] = current_payload
+                cleanup_log_entry["final_status_code"] = response.status_code
+                cleanup_log_entry["final_response"] = anthropic_response
+                log_tool_result_cleanup(cleanup_log_entry)
             return Response(response.text, status=response.status_code, mimetype="application/json")
 
     # except Exception as e:
