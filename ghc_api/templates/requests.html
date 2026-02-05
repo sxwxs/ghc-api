@@ -986,14 +986,11 @@
                 totalPages = data.total_pages || 1;
 
                 const listContainer = document.getElementById('request-list');
-                const emptyState = document.getElementById('empty-state');
                 const requestCount = document.getElementById('request-count');
 
                 requestCount.textContent = `${data.total || 0} requests`;
 
                 if (data.items && data.items.length > 0) {
-                    emptyState.style.display = 'none';
-
                     // Build list HTML
                     let html = '';
                     for (const item of data.items) {
@@ -1032,9 +1029,12 @@
                     listContainer.innerHTML = html;
                     listContainer.scrollTop = scrollTop;
                 } else {
-                    listContainer.innerHTML = '';
-                    listContainer.appendChild(emptyState);
-                    emptyState.style.display = 'flex';
+                    listContainer.innerHTML = `
+                        <div class="empty-list" id="empty-state" style="display: flex;">
+                            <h3>No requests yet</h3>
+                            <p>Requests will appear here as they are made.</p>
+                        </div>
+                    `;
                 }
 
                 renderPagination(data.total);
@@ -1356,9 +1356,6 @@
 
         // Initial load
         loadRequests();
-
-        // Auto-refresh every 5 seconds
-        setInterval(loadRequests, 5000);
     </script>
 </body>
 </html>
