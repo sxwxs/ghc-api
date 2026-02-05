@@ -13,13 +13,29 @@ DEBUG = os.environ.get("DEBUG", "true").lower() == "true"
 
 # API Configuration
 GITHUB_API_BASE_URL = "https://api.github.com"
-COPILOT_API_BASE_URL = "https://api.githubcopilot.com"
+# COPILOT_API_BASE_URL = "https://api.githubcopilot.com"
 
-COPILOT_VERSION = "0.26.7"
-EDITOR_PLUGIN_VERSION = f"copilot-chat/{COPILOT_VERSION}"
-USER_AGENT = f"GitHubCopilotChat/{COPILOT_VERSION}"
-API_VERSION = "2025-04-01"
-VSCODE_VERSION = "1.93.0"
+# Default values (can be overridden by config file)
+DEFAULT_COPILOT_VERSION = "0.26.7"
+DEFAULT_API_VERSION = "2025-04-01"
+DEFAULT_VSCODE_VERSION = "1.93.0"
+
+# Default model mappings (will be replaced if config file includes model_mappings)
+DEFAULT_MODEL_MAPPINGS = {
+    "exact": {
+        # Add exact model name mappings here
+        'opus': 'claude-opus-4.5',
+        'sonnet': 'claude-sonnet-4.5',
+        'haiku': 'claude-haiku-4.5'
+    },
+    "prefix": {
+        # Prefix-based mappings: if model name starts with the key, replace with value
+        "claude-sonnet-4-": "claude-sonnet-4",
+        "claude-opus-4-": "claude-opus-4",
+        "claude-opus-4.5-": "claude-opus-4.5",
+        "claude-haiku-4.5-": "claude-haiku-4.5",
+    }
+}
 
 # GitHub OAuth App for Device Flow (using GitHub CLI's client ID as it's public)
 GITHUB_OAUTH_CLIENT_ID = "01ab8ac9400c4e429b23"
@@ -50,7 +66,11 @@ class ModelMappings:
         """Load mappings from config dictionary"""
         model_mappings = config.get("model_mappings", {})
         self.exact_mappings = model_mappings.get("exact", {})
+        if self.exact_mappings is None:
+            self.exact_mappings = {}
         self.prefix_mappings = model_mappings.get("prefix", {})
+        if self.prefix_mappings is None:
+            self.prefix_mappings = {}
 
 
 # Global model mappings instance

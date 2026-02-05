@@ -2,7 +2,7 @@ import os
 import platform
 
 from .utils import get_config_dir
-from .config import COPILOT_VERSION, API_VERSION, VSCODE_VERSION
+from .config import DEFAULT_COPILOT_VERSION, DEFAULT_API_VERSION, DEFAULT_VSCODE_VERSION
 
 def generate_config_file():
     """Generate a YAML config file in the config directory with comments"""
@@ -33,12 +33,11 @@ debug: false
 account_type: individual
 
 # VSCode Version (only used to build request headers)
-vscode_version: {vscode_version}
+vscode_version: "{vscode_version}"
 # GitHub API version to use (only used to build request headers)
-api_version: {api_version}
+api_version: "{api_version}"
 # Copilot extension version to emulate (only used to build request headers)
-copilot_version: {copilot_version}
-
+copilot_version: "{copilot_version}"
 # Model Name Mappings
 # -------------------
 # Translate incoming model names to different names for the Copilot API.
@@ -57,8 +56,9 @@ model_mappings:
   # Exact match mappings (full model name -> target model name)
   exact:
     # Example:
-    # gpt-4-turbo-preview: gpt-4-turbo
-    # claude-3-opus-20240229: claude-3-opus
+    opus: claude-opus-4.5
+    sonnet: claude-sonnet-4.5
+    haiku: claude-haiku-4.5
 
   # Prefix match mappings (model name prefix -> target model name)
   # If a model name starts with the key, it will be replaced with the value
@@ -66,13 +66,11 @@ model_mappings:
     claude-sonnet-4-: claude-sonnet-4
     claude-haiku-4.5-: claude-haiku-4.5
     claude-opus-4.5-: claude-opus-4.5
-    opus: claude-opus-4.5
-    sonnet: claude-sonnet-4.5
-    haiku: claude-haiku-4.5
+    
 """.format(
-        vscode_version=VSCODE_VERSION,
-        api_version=API_VERSION,
-        copilot_version=COPILOT_VERSION
+        vscode_version=DEFAULT_VSCODE_VERSION,
+        api_version=DEFAULT_API_VERSION,
+        copilot_version=DEFAULT_COPILOT_VERSION
     )
     if os.path.exists(config_path):
         print(f"Configuration file already exists at: {config_path}")

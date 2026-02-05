@@ -3,10 +3,8 @@ GitHub token management including Device Flow authentication
 """
 
 import os
-import platform
 import time
 from typing import Optional
-
 import requests
 
 from .config import GITHUB_OAUTH_CLIENT_ID

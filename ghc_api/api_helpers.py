@@ -8,12 +8,7 @@ from typing import Dict, List
 
 import requests
 
-from .config import (
-    API_VERSION,
-    EDITOR_PLUGIN_VERSION,
-    GITHUB_API_BASE_URL,
-    USER_AGENT,
-)
+from .config import GITHUB_API_BASE_URL
 from .state import state
 
 
@@ -31,9 +26,9 @@ def get_github_headers() -> Dict[str, str]:
         "Accept": "application/json",
         "Authorization": f"token {state.github_token}",
         "Editor-Version": f"vscode/{state.vscode_version}",
-        "Editor-Plugin-Version": EDITOR_PLUGIN_VERSION,
-        "User-Agent": USER_AGENT,
-        "X-GitHub-Api-Version": API_VERSION,
+        "Editor-Plugin-Version": state.editor_plugin_version,
+        "User-Agent": state.user_agent,
+        "X-GitHub-Api-Version": state.api_version,
         "X-VSCode-User-Agent-Library-Version": "electron-fetch",
     }
 
@@ -45,13 +40,16 @@ def get_copilot_headers(enable_vision: bool = False) -> Dict[str, str]:
         "Content-Type": "application/json",
         "Copilot-Integration-Id": "vscode-chat",
         "Editor-Version": f"vscode/{state.vscode_version}",
-        "Editor-Plugin-Version": EDITOR_PLUGIN_VERSION,
-        "User-Agent": USER_AGENT,
+        "Editor-Plugin-Version": state.editor_plugin_version,
+        "User-Agent": state.user_agent,
         "OpenAI-Intent": "conversation-panel",
-        "X-GitHub-Api-Version": API_VERSION,
+        "X-GitHub-Api-Version": state.api_version,
         "X-Request-Id": str(uuid.uuid4()),
         "X-VSCode-User-Agent-Library-Version": "electron-fetch",
     }
+    if enable_vision:
+        headers["Copilot-Vision-Request"] = "true"
+    return headers
     if enable_vision:
         headers["Copilot-Vision-Request"] = "true"
     return headers

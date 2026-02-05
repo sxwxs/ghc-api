@@ -52,9 +52,8 @@ def initialize_app() -> None:
     # Update the state with the token
     state.github_token = token
 
-    try:
-        refresh_copilot_token()
-        fetch_models()
-        print("Application initialized successfully")
-    except Exception as e:
-        print(f"Failed to initialize: {e}")
+
+    refresh_copilot_token()
+    fetch_models()
+    print("Application initialized successfully")
+
