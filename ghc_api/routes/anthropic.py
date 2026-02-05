@@ -13,7 +13,7 @@ from flask import Blueprint, Response, jsonify, request, stream_with_context
 from ..api_helpers import ensure_copilot_token, get_copilot_base_url, get_copilot_headers
 from ..cache import cache
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
-from ..translator import translate_anthropic_to_openai, translate_openai_to_anthropic
+from ..translator import translate_anthropic_to_openai, translate_model_name, translate_openai_to_anthropic
 
 anthropic_bp = Blueprint('anthropic', __name__)
 
@@ -26,6 +26,10 @@ def anthropic_messages():
         ensure_copilot_token()
         anthropic_payload = request.get_json()
         request_id = str(uuid.uuid4())
+
+        # Get the original and translated model names
+        original_model = anthropic_payload.get("model", "unknown")
+        translated_model = translate_model_name(original_model)
 
         # Translate to OpenAI format
         openai_payload = translate_anthropic_to_openai(anthropic_payload)
@@ -49,7 +53,8 @@ def anthropic_messages():
 
         if anthropic_payload.get("stream"):
             return stream_anthropic_messages(openai_payload, headers, request_id,
-                                             anthropic_payload, request_size, start_time)
+                                             anthropic_payload, request_size, start_time,
+                                             original_model, translated_model)
 
         # Non-streaming request
         response = requests.post(
@@ -70,7 +75,8 @@ def anthropic_messages():
             cache.add_request(request_id, {
                 "request_body": anthropic_payload,
                 "response_body": anthropic_response,
-                "model": anthropic_payload.get("model", "unknown"),
+                "model": original_model,
+                "translated_model": translated_model if translated_model != original_model else None,
                 "endpoint": "/v1/messages",
                 "status_code": response.status_code,
                 "request_size": request_size,
@@ -89,12 +95,14 @@ def anthropic_messages():
 
 
 def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: str,
-                              anthropic_payload: Dict, request_size: int, start_time: float) -> Response:
+                              anthropic_payload: Dict, request_size: int, start_time: float,
+                              original_model: str, translated_model: str) -> Response:
     """Handle streaming Anthropic messages"""
     # Start tracking request immediately
     cache.start_request(request_id, {
         "request_body": anthropic_payload,
-        "model": anthropic_payload.get("model", "unknown"),
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
         "request_size": request_size,
     })
@@ -185,7 +193,8 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         cache.complete_request(request_id, {
             "request_body": anthropic_payload,
             "response_body": anthropic_response,
-            "model": anthropic_payload.get("model", "unknown"),
+            "model": original_model,
+            "translated_model": translated_model if translated_model != original_model else None,
             "endpoint": "/v1/messages",
             "status_code": status_code,
             "request_size": request_size,

@@ -15,6 +15,7 @@ from ..api_helpers import ensure_copilot_token, get_copilot_base_url, get_copilo
 from ..cache import cache
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
+from ..translator import translate_model_name
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -62,6 +63,15 @@ def chat_completions():
         payload = request.get_json()
         request_id = str(uuid.uuid4())
 
+        # Get the original and translated model names
+        original_model = payload.get("model", "unknown")
+        translated_model = translate_model_name(original_model)
+
+        # Update payload with translated model if different
+        if translated_model != original_model:
+            payload = dict(payload)
+            payload["model"] = translated_model
+
         # Check for vision content
         enable_vision = False
         for msg in payload.get("messages", []):
@@ -84,7 +94,8 @@ def chat_completions():
         request_size = len(request_body)
 
         if payload.get("stream"):
-            return stream_chat_completions(payload, headers, request_id, request_body, request_size, start_time)
+            return stream_chat_completions(payload, headers, request_id, request_body, request_size, start_time,
+                                           original_model, translated_model)
 
         # Non-streaming request
         response = requests.post(
@@ -106,7 +117,8 @@ def chat_completions():
             cache.add_request(request_id, {
                 "request_body": payload,
                 "response_body": result,
-                "model": payload.get("model", "unknown"),
+                "model": original_model,
+                "translated_model": translated_model if translated_model != original_model else None,
                 "endpoint": "/v1/chat/completions",
                 "status_code": response.status_code,
                 "request_size": request_size,
@@ -125,12 +137,14 @@ def chat_completions():
 
 
 def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
-                            request_body: str, request_size: int, start_time: float) -> Response:
+                            request_body: str, request_size: int, start_time: float,
+                            original_model: str, translated_model: str) -> Response:
     """Handle streaming chat completions"""
     # Start tracking request immediately
     cache.start_request(request_id, {
         "request_body": payload,
-        "model": payload.get("model", "unknown"),
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/chat/completions",
         "request_size": request_size,
     })
@@ -218,7 +232,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         cache.complete_request(request_id, {
             "request_body": payload,
             "response_body": reconstructed_response,
-            "model": payload.get("model", "unknown"),
+            "model": original_model,
+            "translated_model": translated_model if translated_model != original_model else None,
             "endpoint": "/v1/chat/completions",
             "status_code": status_code,
             "request_size": request_size,

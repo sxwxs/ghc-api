@@ -84,31 +84,41 @@
             color: #333;
         }
 
-        .detail-tabs {
+        .detail-controls {
             display: flex;
+            gap: 1.5rem;
+            padding: 0.75rem 1rem;
             border-bottom: 1px solid #eee;
             background: #fafafa;
+            flex-wrap: wrap;
+            align-items: center;
         }
 
-        .detail-tab {
-            padding: 0.6rem 1rem;
-            border: none;
-            background: none;
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
             cursor: pointer;
-            color: #666;
             font-size: 0.8125rem;
-            font-weight: 500;
-            border-bottom: 2px solid transparent;
-            margin-bottom: -1px;
+            color: #555;
         }
 
-        .detail-tab.active {
-            color: #667eea;
-            border-bottom-color: #667eea;
+        .checkbox-group input[type="checkbox"] {
+            cursor: pointer;
+            width: 16px;
+            height: 16px;
         }
 
-        .detail-tab:hover:not(.active) {
-            color: #333;
+        .checkbox-group .sub-checkbox {
+            margin-left: 0.5rem;
+            padding-left: 0.5rem;
+            border-left: 1px solid #ddd;
         }
 
         .detail-content {
@@ -126,12 +136,25 @@
             font-size: 0.9375rem;
         }
 
-        .tab-pane {
+        .detail-section {
+            margin-bottom: 1.5rem;
+        }
+
+        .detail-section:last-child {
+            margin-bottom: 0;
+        }
+
+        .detail-section.hidden {
             display: none;
         }
 
-        .tab-pane.active {
-            display: block;
+        .section-title {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #667eea;
+            margin-bottom: 0.75rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #667eea;
         }
 
         .overview-grid {
@@ -179,6 +202,105 @@
         .json-number { color: #b5cea8; }
         .json-boolean { color: #569cd6; }
         .json-null { color: #569cd6; }
+
+        /* Parsed message styles */
+        .parsed-content {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .message-box {
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            border-left: 4px solid;
+        }
+
+        .message-box.role-user {
+            background: #e3f2fd;
+            border-left-color: #1976d2;
+        }
+
+        .message-box.role-assistant {
+            background: #f3e5f5;
+            border-left-color: #7b1fa2;
+        }
+
+        .message-box.role-system {
+            background: #fff3e0;
+            border-left-color: #e65100;
+        }
+
+        .message-box.role-tool {
+            background: #e8f5e9;
+            border-left-color: #2e7d32;
+        }
+
+        .message-role {
+            font-size: 0.6875rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+            opacity: 0.8;
+        }
+
+        .message-content {
+            font-size: 0.8125rem;
+            line-height: 1.5;
+        }
+
+        .message-content pre {
+            background: rgba(0, 0, 0, 0.05);
+            padding: 0.5rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.75rem;
+            margin: 0.5rem 0;
+        }
+
+        .content-block {
+            margin-bottom: 0.5rem;
+            padding: 0.5rem;
+            background: rgba(255, 255, 255, 0.5);
+            border-radius: 4px;
+        }
+
+        .content-block:last-child {
+            margin-bottom: 0;
+        }
+
+        .content-block-type {
+            font-size: 0.625rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #666;
+            margin-bottom: 0.25rem;
+        }
+
+        .tool-use-block {
+            background: #e0e7ff;
+            padding: 0.5rem;
+            border-radius: 4px;
+            margin-top: 0.5rem;
+        }
+
+        .tool-use-name {
+            font-weight: 600;
+            font-size: 0.75rem;
+            color: #3730a3;
+        }
+
+        .tool-use-input {
+            font-family: monospace;
+            font-size: 0.6875rem;
+            background: rgba(0, 0, 0, 0.05);
+            padding: 0.5rem;
+            border-radius: 4px;
+            margin-top: 0.25rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
 
         /* Right panel - Request list */
         .list-panel {
@@ -338,6 +460,12 @@
             border-radius: 12px;
             font-size: 0.6875rem;
             font-weight: 600;
+        }
+
+        .model-translated {
+            font-size: 0.625rem;
+            color: #888;
+            margin-left: 0.25rem;
         }
 
         .endpoint-badge {
@@ -525,24 +653,50 @@
             <div class="detail-header" id="detail-header">
                 <h2>Select a request to view details</h2>
             </div>
-            <div class="detail-tabs" id="detail-tabs" style="display: none;">
-                <button class="detail-tab active" data-tab="overview">Overview</button>
-                <button class="detail-tab" data-tab="request">Request</button>
-                <button class="detail-tab" data-tab="response">Response</button>
+            <div class="detail-controls" id="detail-controls" style="display: none;">
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="show-overview" checked>
+                        Overview
+                    </label>
+                </div>
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="show-request" checked>
+                        Request
+                    </label>
+                    <label class="sub-checkbox">
+                        <input type="checkbox" id="parse-request">
+                        Parsed
+                    </label>
+                </div>
+                <div class="checkbox-group">
+                    <label>
+                        <input type="checkbox" id="show-response" checked>
+                        Response
+                    </label>
+                    <label class="sub-checkbox">
+                        <input type="checkbox" id="parse-response">
+                        Parsed
+                    </label>
+                </div>
             </div>
             <div class="detail-content">
                 <div class="detail-empty" id="detail-empty">
                     <span>Click on a request from the list to view its details</span>
                 </div>
                 <div id="detail-panes" style="display: none;">
-                    <div class="tab-pane active" id="pane-overview">
+                    <div class="detail-section" id="section-overview">
+                        <div class="section-title">Overview</div>
                         <div class="overview-grid" id="overview-content"></div>
                     </div>
-                    <div class="tab-pane" id="pane-request">
-                        <pre class="json-display" id="request-json"></pre>
+                    <div class="detail-section" id="section-request">
+                        <div class="section-title">Request</div>
+                        <div id="request-content"></div>
                     </div>
-                    <div class="tab-pane" id="pane-response">
-                        <pre class="json-display" id="response-json"></pre>
+                    <div class="detail-section" id="section-response">
+                        <div class="section-title">Response</div>
+                        <div id="response-content"></div>
                     </div>
                 </div>
             </div>
@@ -592,6 +746,7 @@
         let searchType = 'basic';
         let searchTimeout = null;
         let selectedRequestId = null;
+        let currentRequestData = null;
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -614,6 +769,12 @@
                 'error': 'Error'
             };
             return labels[state] || state || 'Unknown';
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
 
         function syntaxHighlight(json) {
@@ -640,6 +801,166 @@
                 }
                 return '<span class="' + cls + '">' + match + '</span>';
             });
+        }
+
+        function renderParsedRequest(requestBody) {
+            if (!requestBody) return '<div class="message-box">No request body</div>';
+
+            let html = '<div class="parsed-content">';
+
+            // Handle system message
+            const system = requestBody.system;
+            if (system) {
+                html += `<div class="message-box role-system">
+                    <div class="message-role">System</div>
+                    <div class="message-content">`;
+                if (typeof system === 'string') {
+                    html += `<pre>${escapeHtml(system)}</pre>`;
+                } else if (Array.isArray(system)) {
+                    for (const block of system) {
+                        if (block.type === 'text') {
+                            html += `<pre>${escapeHtml(block.text || '')}</pre>`;
+                        }
+                    }
+                }
+                html += `</div></div>`;
+            }
+
+            // Handle messages
+            const messages = requestBody.messages || [];
+            for (const msg of messages) {
+                const role = msg.role || 'unknown';
+                const roleClass = `role-${role}`;
+
+                html += `<div class="message-box ${roleClass}">
+                    <div class="message-role">${escapeHtml(role)}</div>
+                    <div class="message-content">`;
+
+                const content = msg.content;
+                if (typeof content === 'string') {
+                    html += `<pre>${escapeHtml(content)}</pre>`;
+                } else if (Array.isArray(content)) {
+                    for (const block of content) {
+                        html += `<div class="content-block">`;
+                        const blockType = block.type || 'unknown';
+                        html += `<div class="content-block-type">${escapeHtml(blockType)}</div>`;
+
+                        if (blockType === 'text') {
+                            html += `<pre>${escapeHtml(block.text || '')}</pre>`;
+                        } else if (blockType === 'thinking') {
+                            html += `<pre>${escapeHtml(block.thinking || '')}</pre>`;
+                        } else if (blockType === 'tool_use') {
+                            html += `<div class="tool-use-block">
+                                <div class="tool-use-name">${escapeHtml(block.name || 'Unknown Tool')}</div>
+                                <div class="tool-use-input">${escapeHtml(JSON.stringify(block.input || {}, null, 2))}</div>
+                            </div>`;
+                        } else if (blockType === 'tool_result') {
+                            html += `<div class="tool-use-block">
+                                <div class="tool-use-name">Result for: ${escapeHtml(block.tool_use_id || '')}</div>
+                                <div class="tool-use-input">${escapeHtml(typeof block.content === 'string' ? block.content : JSON.stringify(block.content || {}, null, 2))}</div>
+                            </div>`;
+                        } else if (blockType === 'image') {
+                            html += `<div>[Image: ${escapeHtml(block.source?.media_type || 'unknown type')}]</div>`;
+                        } else {
+                            html += `<pre>${escapeHtml(JSON.stringify(block, null, 2))}</pre>`;
+                        }
+                        html += `</div>`;
+                    }
+                } else if (content) {
+                    html += `<pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>`;
+                }
+
+                html += `</div></div>`;
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        function renderParsedResponse(responseBody) {
+            if (!responseBody) return '<div class="message-box">No response body</div>';
+
+            let html = '<div class="parsed-content">';
+
+            // Response is typically an assistant message
+            html += `<div class="message-box role-assistant">
+                <div class="message-role">Assistant Response</div>
+                <div class="message-content">`;
+
+            const content = responseBody.content;
+            if (typeof content === 'string') {
+                html += `<pre>${escapeHtml(content)}</pre>`;
+            } else if (Array.isArray(content)) {
+                for (const block of content) {
+                    html += `<div class="content-block">`;
+                    const blockType = block.type || 'unknown';
+                    html += `<div class="content-block-type">${escapeHtml(blockType)}</div>`;
+
+                    if (blockType === 'text') {
+                        html += `<pre>${escapeHtml(block.text || '')}</pre>`;
+                    } else if (blockType === 'thinking') {
+                        html += `<pre>${escapeHtml(block.thinking || '')}</pre>`;
+                    } else if (blockType === 'tool_use') {
+                        html += `<div class="tool-use-block">
+                            <div class="tool-use-name">${escapeHtml(block.name || 'Unknown Tool')}</div>
+                            <div class="tool-use-input">${escapeHtml(JSON.stringify(block.input || {}, null, 2))}</div>
+                        </div>`;
+                    } else {
+                        html += `<pre>${escapeHtml(JSON.stringify(block, null, 2))}</pre>`;
+                    }
+                    html += `</div>`;
+                }
+            } else if (content) {
+                html += `<pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>`;
+            }
+
+            html += `</div></div>`;
+
+            // Show usage info if available
+            const usage = responseBody.usage;
+            if (usage) {
+                html += `<div class="message-box role-system">
+                    <div class="message-role">Usage</div>
+                    <div class="message-content">
+                        <pre>${escapeHtml(JSON.stringify(usage, null, 2))}</pre>
+                    </div>
+                </div>`;
+            }
+
+            html += '</div>';
+            return html;
+        }
+
+        function updateDetailView() {
+            if (!currentRequestData) return;
+
+            const data = currentRequestData;
+            const showOverview = document.getElementById('show-overview').checked;
+            const showRequest = document.getElementById('show-request').checked;
+            const showResponse = document.getElementById('show-response').checked;
+            const parseRequest = document.getElementById('parse-request').checked;
+            const parseResponse = document.getElementById('parse-response').checked;
+
+            // Toggle section visibility
+            document.getElementById('section-overview').classList.toggle('hidden', !showOverview);
+            document.getElementById('section-request').classList.toggle('hidden', !showRequest);
+            document.getElementById('section-response').classList.toggle('hidden', !showResponse);
+
+            // Update request content
+            const requestContent = document.getElementById('request-content');
+            if (parseRequest) {
+                requestContent.innerHTML = renderParsedRequest(data.request_body);
+            } else {
+                requestContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.request_body)}</pre>`;
+            }
+
+            // Update response content
+            const responseContent = document.getElementById('response-content');
+            if (parseResponse) {
+                responseContent.innerHTML = renderParsedResponse(data.response_body);
+            } else {
+                responseContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.response_body)}</pre>`;
+            }
         }
 
         async function loadRequests() {
@@ -682,6 +1003,12 @@
                         const timestamp = new Date(item.timestamp).toLocaleTimeString();
                         const date = new Date(item.timestamp).toLocaleDateString();
 
+                        // Show translated model if different from original
+                        let modelDisplay = item.model;
+                        if (item.translated_model && item.translated_model !== item.model) {
+                            modelDisplay = `${item.model}<span class="model-translated">→ ${item.translated_model}</span>`;
+                        }
+
                         html += `
                             <div class="request-item ${isSelected ? 'selected' : ''}" data-id="${item.id}" onclick="selectRequest('${item.id}')">
                                 <div class="request-item-header">
@@ -689,7 +1016,7 @@
                                     <span class="state-badge ${state}">${getStateLabel(state)}</span>
                                 </div>
                                 <div class="request-item-badges">
-                                    <span class="model-badge">${item.model}</span>
+                                    <span class="model-badge">${modelDisplay}</span>
                                     <span class="endpoint-badge">${item.endpoint}</span>
                                 </div>
                                 <div class="request-item-stats">
@@ -810,24 +1137,32 @@
         }
 
         function showRequestDetails(data) {
+            currentRequestData = data;
+
             document.getElementById('detail-empty').style.display = 'none';
             document.getElementById('detail-panes').style.display = 'block';
-            document.getElementById('detail-tabs').style.display = 'flex';
+            document.getElementById('detail-controls').style.display = 'flex';
 
             const state = data.state || 'completed';
             const statusCode = data.status_code !== null ? data.status_code : '-';
             const duration = data.duration !== null ? `${data.duration}s` : '-';
 
+            // Show translated model in header if different
+            let modelDisplay = data.model;
+            if (data.translated_model && data.translated_model !== data.model) {
+                modelDisplay = `${data.model} → ${data.translated_model}`;
+            }
+
             document.getElementById('detail-header').innerHTML = `
                 <h2>
-                    <span class="model-badge">${data.model}</span>
+                    <span class="model-badge">${modelDisplay}</span>
                     <span class="endpoint-badge">${data.endpoint}</span>
                     <span class="state-badge ${state}">${getStateLabel(state)}</span>
                 </h2>
             `;
 
             const overviewContent = document.getElementById('overview-content');
-            overviewContent.innerHTML = `
+            let overviewHtml = `
                 <div class="overview-item">
                     <label>Request ID</label>
                     <div class="value">${data.id}</div>
@@ -839,7 +1174,17 @@
                 <div class="overview-item">
                     <label>Model</label>
                     <div class="value">${data.model}</div>
-                </div>
+                </div>`;
+
+            if (data.translated_model && data.translated_model !== data.model) {
+                overviewHtml += `
+                <div class="overview-item">
+                    <label>Translated Model</label>
+                    <div class="value">${data.translated_model}</div>
+                </div>`;
+            }
+
+            overviewHtml += `
                 <div class="overview-item">
                     <label>Endpoint</label>
                     <div class="value">${data.endpoint}</div>
@@ -869,27 +1214,18 @@
                     <div class="value">${formatNumber(data.output_tokens)}</div>
                 </div>
             `;
+            overviewContent.innerHTML = overviewHtml;
 
-            document.getElementById('request-json').innerHTML = syntaxHighlight(data.request_body);
-            document.getElementById('response-json').innerHTML = syntaxHighlight(data.response_body);
-
-            // Reset to overview tab
-            document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-            document.querySelector('.detail-tab[data-tab="overview"]').classList.add('active');
-            document.getElementById('pane-overview').classList.add('active');
+            // Update the detail view based on checkbox states
+            updateDetailView();
         }
 
-        // Tab switching
-        document.querySelectorAll('.detail-tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                document.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('active'));
-                document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
-
-                tab.classList.add('active');
-                document.getElementById('pane-' + tab.dataset.tab).classList.add('active');
-            });
-        });
+        // Checkbox event listeners
+        document.getElementById('show-overview').addEventListener('change', updateDetailView);
+        document.getElementById('show-request').addEventListener('change', updateDetailView);
+        document.getElementById('show-response').addEventListener('change', updateDetailView);
+        document.getElementById('parse-request').addEventListener('change', updateDetailView);
+        document.getElementById('parse-response').addEventListener('change', updateDetailView);
 
         // Search type toggle
         document.querySelectorAll('.search-type-btn').forEach(btn => {

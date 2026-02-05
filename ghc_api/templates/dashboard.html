@@ -605,9 +605,16 @@
                     const state = item.state || 'completed';
                     const statusCode = item.status_code !== null ? item.status_code : '-';
                     const duration = item.duration !== null ? `${item.duration}s` : '-';
+
+                    // Show translated model if different
+                    let modelDisplay = item.model;
+                    if (item.translated_model && item.translated_model !== item.model) {
+                        modelDisplay = `${item.model} → ${item.translated_model}`;
+                    }
+
                     row.innerHTML = `
                         <td>${new Date(item.timestamp).toLocaleString()}</td>
-                        <td><span class="model-badge">${item.model}</span></td>
+                        <td><span class="model-badge">${modelDisplay}</span></td>
                         <td><span class="endpoint-badge">${item.endpoint}</span></td>
                         <td><span class="state-badge ${state}">${getStateLabel(state)}</span></td>
                         <td>${statusCode}</td>
@@ -631,8 +638,7 @@
                 const statusCode = data.status_code !== null ? data.status_code : '-';
                 const duration = data.duration !== null ? `${data.duration}s` : '-';
 
-                const overviewContent = document.getElementById('overview-content');
-                overviewContent.innerHTML = `
+                let overviewHtml = `
                     <div class="overview-item">
                         <label>Request ID</label>
                         <div class="value">${data.id}</div>
@@ -644,7 +650,17 @@
                     <div class="overview-item">
                         <label>Model</label>
                         <div class="value">${data.model}</div>
-                    </div>
+                    </div>`;
+
+                if (data.translated_model && data.translated_model !== data.model) {
+                    overviewHtml += `
+                    <div class="overview-item">
+                        <label>Translated Model</label>
+                        <div class="value">${data.translated_model}</div>
+                    </div>`;
+                }
+
+                overviewHtml += `
                     <div class="overview-item">
                         <label>Endpoint</label>
                         <div class="value">${data.endpoint}</div>
@@ -678,6 +694,9 @@
                         <div class="value">${formatNumber(data.output_tokens)}</div>
                     </div>
                 `;
+
+                const overviewContent = document.getElementById('overview-content');
+                overviewContent.innerHTML = overviewHtml;
 
                 document.getElementById('request-json').innerHTML = syntaxHighlight(data.request_body || {});
                 document.getElementById('response-json').innerHTML = syntaxHighlight(data.response_body || {});
