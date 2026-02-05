@@ -67,6 +67,14 @@ def main():
         if 'copilot_version' in config:
             state.copilot_version = config['copilot_version']
 
+        # Load content filtering settings
+        if 'system_prompt_remove' in config:
+            state.system_prompt_remove = config['system_prompt_remove'] or []
+        if 'tool_result_suffix_remove' in config:
+            state.tool_result_suffix_remove = config['tool_result_suffix_remove'] or []
+        if 'system_prompt_add' in config:
+            state.system_prompt_add = config['system_prompt_add'] or []
+
         # Load model mappings from config
         if 'model_mappings' in config:
             model_mappings.load_from_config(config)

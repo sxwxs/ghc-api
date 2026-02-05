@@ -3,7 +3,7 @@ Global application state management
 """
 
 import threading
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from .config import (
     GITHUB_TOKEN,
@@ -27,6 +27,11 @@ class State:
         self.vscode_version: str = DEFAULT_VSCODE_VERSION
         self.copilot_version: str = DEFAULT_COPILOT_VERSION
         self.api_version: str = DEFAULT_API_VERSION
+
+        # Content filtering settings
+        self.system_prompt_remove: List[str] = []
+        self.tool_result_suffix_remove: List[str] = []
+        self.system_prompt_add: List[str] = []
 
     @property
     def editor_plugin_version(self) -> str:

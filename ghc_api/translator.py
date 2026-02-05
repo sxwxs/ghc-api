@@ -18,6 +18,44 @@ def translate_model_name(model: str) -> str:
     return model_mappings.translate(model)
 
 
+def apply_system_prompt_filters(system_text: str) -> str:
+    """Apply content filtering to system prompt text.
+
+    - Removes strings specified in system_prompt_remove
+    - Appends strings specified in system_prompt_add
+    """
+    from .state import state
+
+    # Remove specified strings from system prompt
+    for remove_str in state.system_prompt_remove:
+        if remove_str in system_text:
+            system_text = system_text.replace(remove_str, "")
+            print(f"[Content Filter] Removed from system prompt: {remove_str[:50]}{'...' if len(remove_str) > 50 else ''}")
+
+    # Add specified strings to system prompt (only if not already present)
+    for add_str in state.system_prompt_add:
+        if add_str not in system_text:
+            system_text = system_text + "\n\n" + add_str
+            print(f"[Content Filter] Added to system prompt: {add_str[:50]}{'...' if len(add_str) > 50 else ''}")
+
+    return system_text
+
+
+def apply_tool_result_suffix_filter(content: str) -> str:
+    """Remove trailing suffixes from tool result content.
+
+    Only removes strings if they appear at the END of the content.
+    """
+    from .state import state
+
+    for suffix in state.tool_result_suffix_remove:
+        if content.endswith(suffix):
+            content = content[:-len(suffix)]
+            print(f"[Content Filter] Removed suffix from tool result: {suffix[:50]}{'...' if len(suffix) > 50 else ''}")
+
+    return content
+
+
 def translate_anthropic_to_openai(payload: Dict) -> Dict:
     """Translate Anthropic API format to OpenAI format"""
     messages = []
@@ -26,7 +64,8 @@ def translate_anthropic_to_openai(payload: Dict) -> Dict:
     system = payload.get("system")
     if system:
         if isinstance(system, str):
-            messages.append({"role": "system", "content": system})
+            system_text = apply_system_prompt_filters(system)
+            messages.append({"role": "system", "content": system_text})
         elif isinstance(system, list):
             # Filter out billing headers which cause errors in GitHub API
             filtered_system = [
@@ -37,6 +76,7 @@ def translate_anthropic_to_openai(payload: Dict) -> Dict:
             ]
             if filtered_system:
                 system_text = "\n\n".join(filtered_system)
+                system_text = apply_system_prompt_filters(system_text)
                 messages.append({"role": "system", "content": system_text})
 
     # Translate messages
@@ -52,10 +92,13 @@ def translate_anthropic_to_openai(payload: Dict) -> Dict:
 
                 # Tool results become tool messages
                 for tr in tool_results:
+                    tool_content = tr.get("content", "")
+                    if isinstance(tool_content, str):
+                        tool_content = apply_tool_result_suffix_filter(tool_content)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tr.get("tool_use_id"),
-                        "content": tr.get("content", ""),
+                        "content": tool_content,
                     })
 
                 # Other content

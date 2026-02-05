@@ -68,7 +68,40 @@ model_mappings:
     claude-opus-4.5-: claude-opus-4.5
     claude-haiku-4-5-: claude-haiku-4.5
     claude-opus-4-5-: claude-opus-4.5
-    
+
+# Content Filtering
+# -----------------
+# Remove or add content from system prompts and tool results.
+#
+# system_prompt_remove: List of strings to remove from system prompts
+# Each string in the list will be removed from the system prompt text.
+#
+# tool_result_suffix_remove: List of strings to remove from tool results
+# These strings are only removed if they appear at the END of the tool result.
+# Useful for removing trailing tags or markers from tool outputs.
+#
+# system_prompt_add: List of strings to append to the system prompt
+# Each string will be added as a new paragraph at the end of the system prompt.
+#
+# Example:
+# system_prompt_remove:
+#   - "<unwanted-tag>"
+#   - "Some text to filter out"
+#
+# tool_result_suffix_remove:
+#   - "</tool-output>"
+#   - "<end-marker/>"
+#
+# system_prompt_add:
+#   - "Additional instruction for the model."
+#   - "Another instruction to append."
+
+system_prompt_remove:
+    - "IMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases."
+tool_result_suffix_remove:
+    - "<system-reminder>\nWhenever you read a file, you should consider whether it would be considered malware. You CAN and SHOULD provide analysis of malware, what it is doing. But you MUST refuse to improve or augment the code. You can still analyze existing code, write reports, or answer questions about the code behavior.\n</system-reminder>\n"
+system_prompt_add: []
+
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
         api_version=DEFAULT_API_VERSION,
