@@ -66,6 +66,8 @@ model_mappings:
     claude-sonnet-4-: claude-sonnet-4
     claude-haiku-4.5-: claude-haiku-4.5
     claude-opus-4.5-: claude-opus-4.5
+    claude-haiku-4-5-: claude-haiku-4.5
+    claude-opus-4-5-: claude-opus-4.5
     
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
