@@ -1,9 +1,30 @@
+import json
 import os
 import platform
+from datetime import datetime
 
 
 from .config import model_mappings
 from .state import state
+
+
+def log_error_request(endpoint: str, request_body: dict, response_body: str, status_code: int):
+    """Log failed requests to error log file"""
+    log_dir = get_config_dir()
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "error.log")
+
+    timestamp = datetime.now().isoformat()
+    log_entry = {
+        "timestamp": timestamp,
+        "endpoint": endpoint,
+        "status_code": status_code,
+        "request": request_body,
+        "response": response_body,
+    }
+
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(log_entry) + "\n")
 
 
 def get_config_dir():

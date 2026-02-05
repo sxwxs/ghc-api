@@ -14,6 +14,7 @@ from ..api_helpers import ensure_copilot_token, get_copilot_base_url, get_copilo
 from ..cache import cache
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
 from ..translator import translate_anthropic_to_openai, translate_model_name, translate_openai_to_anthropic
+from ..utils import log_error_request
 
 anthropic_bp = Blueprint('anthropic', __name__)
 
@@ -88,6 +89,7 @@ def anthropic_messages():
 
             return jsonify(anthropic_response)
         else:
+            log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
             return Response(response.text, status=response.status_code, mimetype="application/json")
 
     # except Exception as e:
