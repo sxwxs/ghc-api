@@ -3,7 +3,7 @@
 Command-line interface for ghc-api
 """
 
-from ghc_api.main import main
+from ghc_api import main
 
 if __name__ == "__main__":
     main()

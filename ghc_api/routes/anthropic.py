@@ -1,0 +1,206 @@
+"""
+Anthropic-compatible API routes
+"""
+
+import json
+import time
+import uuid
+from typing import Dict, Generator
+
+import requests
+from flask import Blueprint, Response, jsonify, request, stream_with_context
+
+from ..api_helpers import ensure_copilot_token, get_copilot_base_url, get_copilot_headers
+from ..cache import cache
+from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
+from ..translator import translate_anthropic_to_openai, translate_openai_to_anthropic
+
+anthropic_bp = Blueprint('anthropic', __name__)
+
+
+@anthropic_bp.route("/v1/messages", methods=["POST"])
+def anthropic_messages():
+    """Handle Anthropic messages API"""
+    if True:
+        start_time = time.time()
+        ensure_copilot_token()
+        anthropic_payload = request.get_json()
+        request_id = str(uuid.uuid4())
+
+        # Translate to OpenAI format
+        openai_payload = translate_anthropic_to_openai(anthropic_payload)
+
+        # Check for vision content
+        enable_vision = any(
+            isinstance(msg.get("content"), list) and
+            any(p.get("type") == "image" for p in msg.get("content", []))
+            for msg in anthropic_payload.get("messages", [])
+        )
+
+        is_agent_call = any(
+            msg.get("role") in ("assistant", "tool")
+            for msg in openai_payload.get("messages", [])
+        )
+
+        headers = get_copilot_headers(enable_vision)
+        headers["X-Initiator"] = "agent" if is_agent_call else "user"
+
+        request_size = len(json.dumps(anthropic_payload))
+
+        if anthropic_payload.get("stream"):
+            return stream_anthropic_messages(openai_payload, headers, request_id,
+                                             anthropic_payload, request_size, start_time)
+
+        # Non-streaming request
+        response = requests.post(
+            f"{get_copilot_base_url()}/chat/completions",
+            headers=headers,
+            json=openai_payload,
+            timeout=1200,
+        )
+
+        duration = round(time.time() - start_time, 2)
+
+        if response.ok:
+            openai_response = response.json()
+            anthropic_response = translate_openai_to_anthropic(openai_response)
+
+            # Cache the request/response
+            usage = openai_response.get("usage", {})
+            cache.add_request(request_id, {
+                "request_body": anthropic_payload,
+                "response_body": anthropic_response,
+                "model": anthropic_payload.get("model", "unknown"),
+                "endpoint": "/v1/messages",
+                "status_code": response.status_code,
+                "request_size": request_size,
+                "response_size": len(json.dumps(anthropic_response)),
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "duration": duration,
+            })
+
+            return jsonify(anthropic_response)
+        else:
+            return Response(response.text, status=response.status_code, mimetype="application/json")
+
+    # except Exception as e:
+    #     return jsonify({"error": {"type": "api_error", "message": str(e)}}), 500
+
+
+def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: str,
+                              anthropic_payload: Dict, request_size: int, start_time: float) -> Response:
+    """Handle streaming Anthropic messages"""
+    # Start tracking request immediately
+    cache.start_request(request_id, {
+        "request_body": anthropic_payload,
+        "model": anthropic_payload.get("model", "unknown"),
+        "endpoint": "/v1/messages",
+        "request_size": request_size,
+    })
+
+    def generate() -> Generator[str, None, None]:
+        stream_state = AnthropicStreamState()
+        response_chunks = []
+        total_output_tokens = 0
+        total_input_tokens = 0
+        error_occurred = False
+        status_code = 200
+        first_chunk_received = False
+
+        try:
+            # Update state to sending
+            cache.update_request_state(request_id, cache.STATE_SENDING)
+
+            response = requests.post(
+                f"{get_copilot_base_url()}/chat/completions",
+                headers=headers,
+                json=openai_payload,
+                stream=True,
+                timeout=1200,
+            )
+            status_code = response.status_code
+
+            for line in response.iter_lines():
+                if not line:
+                    continue
+
+                line = line.decode("utf-8")
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(data)
+                        response_chunks.append(chunk)
+
+                        # Update state to receiving on first chunk
+                        if not first_chunk_received:
+                            first_chunk_received = True
+                            cache.update_request_state(request_id, cache.STATE_RECEIVING)
+
+                        if chunk.get("usage"):
+                            total_output_tokens = chunk["usage"].get("completion_tokens", 0)
+                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
+
+                        # Translate to Anthropic events
+                        events = translate_chunk_to_anthropic_events(chunk, stream_state)
+                        for event in events:
+                            yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+                    except json.JSONDecodeError:
+                        continue
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            # Timeout or connection error from upstream - log but don't try to yield after client disconnect
+            error_occurred = True
+            status_code = 504
+            print(f"[Stream Anthropic] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
+        except GeneratorExit:
+            # Client disconnected - this is normal, just clean up
+            error_occurred = True
+            print(f"[Stream Anthropic] Client disconnected for request {request_id}")
+            # Update state to error since client disconnected
+            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+            return
+        except Exception as e:
+            error_occurred = True
+            status_code = 500
+            print(f"[Stream Anthropic] Error for request {request_id}: {type(e).__name__}: {e}")
+            try:
+                yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}})}\n\n"
+            except GeneratorExit:
+                # Client already disconnected, can't yield
+                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+                return
+
+        duration = round(time.time() - start_time, 2)
+
+        # Reconstruct the OpenAI response then translate to Anthropic format
+        reconstructed_openai = reconstruct_openai_response_from_chunks(response_chunks)
+        anthropic_response = translate_openai_to_anthropic(reconstructed_openai) if reconstructed_openai else {}
+        if error_occurred and not anthropic_response:
+            anthropic_response = {"error": {"type": "api_error", "message": "Stream interrupted"}}
+
+        # Complete the request in cache
+        cache.complete_request(request_id, {
+            "request_body": anthropic_payload,
+            "response_body": anthropic_response,
+            "model": anthropic_payload.get("model", "unknown"),
+            "endpoint": "/v1/messages",
+            "status_code": status_code,
+            "request_size": request_size,
+            "response_size": sum(len(json.dumps(c)) for c in response_chunks),
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "duration": duration,
+        })
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
