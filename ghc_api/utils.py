@@ -78,14 +78,14 @@ def print_available_models():
 
         # Extract model info
         max_input_tokens = capabilities.get("limits", {}).get("max_prompt_tokens", 0)
-        if max_input_tokens >= 1024:
-            max_input_tokens = f"{max_input_tokens // 1024}K"
+        if max_input_tokens >= 1000:
+            max_input_tokens = f"{max_input_tokens // 1000}K"
         max_output_tokens = capabilities.get("limits", {}).get("max_output_tokens", 0)
-        if max_output_tokens >= 1024:
-            max_output_tokens = f"{max_output_tokens // 1024}K"
+        if max_output_tokens >= 1000:
+            max_output_tokens = f"{max_output_tokens // 1000}K"
         max_context_window_tokens = capabilities.get("limits", {}).get("max_context_window_tokens", 0)
-        if max_context_window_tokens >= 1024:
-            max_context_window_tokens = f"{max_context_window_tokens // 1024}K"
+        if max_context_window_tokens >= 1000:
+            max_context_window_tokens = f"{max_context_window_tokens // 1000}K"
 
         supports_vision = capabilities.get("supports", {}).get("vision", False)
         supports_tool_calls = capabilities.get("supports", {}).get("tool_calls", False)

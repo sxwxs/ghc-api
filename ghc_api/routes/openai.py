@@ -53,6 +53,10 @@ def list_models():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@openai_bp.route("/v1/models/full/", methods=["GET"])
+@openai_bp.route("/models/full/", methods=["GET"])
+def list_models_full():
+    return jsonify(state.models)
 
 @openai_bp.route("/v1/chat/completions", methods=["POST"])
 @openai_bp.route("/chat/completions", methods=["POST"])
