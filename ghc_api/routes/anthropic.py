@@ -132,6 +132,10 @@ def apply_system_prompt_filters_to_payload(payload: Dict) -> Dict:
         for block in system:
             if isinstance(block, dict) and block.get("type") == "text":
                 original_text = block.get("text", "")
+                if original_text.startswith("x-anthropic-billing-header:"):
+                    print(f"[Content Filter] Removed billing header block from system prompt: {original_text[:50]}{'...' if len(original_text) > 50 else ''}")
+                    modified = True
+                    continue
                 # Only apply removal filters, not additions (we'll handle additions separately)
                 filtered_text = original_text
                 for remove_str in state.system_prompt_remove:
@@ -303,6 +307,9 @@ def anthropic_messages():
     anthropic_payload = request.get_json()
     request_id = str(uuid.uuid4())
 
+    # Store original request before any modifications
+    original_request_body = anthropic_payload
+
     original_model = anthropic_payload.get("model", "unknown")
 
     # Translate model name (applies to both paths)
@@ -322,14 +329,14 @@ def anthropic_messages():
 
     if use_direct_api:
         print(f"[Anthropic API] Using direct Anthropic API path for model: {translated_model}")
-        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model)
+        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body)
     else:
         print(f"[Anthropic API] Using OpenAI translation path for model: {translated_model}")
-        return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model)
+        return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body)
 
 
 def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, start_time: float,
-                                     original_model: str, translated_model: str) -> Response:
+                                     original_model: str, translated_model: str, original_request_body: Dict = None) -> Response:
     """Handle request using direct Anthropic API (no translation needed)."""
     request_size = len(json.dumps(anthropic_payload))
 
@@ -361,7 +368,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
         if filtered_payload.get("stream"):
             return stream_direct_anthropic(filtered_payload, headers, request_id,
                                             current_payload, request_size, start_time,
-                                            original_model, translated_model)
+                                            original_model, translated_model, original_request_body)
 
         # Non-streaming request
         response = requests.post(
@@ -379,6 +386,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
             # Cache the request/response
             usage = anthropic_response.get("usage", {})
             cache.add_request(request_id, {
+                "original_request_body": original_request_body,
                 "request_body": current_payload,
                 "response_body": anthropic_response,
                 "model": original_model,
@@ -439,10 +447,11 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
 
 def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: str,
                             anthropic_payload: Dict, request_size: int, start_time: float,
-                            original_model: str, translated_model: str) -> Response:
+                            original_model: str, translated_model: str, original_request_body: Dict = None) -> Response:
     """Handle streaming direct Anthropic response (passthrough SSE events)."""
     # Start tracking request immediately
     cache.start_request(request_id, {
+        "original_request_body": original_request_body,
         "request_body": anthropic_payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
@@ -579,7 +588,7 @@ def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: s
 
 
 def handle_translated_request(anthropic_payload: Dict, request_id: str, start_time: float,
-                               original_model: str, translated_model: str) -> Response:
+                               original_model: str, translated_model: str, original_request_body: Dict = None) -> Response:
     """Handle request using OpenAI translation path."""
     # Check for vision content
     enable_vision = any(
@@ -608,7 +617,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
         if anthropic_payload.get("stream"):
             return stream_anthropic_messages(openai_payload, headers, request_id,
                                             anthropic_payload, request_size, start_time,
-                                            original_model, translated_model)
+                                            original_model, translated_model, original_request_body)
 
         # Non-streaming request
         response = requests.post(
@@ -627,6 +636,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
             # Cache the request/response
             usage = openai_response.get("usage", {})
             cache.add_request(request_id, {
+                "original_request_body": original_request_body,
                 "request_body": current_payload,
                 "response_body": anthropic_response,
                 "model": original_model,
@@ -678,10 +688,11 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
 
 def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: str,
                               anthropic_payload: Dict, request_size: int, start_time: float,
-                              original_model: str, translated_model: str) -> Response:
+                              original_model: str, translated_model: str, original_request_body: Dict = None) -> Response:
     """Handle streaming Anthropic messages"""
     # Start tracking request immediately
     cache.start_request(request_id, {
+        "original_request_body": original_request_body,
         "request_body": anthropic_payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,

@@ -101,7 +101,7 @@ model_mappings:
 #   - "Additional instruction for the model."
 #   - "Another instruction to append."
 
-system_prompt_remove: []    
+system_prompt_remove: []
 tool_result_suffix_remove: []
 system_prompt_add: []
 
