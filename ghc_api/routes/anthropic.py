@@ -5,125 +5,490 @@ Anthropic-compatible API routes
 import json
 import time
 import uuid
-from typing import Dict, Generator
+from typing import Dict, Generator, Any
 
 import requests
 from flask import Blueprint, Response, jsonify, request, stream_with_context
 
-from ..api_helpers import ensure_copilot_token, get_copilot_base_url, get_copilot_headers
+from ..api_helpers import (
+    ensure_copilot_token,
+    get_copilot_base_url,
+    get_copilot_headers,
+    supports_direct_anthropic_api,
+    count_tokens,
+)
 from ..cache import cache
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
 from ..translator import translate_anthropic_to_openai, translate_model_name, translate_openai_to_anthropic
 from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup
+from ..state import state
 
 anthropic_bp = Blueprint('anthropic', __name__)
+
+
+# Fields supported by Copilot's Anthropic API endpoint
+COPILOT_SUPPORTED_FIELDS = {
+    "model", "messages", "max_tokens", "system", "metadata",
+    "stop_sequences", "stream", "temperature", "top_p", "top_k",
+    "tools", "tool_choice", "thinking", "service_tier",
+}
+
+
+def filter_payload_for_copilot(payload: Dict) -> Dict:
+    """Filter payload to only include fields supported by Copilot's Anthropic API."""
+    filtered = {}
+    unsupported_fields = []
+
+    for key, value in payload.items():
+        if key in COPILOT_SUPPORTED_FIELDS:
+            filtered[key] = value
+        else:
+            unsupported_fields.append(key)
+
+    if unsupported_fields:
+        print(f"[DirectAnthropic] Filtered unsupported fields: {', '.join(unsupported_fields)}")
+
+    return filtered
+
+
+def adjust_max_tokens_for_thinking(payload: Dict) -> Dict:
+    """Adjust max_tokens if thinking is enabled.
+
+    According to Anthropic docs, max_tokens must be greater than thinking.budget_tokens.
+    """
+    thinking = payload.get("thinking")
+    if not thinking:
+        return payload
+
+    budget_tokens = thinking.get("budget_tokens")
+    if not budget_tokens:
+        return payload
+
+    max_tokens = payload.get("max_tokens", 0)
+    if max_tokens <= budget_tokens:
+        response_buffer = min(16384, budget_tokens)
+        new_max_tokens = budget_tokens + response_buffer
+        print(f"[DirectAnthropic] Adjusted max_tokens: {max_tokens} → {new_max_tokens} (thinking.budget_tokens={budget_tokens})")
+        return {**payload, "max_tokens": new_max_tokens}
+
+    return payload
+
+
+def get_anthropic_headers(enable_vision: bool = False) -> Dict[str, str]:
+    """Get headers for direct Anthropic API requests to Copilot."""
+    headers = get_copilot_headers(enable_vision)
+    headers["anthropic-version"] = "2023-06-01"
+    return headers
+
+
+@anthropic_bp.route("/v1/messages/count_tokens", methods=["POST"])
+def anthropic_count_tokens():
+    """Handle Anthropic token counting API.
+
+    This endpoint counts tokens in the request payload for context window management.
+    """
+    try:
+        ensure_copilot_token()
+        payload = request.get_json()
+
+        model_id = payload.get("model", "")
+
+        # Find the model in cached models
+        selected_model = None
+        if state.models and state.models.get("data"):
+            selected_model = next(
+                (m for m in state.models["data"] if m.get("id") == model_id),
+                None
+            )
+
+        if not selected_model:
+            print(f"[count_tokens] Model {model_id} not found, returning default token count")
+            return jsonify({"input_tokens": 1})
+
+        # Count tokens from system prompt
+        total_tokens = 0
+        system = payload.get("system")
+        if system:
+            if isinstance(system, str):
+                total_tokens += count_tokens(system, model_id)
+            elif isinstance(system, list):
+                for block in system:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        total_tokens += count_tokens(block.get("text", ""), model_id)
+
+        # Count tokens from messages
+        for msg in payload.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_tokens += count_tokens(content, model_id)
+            elif isinstance(content, list):
+                for block in content:
+                    if block.get("type") == "text":
+                        total_tokens += count_tokens(block.get("text", ""), model_id)
+                    elif block.get("type") == "tool_result":
+                        tool_content = block.get("content", "")
+                        if isinstance(tool_content, str):
+                            total_tokens += count_tokens(tool_content, model_id)
+                    elif block.get("type") == "tool_use":
+                        # Count tool input as JSON string
+                        tool_input = block.get("input", {})
+                        total_tokens += count_tokens(json.dumps(tool_input), model_id)
+
+        # Count tokens from tools definitions
+        tools = payload.get("tools", [])
+        if tools:
+            # Add base overhead for tool use capability (similar to copilot-api-js)
+            if model_id.startswith("claude"):
+                total_tokens += 346
+            elif model_id.startswith("grok"):
+                total_tokens += 480
+
+            # Count tool definition tokens
+            for tool in tools:
+                total_tokens += count_tokens(tool.get("name", ""), model_id)
+                total_tokens += count_tokens(tool.get("description", ""), model_id)
+                input_schema = tool.get("input_schema", {})
+                total_tokens += count_tokens(json.dumps(input_schema), model_id)
+
+        # Apply buffer for non-Anthropic vendors (similar to copilot-api-js)
+        vendor = selected_model.get("vendor", "")
+        if vendor != "Anthropic":
+            if model_id.startswith("grok"):
+                total_tokens = int(total_tokens * 1.03)
+            else:
+                total_tokens = int(total_tokens * 1.05)
+
+        return jsonify({"input_tokens": total_tokens})
+
+    except Exception as e:
+        print(f"[count_tokens] Error: {e}")
+        return jsonify({"input_tokens": 1})
 
 
 @anthropic_bp.route("/v1/messages", methods=["POST"])
 def anthropic_messages():
     """Handle Anthropic messages API"""
-    if True:
-        start_time = time.time()
-        ensure_copilot_token()
-        anthropic_payload = request.get_json()
-        request_id = str(uuid.uuid4())
+    start_time = time.time()
+    ensure_copilot_token()
+    anthropic_payload = request.get_json()
+    request_id = str(uuid.uuid4())
 
-        # Get the original and translated model names
-        original_model = anthropic_payload.get("model", "unknown")
-        translated_model = translate_model_name(original_model)
+    original_model = anthropic_payload.get("model", "unknown")
 
-        # Check for vision content
-        enable_vision = any(
-            isinstance(msg.get("content"), list) and
-            any(p.get("type") == "image" for p in msg.get("content", []))
-            for msg in anthropic_payload.get("messages", [])
-        )
+    # Check if this model supports direct Anthropic API
+    use_direct_api = supports_direct_anthropic_api(original_model)
 
-        request_size = len(json.dumps(anthropic_payload))
+    if use_direct_api:
+        print(f"[Anthropic API] Using direct Anthropic API path for model: {original_model}")
+        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time)
+    else:
+        print(f"[Anthropic API] Using OpenAI translation path for model: {original_model}")
+        return handle_translated_request(anthropic_payload, request_id, start_time)
 
-        max_retries = 3
-        current_payload = anthropic_payload
-        duration = round(time.time() - start_time, 2)
-        cleanup_log_entry = None
-        for attempt in range(max_retries + 1):
-            # Translate to OpenAI format
-            openai_payload = translate_anthropic_to_openai(current_payload)
-            is_agent_call = any(
-            msg.get("role") in ("assistant", "tool")
-                for msg in openai_payload.get("messages", [])
-            )
 
-            headers = get_copilot_headers(enable_vision)
-            headers["X-Initiator"] = "agent" if is_agent_call else "user"
-            if anthropic_payload.get("stream"):
-                return stream_anthropic_messages(openai_payload, headers, request_id,
-                                                anthropic_payload, request_size, start_time,
-                                                original_model, translated_model)
-            # Non-streaming request
+def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, start_time: float) -> Response:
+    """Handle request using direct Anthropic API (no translation needed)."""
+    original_model = anthropic_payload.get("model", "unknown")
+    request_size = len(json.dumps(anthropic_payload))
+
+    # Filter and adjust payload for Copilot
+    filtered_payload = filter_payload_for_copilot(anthropic_payload)
+    filtered_payload = adjust_max_tokens_for_thinking(filtered_payload)
+
+    # Check for vision content
+    enable_vision = any(
+        isinstance(msg.get("content"), list) and
+        any(p.get("type") == "image" for p in msg.get("content", []))
+        for msg in filtered_payload.get("messages", [])
+    )
+
+    # Agent/user check for X-Initiator header
+    is_agent_call = any(
+        msg.get("role") == "assistant"
+        for msg in filtered_payload.get("messages", [])
+    )
+
+    headers = get_anthropic_headers(enable_vision)
+    headers["X-Initiator"] = "agent" if is_agent_call else "user"
+
+    if filtered_payload.get("stream"):
+        return stream_direct_anthropic(filtered_payload, headers, request_id,
+                                        anthropic_payload, request_size, start_time, original_model)
+
+    # Non-streaming request
+    response = requests.post(
+        f"{get_copilot_base_url()}/v1/messages",
+        headers=headers,
+        json=filtered_payload,
+        timeout=1200,
+    )
+
+    duration = round(time.time() - start_time, 2)
+
+    if response.ok:
+        anthropic_response = response.json()
+
+        # Cache the request/response
+        usage = anthropic_response.get("usage", {})
+        cache.add_request(request_id, {
+            "request_body": anthropic_payload,
+            "response_body": anthropic_response,
+            "model": original_model,
+            "translated_model": None,  # No translation for direct API
+            "endpoint": "/v1/messages",
+            "status_code": response.status_code,
+            "request_size": request_size,
+            "response_size": len(json.dumps(anthropic_response)),
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "duration": duration,
+        })
+
+        return jsonify(anthropic_response)
+    else:
+        log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
+        return Response(response.text, status=response.status_code, mimetype="application/json")
+
+
+def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: str,
+                            anthropic_payload: Dict, request_size: int, start_time: float,
+                            original_model: str) -> Response:
+    """Handle streaming direct Anthropic response (passthrough SSE events)."""
+    # Start tracking request immediately
+    cache.start_request(request_id, {
+        "request_body": anthropic_payload,
+        "model": original_model,
+        "translated_model": None,
+        "endpoint": "/v1/messages",
+        "request_size": request_size,
+    })
+
+    def generate() -> Generator[str, None, None]:
+        total_input_tokens = 0
+        total_output_tokens = 0
+        error_occurred = False
+        status_code = 200
+        first_chunk_received = False
+        accumulated_content = []
+        accumulated_model = original_model
+
+        try:
+            cache.update_request_state(request_id, cache.STATE_SENDING)
+
             response = requests.post(
-                f"{get_copilot_base_url()}/chat/completions",
+                f"{get_copilot_base_url()}/v1/messages",
                 headers=headers,
-                json=openai_payload,
+                json=filtered_payload,
+                stream=True,
                 timeout=1200,
             )
-            
-            if response.ok:
-                openai_response = response.json()
-                anthropic_response = translate_openai_to_anthropic(openai_response)
+            status_code = response.status_code
 
-                # Cache the request/response
-                usage = openai_response.get("usage", {})
-                cache.add_request(request_id, {
-                    "request_body": current_payload,
-                    "response_body": anthropic_response,
-                    "model": original_model,
-                    "translated_model": translated_model if translated_model != original_model else None,
-                    "endpoint": "/v1/messages",
-                    "status_code": response.status_code,
-                    "request_size": request_size,
-                    "response_size": len(json.dumps(anthropic_response)),
-                    "input_tokens": usage.get("prompt_tokens", 0),
-                    "output_tokens": usage.get("completion_tokens", 0),
-                    "duration": duration,
-                })
+            for line in response.iter_lines():
+                if not line:
+                    continue
 
-                return jsonify(anthropic_response)
-            else:
-                log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
-                if is_orphaned_tool_result_error(response.status_code, response.text):
-                    orphaned_ids = extract_orphaned_tool_use_ids(response.text)
-                    if orphaned_ids:
-                        print(f"[Anthropic API] Attempt {attempt + 1}: Found orphaned tool_result IDs: {orphaned_ids}")
+                line = line.decode("utf-8")
 
-                        # Start building log entry on first cleanup attempt
-                        if cleanup_log_entry is None:
-                            cleanup_log_entry = {
-                                "request_id": request_id,
-                                "original_request": anthropic_payload,
-                                "error_response": response.text,
-                                "error_status_code": response.status_code,
-                                "orphaned_ids": orphaned_ids,
-                            }
-                        else:
-                            # Append additional orphaned IDs if multiple retries needed
-                            cleanup_log_entry["orphaned_ids"].extend(orphaned_ids)
+                # Handle SSE format
+                if line.startswith("event: "):
+                    event_type = line[7:]
+                    continue
 
-                        cleaned_messages = remove_orphaned_tool_results(
-                            current_payload.get("messages", []), orphaned_ids
-                        )
-                        current_payload = dict(current_payload)
-                        current_payload["messages"] = cleaned_messages
-                        print(f"[Anthropic API] Retrying with cleaned messages...")
+                if line.startswith("data: "):
+                    data = line[6:]
+                    if data == "[DONE]":
+                        break
+
+                    try:
+                        event = json.loads(data)
+
+                        if not first_chunk_received:
+                            first_chunk_received = True
+                            cache.update_request_state(request_id, cache.STATE_RECEIVING)
+
+                        # Extract usage info from events
+                        event_type = event.get("type", "")
+                        if event_type == "message_start":
+                            msg = event.get("message", {})
+                            accumulated_model = msg.get("model", original_model)
+                            usage = msg.get("usage", {})
+                            total_input_tokens = usage.get("input_tokens", 0)
+                        elif event_type == "message_delta":
+                            usage = event.get("usage", {})
+                            total_output_tokens = usage.get("output_tokens", 0)
+                        elif event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "text_delta":
+                                accumulated_content.append(delta.get("text", ""))
+
+                        # Forward event directly to client
+                        yield f"event: {event_type}\ndata: {data}\n\n"
+
+                    except json.JSONDecodeError:
                         continue
-            if cleanup_log_entry is not None:
-                cleanup_log_entry["modified_request"] = current_payload
-                cleanup_log_entry["final_status_code"] = response.status_code
-                cleanup_log_entry["final_response"] = anthropic_response
-                log_tool_result_cleanup(cleanup_log_entry)
-            return Response(response.text, status=response.status_code, mimetype="application/json")
 
-    # except Exception as e:
-    #     return jsonify({"error": {"type": "api_error", "message": str(e)}}), 500
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            error_occurred = True
+            status_code = 504
+            print(f"[Stream Direct Anthropic] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
+        except GeneratorExit:
+            error_occurred = True
+            print(f"[Stream Direct Anthropic] Client disconnected for request {request_id}")
+            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+            return
+        except Exception as e:
+            error_occurred = True
+            status_code = 500
+            print(f"[Stream Direct Anthropic] Error for request {request_id}: {type(e).__name__}: {e}")
+            try:
+                error_event = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+                yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+            except GeneratorExit:
+                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+                return
+
+        duration = round(time.time() - start_time, 2)
+
+        # Build response for cache
+        anthropic_response = {
+            "id": request_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "".join(accumulated_content)}] if accumulated_content else [],
+            "model": accumulated_model,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+            },
+        }
+
+        if error_occurred and not accumulated_content:
+            anthropic_response = {"error": {"type": "api_error", "message": "Stream interrupted"}}
+
+        cache.complete_request(request_id, {
+            "request_body": anthropic_payload,
+            "response_body": anthropic_response,
+            "model": original_model,
+            "translated_model": None,
+            "endpoint": "/v1/messages",
+            "status_code": status_code,
+            "request_size": request_size,
+            "response_size": len(json.dumps(anthropic_response)),
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+            "duration": duration,
+        })
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def handle_translated_request(anthropic_payload: Dict, request_id: str, start_time: float) -> Response:
+    """Handle request using OpenAI translation path."""
+    original_model = anthropic_payload.get("model", "unknown")
+    translated_model = translate_model_name(original_model)
+
+    # Check for vision content
+    enable_vision = any(
+        isinstance(msg.get("content"), list) and
+        any(p.get("type") == "image" for p in msg.get("content", []))
+        for msg in anthropic_payload.get("messages", [])
+    )
+
+    request_size = len(json.dumps(anthropic_payload))
+
+    max_retries = 3
+    current_payload = anthropic_payload
+    cleanup_log_entry = None
+
+    for attempt in range(max_retries + 1):
+        # Translate to OpenAI format
+        openai_payload = translate_anthropic_to_openai(current_payload)
+        is_agent_call = any(
+            msg.get("role") in ("assistant", "tool")
+            for msg in openai_payload.get("messages", [])
+        )
+
+        headers = get_copilot_headers(enable_vision)
+        headers["X-Initiator"] = "agent" if is_agent_call else "user"
+
+        if anthropic_payload.get("stream"):
+            return stream_anthropic_messages(openai_payload, headers, request_id,
+                                            anthropic_payload, request_size, start_time,
+                                            original_model, translated_model)
+
+        # Non-streaming request
+        response = requests.post(
+            f"{get_copilot_base_url()}/chat/completions",
+            headers=headers,
+            json=openai_payload,
+            timeout=1200,
+        )
+
+        duration = round(time.time() - start_time, 2)
+
+        if response.ok:
+            openai_response = response.json()
+            anthropic_response = translate_openai_to_anthropic(openai_response)
+
+            # Cache the request/response
+            usage = openai_response.get("usage", {})
+            cache.add_request(request_id, {
+                "request_body": current_payload,
+                "response_body": anthropic_response,
+                "model": original_model,
+                "translated_model": translated_model if translated_model != original_model else None,
+                "endpoint": "/v1/messages",
+                "status_code": response.status_code,
+                "request_size": request_size,
+                "response_size": len(json.dumps(anthropic_response)),
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+                "duration": duration,
+            })
+
+            return jsonify(anthropic_response)
+        else:
+            log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
+            if is_orphaned_tool_result_error(response.status_code, response.text):
+                orphaned_ids = extract_orphaned_tool_use_ids(response.text)
+                if orphaned_ids:
+                    print(f"[Anthropic API] Attempt {attempt + 1}: Found orphaned tool_result IDs: {orphaned_ids}")
+
+                    if cleanup_log_entry is None:
+                        cleanup_log_entry = {
+                            "request_id": request_id,
+                            "original_request": anthropic_payload,
+                            "error_response": response.text,
+                            "error_status_code": response.status_code,
+                            "orphaned_ids": orphaned_ids,
+                        }
+                    else:
+                        cleanup_log_entry["orphaned_ids"].extend(orphaned_ids)
+
+                    cleaned_messages = remove_orphaned_tool_results(
+                        current_payload.get("messages", []), orphaned_ids
+                    )
+                    current_payload = dict(current_payload)
+                    current_payload["messages"] = cleaned_messages
+                    print(f"[Anthropic API] Retrying with cleaned messages...")
+                    continue
+
+        if cleanup_log_entry is not None:
+            cleanup_log_entry["modified_request"] = current_payload
+            cleanup_log_entry["final_status_code"] = response.status_code
+            cleanup_log_entry["final_response"] = response.text
+            log_tool_result_cleanup(cleanup_log_entry)
+
+        return Response(response.text, status=response.status_code, mimetype="application/json")
 
 
 def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: str,

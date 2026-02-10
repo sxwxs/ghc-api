@@ -56,9 +56,13 @@ model_mappings:
   # Exact match mappings (full model name -> target model name)
   exact:
     # Example:
-    opus: claude-opus-4.5
+    opus: claude-opus-4.6
     sonnet: claude-sonnet-4.5
     haiku: claude-haiku-4.5
+    claude-opus-4-6: claude-opus-4.6
+    claude-opus-4-5: claude-opus-4.5
+    claude-haiku-4-5: claude-haiku-4.5
+
 
   # Prefix match mappings (model name prefix -> target model name)
   # If a model name starts with the key, it will be replaced with the value
@@ -68,6 +72,9 @@ model_mappings:
     claude-opus-4.5-: claude-opus-4.5
     claude-haiku-4-5-: claude-haiku-4.5
     claude-opus-4-5-: claude-opus-4.5
+    claude-opus-4-6-: claude-opus-4.6
+    claude-opus-4.6-: claude-opus-4.6
+
 
 # Content Filtering
 # -----------------

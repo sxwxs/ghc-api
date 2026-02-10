@@ -75,6 +75,8 @@ def print_available_models():
         # model_name = model.get("name", model_id)
         capabilities = model.get("capabilities", {})
         preview = model.get("preview", False)
+        vendor = model.get("vendor", "unknown")
+        supported_endpoints = model.get("supported_endpoints", [])
 
         # Extract model info
         max_input_tokens = capabilities.get("limits", {}).get("max_prompt_tokens", 0)
@@ -89,7 +91,20 @@ def print_available_models():
 
         supports_vision = capabilities.get("supports", {}).get("vision", False)
         supports_tool_calls = capabilities.get("supports", {}).get("tool_calls", False)
-        print(f"{model_id:30}\tctx: {max_context_window_tokens} in: {max_input_tokens or 'N/A'}\t out: {max_output_tokens or 'N/A'}\t({'Vision,' if supports_vision else ''}{'Tool,' if supports_tool_calls else ''}{'Preview' if preview else ''})")
+        supports_anthropic_api = "/v1/messages" in supported_endpoints
+
+        flags = []
+        if supports_vision:
+            flags.append("Vision")
+        if supports_tool_calls:
+            flags.append("Tool")
+        if supports_anthropic_api:
+            flags.append("Anthropic")
+        if preview:
+            flags.append("Preview")
+
+        flags_str = ",".join(flags) if flags else ""
+        print(f"{model_id:30}\tctx: {max_context_window_tokens} in: {max_input_tokens or 'N/A'}\t out: {max_output_tokens or 'N/A'}\t[{vendor}] ({flags_str})")
     print("\n" + "=" * 60 + "\n")
 
 

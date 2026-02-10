@@ -50,9 +50,6 @@ def get_copilot_headers(enable_vision: bool = False) -> Dict[str, str]:
     if enable_vision:
         headers["Copilot-Vision-Request"] = "true"
     return headers
-    if enable_vision:
-        headers["Copilot-Vision-Request"] = "true"
-    return headers
 
 
 def refresh_copilot_token() -> None:
@@ -128,3 +125,25 @@ def count_message_tokens(messages: List[Dict], model: str = "gpt-4") -> int:
                 if part.get("type") == "text":
                     total += count_tokens(part.get("text", ""), model)
     return total
+
+
+def supports_direct_anthropic_api(model_id: str) -> bool:
+    """Check if a model supports direct Anthropic API.
+
+    Returns True if:
+    1. redirect_anthropic is not enabled (direct API is on)
+    2. The model's supported_endpoints includes "/v1/messages"
+    """
+    # Check if redirect to OpenAI translation is enabled
+    if state.redirect_anthropic:
+        return False
+
+    if not state.models or not state.models.get("data"):
+        return False
+
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if not model:
+        return False
+
+    supported_endpoints = model.get("supported_endpoints", [])
+    return "/v1/messages" in supported_endpoints

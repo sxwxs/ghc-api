@@ -33,6 +33,9 @@ class State:
         self.tool_result_suffix_remove: List[str] = []
         self.system_prompt_add: List[str] = []
 
+        # Direct Anthropic API settings
+        self.redirect_anthropic: bool = False  # Force Anthropic through OpenAI translation
+
     @property
     def editor_plugin_version(self) -> str:
         """Get the editor plugin version string"""
