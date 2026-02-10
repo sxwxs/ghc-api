@@ -33,10 +33,10 @@ def apply_system_prompt_filters(system_text: str) -> str:
             print(f"[Content Filter] Removed from system prompt: {remove_str[:50]}{'...' if len(remove_str) > 50 else ''}")
 
     # Add specified strings to system prompt (only if not already present)
-    for add_str in state.system_prompt_add:
-        if add_str not in system_text:
-            system_text = system_text + "\n\n" + add_str
-            print(f"[Content Filter] Added to system prompt: {add_str[:50]}{'...' if len(add_str) > 50 else ''}")
+    # for add_str in state.system_prompt_add:
+    #     if add_str not in system_text:
+    #         system_text = system_text + "\n\n" + add_str
+    #         print(f"[Content Filter] Added to system prompt: {add_str[:50]}{'...' if len(add_str) > 50 else ''}")
 
     return system_text
 
