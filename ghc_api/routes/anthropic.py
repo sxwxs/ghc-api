@@ -54,6 +54,13 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     if unsupported_fields:
         print(f"[DirectAnthropic] Filtered unsupported fields: {', '.join(unsupported_fields)}")
 
+    if "tools" in payload:
+        for tool in payload["tools"]:
+            if "cache_control" in tool and "scope" in tool["cache_control"] and "type" in tool["cache_control"] and tool["cache_control"]["type"] == "ephemeral":
+                # fix error likes: {"type": "invalid_request_error", "message": "tools.12.custom.cache_control.ephemeral.scope: Extra inputs are not permitted"}
+                # when tool["cache_control"] is something like `{'scope': 'global', 'type': 'ephemeral'}`
+                print('To remove `scope` key from tool["cache_control"]', tool["cache_control"], "tool name:", tool['name'] if 'name' in tool else None)
+                tool["cache_control"].pop("scope")
     return filtered
 
 
