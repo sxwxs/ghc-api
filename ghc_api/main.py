@@ -10,6 +10,7 @@ import argparse
 import os
 import yaml
 
+from . import __version__
 from .app import create_app, initialize_app
 from .config import DEBUG, model_mappings, DEFAULT_MODEL_MAPPINGS
 from .generate_config import generate_config_file
@@ -30,6 +31,7 @@ def main():
     parser.add_argument('-p', '--port', type=int, help='Port to listen on')
     parser.add_argument('-a', '--address', type=str, help='Address to listen on')
     parser.add_argument('-c', '--config', action='store_true', help='Generate a YAML config file')
+    parser.add_argument('-v', '--version', action='version', version=f'ghc-api {__version__}')
 
     args = parser.parse_args()
 
