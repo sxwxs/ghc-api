@@ -40,6 +40,37 @@ COPILOT_SUPPORTED_FIELDS = {
 }
 
 
+def _remove_scope_from_ephemeral_cache_control(block: Dict) -> None:
+    """Remove 'scope' key from a block's cache_control if type is 'ephemeral'."""
+    cc = block.get("cache_control")
+    if cc and isinstance(cc, dict) and cc.get("type") == "ephemeral" and "scope" in cc:
+        print(f"[DirectAnthropic] Removing `scope` from cache_control in content block: {cc}")
+        cc.pop("scope")
+
+
+def _remove_scope_from_cache_control_in_payload(payload: Dict) -> None:
+    """Remove 'scope' from ephemeral cache_control in tools, message content blocks and system prompt blocks."""
+    # Handle tool definitions
+    for tool in payload.get("tools", []):
+        if isinstance(tool, dict):
+            _remove_scope_from_ephemeral_cache_control(tool)
+
+    # Handle system prompt blocks
+    system = payload.get("system")
+    if isinstance(system, list):
+        for block in system:
+            if isinstance(block, dict):
+                _remove_scope_from_ephemeral_cache_control(block)
+
+    # Handle message content blocks
+    for msg in payload.get("messages", []):
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    _remove_scope_from_ephemeral_cache_control(block)
+
+
 def filter_payload_for_copilot(payload: Dict) -> Dict:
     """Filter payload to only include fields supported by Copilot's Anthropic API."""
     filtered = {}
@@ -54,13 +85,9 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     if unsupported_fields:
         print(f"[DirectAnthropic] Filtered unsupported fields: {', '.join(unsupported_fields)}")
 
-    if "tools" in payload:
-        for tool in payload["tools"]:
-            if "cache_control" in tool and "scope" in tool["cache_control"] and "type" in tool["cache_control"] and tool["cache_control"]["type"] == "ephemeral":
-                # fix error likes: {"type": "invalid_request_error", "message": "tools.12.custom.cache_control.ephemeral.scope: Extra inputs are not permitted"}
-                # when tool["cache_control"] is something like `{'scope': 'global', 'type': 'ephemeral'}`
-                print('To remove `scope` key from tool["cache_control"]', tool["cache_control"], "tool name:", tool['name'] if 'name' in tool else None)
-                tool["cache_control"].pop("scope")
+    # Remove scope from ephemeral cache_control in tools, messages, and system prompt
+    _remove_scope_from_cache_control_in_payload(filtered)
+
     return filtered
 
 
