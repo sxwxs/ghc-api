@@ -514,15 +514,17 @@ def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: s
             )
             status_code = response.status_code
 
+            sse_event_type = ""
+
             for line in response.iter_lines():
                 if not line:
                     continue
 
                 line = line.decode("utf-8")
 
-                # Handle SSE format
+                # Handle SSE format - capture event type for the next data line
                 if line.startswith("event: "):
-                    event_type = line[7:]
+                    sse_event_type = line[7:]
                     continue
 
                 if line.startswith("data: "):
@@ -537,8 +539,12 @@ def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: s
                             first_chunk_received = True
                             cache.update_request_state(request_id, cache.STATE_RECEIVING)
 
+                        # Use SSE event header if available, otherwise fall back to JSON type field
+                        event_type = sse_event_type or event.get("type", "")
+                        # Reset so it doesn't leak into the next data line
+                        sse_event_type = ""
+
                         # Extract usage info from events
-                        event_type = event.get("type", "")
                         if event_type == "message_start":
                             msg = event.get("message", {})
                             accumulated_model = msg.get("model", original_model)
