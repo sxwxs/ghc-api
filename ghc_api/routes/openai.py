@@ -305,6 +305,17 @@ def responses():
 
         headers = get_copilot_headers(enable_vision)
 
+        if 'tools' in payload:
+            tools = payload['tools']
+            i = 0
+            while i < len(tools):
+                # '{"error":{"message":"rejected tool(s): web_search","code":"invalid_request_body"}}\n'
+                if tools[i]['type'] == 'web_search':
+                    tools.pop(i)
+                    print(f"Removed unsupported tool 'web_search' from payload for request {request_id}")
+                else:
+                    i += 1
+
         request_size = len(json.dumps(payload))
 
         if payload.get("stream"):
@@ -321,7 +332,6 @@ def responses():
 
         duration = round(time.time() - start_time, 2)
         response_size = len(response.text)
-
         if response.ok:
             result = response.json()
 

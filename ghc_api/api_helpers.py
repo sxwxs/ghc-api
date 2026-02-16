@@ -162,4 +162,4 @@ def supports_responses_api(model_id: str) -> bool:
         return False
 
     supported_endpoints = model.get("supported_endpoints", [])
-    return "/v1/responses" in supported_endpoints
+    return "/responses" in supported_endpoints
