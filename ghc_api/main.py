@@ -115,6 +115,7 @@ def main():
     print(f"Starting GitHub Copilot API Proxy on {host}:{port}")
     print(f"Dashboard: http://{host}:{port}/")
     print(f"OpenAI API: http://{host}:{port}/v1/chat/completions")
+    print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
 
     app.run(host=host, port=port, debug=debug, threaded=True)

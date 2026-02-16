@@ -147,3 +147,19 @@ def supports_direct_anthropic_api(model_id: str) -> bool:
 
     supported_endpoints = model.get("supported_endpoints", [])
     return "/v1/messages" in supported_endpoints
+
+
+def supports_responses_api(model_id: str) -> bool:
+    """Check if a model supports the OpenAI Responses API (/v1/responses).
+
+    Returns True if the model's supported_endpoints includes "/v1/responses".
+    """
+    if not state.models or not state.models.get("data"):
+        return False
+
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if not model:
+        return False
+
+    supported_endpoints = model.get("supported_endpoints", [])
+    return "/v1/responses" in supported_endpoints
