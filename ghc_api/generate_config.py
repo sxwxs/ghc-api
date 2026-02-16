@@ -105,6 +105,12 @@ system_prompt_remove: []
 tool_result_suffix_remove: []
 system_prompt_add: []
 
+# Retry Settings
+# ---------------
+# Maximum number of retries for upstream connection errors (e.g., RemoteDisconnected,
+# ReadTimeout). Set to 0 to disable retries.
+max_connection_retries: 3
+
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
         api_version=DEFAULT_API_VERSION,

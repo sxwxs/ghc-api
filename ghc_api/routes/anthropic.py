@@ -26,7 +26,7 @@ from ..translator import (
     apply_system_prompt_filters,
     apply_tool_result_suffix_filter,
 )
-from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup
+from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup, log_connection_retry
 from ..state import state
 
 anthropic_bp = Blueprint('anthropic', __name__)
@@ -405,12 +405,32 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                                             original_model, translated_model, original_request_body)
 
         # Non-streaming request
-        response = requests.post(
-            f"{get_copilot_base_url()}/v1/messages",
-            headers=headers,
-            json=filtered_payload,
-            timeout=1200,
-        )
+        connection_retries = state.max_connection_retries
+        last_connection_error = None
+        for conn_attempt in range(connection_retries + 1):
+            try:
+                response = requests.post(
+                    f"{get_copilot_base_url()}/v1/messages",
+                    headers=headers,
+                    json=filtered_payload,
+                    timeout=1200,
+                )
+                last_connection_error = None
+                break
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                last_connection_error = e
+                log_connection_retry(request_id, "/v1/messages", conn_attempt, connection_retries, e)
+                ensure_copilot_token()  # Refresh token in case it's a token expiration issue
+                if conn_attempt < connection_retries:
+                    print(f"[Direct Anthropic] Connection error (attempt {conn_attempt + 1}/{connection_retries + 1}) for request {request_id}: {type(e).__name__}: {e}")
+                    time.sleep(min(2 ** conn_attempt, 8))
+                    continue
+                else:
+                    print(f"[Direct Anthropic] Connection error (final attempt) for request {request_id}: {type(e).__name__}: {e}")
+
+        if last_connection_error is not None:
+            error_body = json.dumps({"type": "error", "error": {"type": "api_error", "message": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}})
+            return Response(error_body, status=504, mimetype="application/json")
 
         duration = round(time.time() - start_time, 2)
 
@@ -660,12 +680,32 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
                                             original_model, translated_model, original_request_body)
 
         # Non-streaming request
-        response = requests.post(
-            f"{get_copilot_base_url()}/chat/completions",
-            headers=headers,
-            json=openai_payload,
-            timeout=1200,
-        )
+        connection_retries = state.max_connection_retries
+        last_connection_error = None
+        for conn_attempt in range(connection_retries + 1):
+            try:
+                response = requests.post(
+                    f"{get_copilot_base_url()}/chat/completions",
+                    headers=headers,
+                    json=openai_payload,
+                    timeout=1200,
+                )
+                last_connection_error = None
+                break
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                last_connection_error = e
+                log_connection_retry(request_id, "/v1/messages (translated)", conn_attempt, connection_retries, e)
+                ensure_copilot_token()  # Refresh token in case it's a token expiration issue
+                if conn_attempt < connection_retries:
+                    print(f"[Translated API] Connection error (attempt {conn_attempt + 1}/{connection_retries + 1}) for request {request_id}: {type(e).__name__}: {e}")
+                    time.sleep(min(2 ** conn_attempt, 8))
+                    continue
+                else:
+                    print(f"[Translated API] Connection error (final attempt) for request {request_id}: {type(e).__name__}: {e}")
+
+        if last_connection_error is not None:
+            error_body = json.dumps({"type": "error", "error": {"type": "api_error", "message": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}})
+            return Response(error_body, status=504, mimetype="application/json")
 
         duration = round(time.time() - start_time, 2)
 

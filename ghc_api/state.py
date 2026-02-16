@@ -36,6 +36,9 @@ class State:
         # Direct Anthropic API settings
         self.redirect_anthropic: bool = False  # Force Anthropic through OpenAI translation
 
+        # Retry settings
+        self.max_connection_retries: int = 3  # Max retries for upstream connection errors
+
     @property
     def editor_plugin_version(self) -> str:
         """Get the editor plugin version string"""

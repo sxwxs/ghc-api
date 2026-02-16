@@ -77,6 +77,10 @@ def main():
         if 'system_prompt_add' in config:
             state.system_prompt_add = config['system_prompt_add'] or []
 
+        # Load retry settings
+        if 'max_connection_retries' in config:
+            state.max_connection_retries = config['max_connection_retries']
+
         # Load model mappings from config
         if 'model_mappings' in config:
             model_mappings.load_from_config(config)
