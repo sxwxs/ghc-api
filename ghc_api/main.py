@@ -80,6 +80,8 @@ def main():
         # Load retry settings
         if 'max_connection_retries' in config:
             state.max_connection_retries = config['max_connection_retries']
+        if 'auto_remove_encrypted_content_on_parse_error' in config:
+            state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
 
         # Load model mappings from config
         if 'model_mappings' in config:

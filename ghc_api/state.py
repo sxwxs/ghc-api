@@ -38,6 +38,7 @@ class State:
 
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
+        self.auto_remove_encrypted_content_on_parse_error: bool = False
 
     @property
     def editor_plugin_version(self) -> str:

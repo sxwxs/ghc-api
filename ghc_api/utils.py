@@ -263,3 +263,14 @@ def is_orphaned_tool_result_error(status_code: int, response_text: str) -> bool:
     if status_code != 400:
         return False
     return "tool_use_id" in response_text and "tool_result" in response_text
+
+
+def is_encrypted_content_parse_error(status_code: int, response_text: str) -> bool:
+    """Check if the error indicates encrypted content cannot be decrypted or parsed"""
+    if status_code != 400:
+        return False
+
+    prefix = "The encrypted content"
+    suffix = "Reason: Encrypted content could not be decrypted or parsed."
+    stripped = response_text.strip()
+    return stripped.startswith(prefix) and stripped.endswith(suffix)

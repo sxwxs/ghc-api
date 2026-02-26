@@ -111,6 +111,12 @@ system_prompt_add: []
 # ReadTimeout). Set to 0 to disable retries.
 max_connection_retries: 3
 
+# If true, when /v1/responses gets HTTP 400 with message that starts with
+# "The encrypted content" and ends with
+# "Reason: Encrypted content could not be decrypted or parsed.",
+# all items containing "encrypted_content" in request.input are removed and retried once.
+auto_remove_encrypted_content_on_parse_error: false
+
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
         api_version=DEFAULT_API_VERSION,

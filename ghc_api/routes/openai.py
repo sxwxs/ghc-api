@@ -16,7 +16,7 @@ from ..cache import cache
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
-from ..utils import log_error_request, log_connection_retry
+from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -128,6 +128,28 @@ def chat_completions():
 
         if last_connection_error is not None:
             return jsonify({"error": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}), 504
+
+        if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
+            request_input = payload.get("input")
+            if isinstance(request_input, list):
+                cleaned_input = []
+                removed_count = 0
+                for item in request_input:
+                    if isinstance(item, dict) and "encrypted_content" in item:
+                        removed_count += 1
+                        continue
+                    cleaned_input.append(item)
+
+                if removed_count > 0:
+                    retry_payload = dict(payload)
+                    retry_payload["input"] = cleaned_input
+                    response = requests.post(
+                        f"{get_copilot_base_url()}/v1/responses",
+                        headers=headers,
+                        json=retry_payload,
+                        timeout=1200,
+                    )
+                    payload = retry_payload
 
         duration = round(time.time() - start_time, 2)
         response_body = response.text
