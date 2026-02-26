@@ -270,7 +270,7 @@ def is_encrypted_content_parse_error(status_code: int, response_text: str) -> bo
     if status_code != 400:
         return False
 
-    prefix = "The encrypted content"
-    suffix = "Reason: Encrypted content could not be decrypted or parsed."
+    prefix = '{"error":{"message":"The encrypted content '
+    suffix = ' could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_request_body"}}'
     stripped = response_text.strip()
     return stripped.startswith(prefix) and stripped.endswith(suffix)

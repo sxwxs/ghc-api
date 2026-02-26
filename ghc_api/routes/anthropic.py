@@ -399,14 +399,10 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
         filtered_payload = filter_payload_for_copilot(current_payload)
         filtered_payload = adjust_max_tokens_for_thinking(filtered_payload)
 
-        if filtered_payload.get("stream"):
-            return stream_direct_anthropic(filtered_payload, headers, request_id,
-                                            current_payload, request_size, start_time,
-                                            original_model, translated_model, original_request_body)
-
         # Non-streaming request
         connection_retries = state.max_connection_retries
         last_connection_error = None
+        use_streaming = filtered_payload.get("stream")
         for conn_attempt in range(connection_retries + 1):
             try:
                 response = requests.post(
@@ -414,7 +410,12 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                     headers=headers,
                     json=filtered_payload,
                     timeout=1200,
+                    stream=use_streaming
                 )
+                if use_streaming and response.ok:
+                    return stream_direct_anthropic(filtered_payload, headers, request_id,
+                            current_payload, request_size, start_time,
+                            original_model, translated_model, original_request_body)
                 last_connection_error = None
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
@@ -499,7 +500,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
     return Response(response.text, status=response.status_code, mimetype="application/json")
 
 
-def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: str,
+def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict, headers: Dict, request_id: str,
                             anthropic_payload: Dict, request_size: int, start_time: float,
                             original_model: str, translated_model: str, original_request_body: Dict = None) -> Response:
     """Handle streaming direct Anthropic response (passthrough SSE events)."""
@@ -517,23 +518,13 @@ def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: s
         total_input_tokens = 0
         total_output_tokens = 0
         error_occurred = False
-        status_code = 200
+        status_code = response.status_code
         first_chunk_received = False
         accumulated_content = []
         accumulated_model = original_model
 
         try:
             cache.update_request_state(request_id, cache.STATE_SENDING)
-
-            response = requests.post(
-                f"{get_copilot_base_url()}/v1/messages",
-                headers=headers,
-                json=filtered_payload,
-                stream=True,
-                timeout=1200,
-            )
-            status_code = response.status_code
-
             sse_event_type = ""
 
             for line in response.iter_lines():
@@ -547,7 +538,7 @@ def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: s
                     sse_event_type = line[7:]
                     continue
 
-                if line.startswith("data: "):
+                elif line.startswith("data: "):
                     data = line[6:]
                     if data == "[DONE]":
                         break
@@ -583,6 +574,10 @@ def stream_direct_anthropic(filtered_payload: Dict, headers: Dict, request_id: s
 
                     except json.JSONDecodeError:
                         continue
+
+                elif status_code > 399:
+                    # Non-JSON error response - yield as is
+                    yield f"{line}\n\n"
 
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             error_occurred = True
@@ -831,6 +826,10 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                             yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
                     except json.JSONDecodeError:
                         continue
+
+                elif status_code > 399:
+                    # Non-JSON error response - yield as is
+                    yield f"{line}\n\n"
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             # Timeout or connection error from upstream - log but don't try to yield after client disconnect
             error_occurred = True

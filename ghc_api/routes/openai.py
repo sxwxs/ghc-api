@@ -359,21 +359,43 @@ def responses():
 
         request_size = len(json.dumps(payload))
 
-        if payload.get("stream"):
-            return stream_responses(payload, headers, request_id, request_size, start_time,
-                                    original_model, translated_model)
-
         # Non-streaming request
         connection_retries = state.max_connection_retries
         last_connection_error = None
+        use_streaming = payload.get("stream", False)
         for conn_attempt in range(connection_retries + 1):
             try:
                 response = requests.post(
                     f"{get_copilot_base_url()}/v1/responses",
                     headers=headers,
                     json=payload,
+                    stream=use_streaming,
                     timeout=1200,
                 )
+                if use_streaming:
+                    if response.ok:
+                        return stream_responses(response, request_id, request_size, start_time,
+                                        original_model, translated_model, payload)
+                if not response.ok:
+                    print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
+                    log_error_request("/v1/responses", payload, response.text, response.status_code)
+                    if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
+                        request_input = payload.get("input")
+                        if isinstance(request_input, list):
+                            cleaned_input = []
+                            removed_count = 0
+                            for item in request_input:
+                                if isinstance(item, dict) and "encrypted_content" in item:
+                                    removed_count += 1
+                                    continue
+                                cleaned_input.append(item)
+                            print("Warning: Detected possible encrypted content parse error in response. auto_remove_encrypted_content_on_parse_error is enabled, so will remove encrypted content and retry the request. May cause loss of information.")
+                            print("Try to remove encrypted content and retry", f"Removed {removed_count} encrypted content items from input for request {request_id}")
+                            if removed_count > 0:
+                                retry_payload = dict(payload)
+                                retry_payload["input"] = cleaned_input
+                                payload = retry_payload
+                                continue
                 last_connection_error = None
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
@@ -419,9 +441,9 @@ def responses():
         return jsonify({"error": str(e)}), 500
 
 
-def stream_responses(payload: Dict, headers: Dict, request_id: str,
+def stream_responses(response: requests.Response, request_id: str,
                      request_size: int, start_time: float,
-                     original_model: str, translated_model: str) -> Response:
+                     original_model: str, translated_model: str, payload: dict) -> Response:
     """Handle streaming Responses API (passthrough SSE events)"""
     cache.start_request(request_id, {
         "request_body": payload,
@@ -435,7 +457,7 @@ def stream_responses(payload: Dict, headers: Dict, request_id: str,
         total_input_tokens = 0
         total_output_tokens = 0
         error_occurred = False
-        status_code = 200
+        status_code = response.status_code
         first_chunk_received = False
         accumulated_text = []
         response_data = {}
@@ -443,13 +465,6 @@ def stream_responses(payload: Dict, headers: Dict, request_id: str,
         try:
             cache.update_request_state(request_id, cache.STATE_SENDING)
 
-            response = requests.post(
-                f"{get_copilot_base_url()}/v1/responses",
-                headers=headers,
-                json=payload,
-                stream=True,
-                timeout=1200,
-            )
             status_code = response.status_code
 
             for line in response.iter_lines():
