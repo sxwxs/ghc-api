@@ -413,7 +413,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                     stream=use_streaming
                 )
                 if use_streaming and response.ok:
-                    return stream_direct_anthropic(filtered_payload, headers, request_id,
+                    return stream_direct_anthropic(response, filtered_payload, headers, request_id,
                             current_payload, request_size, start_time,
                             original_model, translated_model, original_request_body)
                 last_connection_error = None

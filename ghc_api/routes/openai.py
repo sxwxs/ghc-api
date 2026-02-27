@@ -308,7 +308,15 @@ def responses():
     try:
         start_time = time.time()
         ensure_copilot_token()
-        payload = request.get_json()
+        try:
+            payload = request.get_json()
+        except Exception as e:
+            print(f"Get json parse error {e}, try to remove \\r \\n in the request body")
+            raw = request.get_data()
+            raw = raw.replace(b'\n', b'')
+            raw = raw.replace(b'\r', b'')
+            payload = json.loads(raw.decode('utf8'))
+            print("after remove \\r \\n the json can be parsed")
         request_id = str(uuid.uuid4())
 
         original_model = payload.get("model", "unknown")
