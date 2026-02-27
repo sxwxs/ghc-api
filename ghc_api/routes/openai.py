@@ -405,7 +405,6 @@ def responses():
                                 payload = retry_payload
                                 continue
                 last_connection_error = None
-                print('request finihsed wiht code', response.status_code)
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
                 last_connection_error = e
