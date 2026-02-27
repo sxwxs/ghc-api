@@ -4,12 +4,49 @@ Dashboard and API monitoring routes
 
 import json
 from datetime import datetime
+from typing import Any, Dict, List
 
 from flask import Blueprint, Response, jsonify, render_template, request
 
 from ..cache import cache
+from ..config import model_mappings
+from ..state import state
 
 dashboard_bp = Blueprint('dashboard', __name__)
+
+ALLOWED_ACCOUNT_TYPES = {"individual", "business", "enterprise"}
+
+
+def _runtime_config() -> Dict[str, Any]:
+    return {
+        "account_type": state.account_type,
+        "vscode_version": state.vscode_version,
+        "api_version": state.api_version,
+        "copilot_version": state.copilot_version,
+        "system_prompt_remove": state.system_prompt_remove,
+        "tool_result_suffix_remove": state.tool_result_suffix_remove,
+        "system_prompt_add": state.system_prompt_add,
+        "max_connection_retries": state.max_connection_retries,
+        "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
+        "model_mappings": {
+            "exact": model_mappings.exact_mappings,
+            "prefix": model_mappings.prefix_mappings,
+        },
+    }
+
+
+def _validate_string_list(value: Any, field_name: str) -> List[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise ValueError(f"'{field_name}' must be a list of strings")
+    return value
+
+
+def _validate_mapping(value: Any, field_name: str) -> Dict[str, str]:
+    if not isinstance(value, dict):
+        raise ValueError(f"'{field_name}' must be an object")
+    if any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
+        raise ValueError(f"'{field_name}' values must be string-to-string pairs")
+    return value
 
 
 @dashboard_bp.route("/", methods=["GET"])
@@ -22,6 +59,96 @@ def index():
 def requests_page():
     """Serve the requests browser page"""
     return render_template("requests.html")
+
+
+@dashboard_bp.route("/api/runtime-config", methods=["GET"])
+def api_runtime_config():
+    """Get current in-memory runtime configuration"""
+    return jsonify(_runtime_config())
+
+
+@dashboard_bp.route("/api/runtime-config", methods=["POST"])
+def api_runtime_config_update():
+    """Update in-memory runtime configuration only"""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    allowed_keys = {
+        "account_type",
+        "vscode_version",
+        "api_version",
+        "copilot_version",
+        "system_prompt_remove",
+        "tool_result_suffix_remove",
+        "system_prompt_add",
+        "max_connection_retries",
+        "auto_remove_encrypted_content_on_parse_error",
+        "model_mappings",
+    }
+    unknown_keys = sorted(set(payload.keys()) - allowed_keys)
+    if unknown_keys:
+        return jsonify({"error": f"Unknown config key(s): {', '.join(unknown_keys)}"}), 400
+
+    try:
+        if "account_type" in payload:
+            account_type = payload["account_type"]
+            if not isinstance(account_type, str) or account_type not in ALLOWED_ACCOUNT_TYPES:
+                raise ValueError("'account_type' must be one of: individual, business, enterprise")
+            state.account_type = account_type
+
+        if "vscode_version" in payload:
+            if not isinstance(payload["vscode_version"], str):
+                raise ValueError("'vscode_version' must be a string")
+            state.vscode_version = payload["vscode_version"]
+
+        if "api_version" in payload:
+            if not isinstance(payload["api_version"], str):
+                raise ValueError("'api_version' must be a string")
+            state.api_version = payload["api_version"]
+
+        if "copilot_version" in payload:
+            if not isinstance(payload["copilot_version"], str):
+                raise ValueError("'copilot_version' must be a string")
+            state.copilot_version = payload["copilot_version"]
+
+        if "system_prompt_remove" in payload:
+            state.system_prompt_remove = _validate_string_list(payload["system_prompt_remove"], "system_prompt_remove")
+
+        if "tool_result_suffix_remove" in payload:
+            state.tool_result_suffix_remove = _validate_string_list(payload["tool_result_suffix_remove"], "tool_result_suffix_remove")
+
+        if "system_prompt_add" in payload:
+            state.system_prompt_add = _validate_string_list(payload["system_prompt_add"], "system_prompt_add")
+
+        if "max_connection_retries" in payload:
+            retries = payload["max_connection_retries"]
+            if not isinstance(retries, int) or retries < 0:
+                raise ValueError("'max_connection_retries' must be an integer >= 0")
+            state.max_connection_retries = retries
+
+        if "auto_remove_encrypted_content_on_parse_error" in payload:
+            flag = payload["auto_remove_encrypted_content_on_parse_error"]
+            if not isinstance(flag, bool):
+                raise ValueError("'auto_remove_encrypted_content_on_parse_error' must be a boolean")
+            state.auto_remove_encrypted_content_on_parse_error = flag
+
+        if "model_mappings" in payload:
+            mappings = payload["model_mappings"]
+            if not isinstance(mappings, dict):
+                raise ValueError("'model_mappings' must be an object")
+            exact = _validate_mapping(mappings.get("exact", {}), "model_mappings.exact")
+            prefix = _validate_mapping(mappings.get("prefix", {}), "model_mappings.prefix")
+            model_mappings.exact_mappings = exact
+            model_mappings.prefix_mappings = prefix
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    return jsonify({
+        "message": "Runtime configuration updated. This does not modify config.yaml.",
+        "config": _runtime_config(),
+    })
 
 
 @dashboard_bp.route("/api/stats", methods=["GET"])

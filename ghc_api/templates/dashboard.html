@@ -36,18 +36,24 @@
         .navbar-actions {
             display: flex;
             gap: 1rem;
+            align-items: center;
         }
 
-        .navbar-actions a {
+        .navbar-actions a,
+        .navbar-actions button {
             color: white;
             text-decoration: none;
             padding: 0.5rem 1rem;
             border-radius: 4px;
             background: rgba(255,255,255,0.2);
             transition: background 0.2s;
+            border: none;
+            font-size: 0.875rem;
+            cursor: pointer;
         }
 
-        .navbar-actions a:hover {
+        .navbar-actions a:hover,
+        .navbar-actions button:hover {
             background: rgba(255,255,255,0.3);
         }
 
@@ -55,6 +61,16 @@
             max-width: 1400px;
             margin: 0 auto;
             padding: 2rem;
+        }
+
+        .runtime-config-notice {
+            margin-bottom: 1rem;
+            padding: 0.875rem 1rem;
+            border-radius: 8px;
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            color: #6d4c41;
+            font-size: 0.9rem;
         }
 
         .stats-grid {
@@ -358,6 +374,48 @@
         .json-boolean { color: #569cd6; }
         .json-null { color: #569cd6; }
 
+        .config-editor {
+            width: 100%;
+            min-height: 320px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 0.75rem;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+            resize: vertical;
+        }
+
+        .config-modal-notice {
+            margin: 0 0 0.75rem;
+            font-size: 0.9rem;
+            color: #6d4c41;
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            border-radius: 6px;
+            padding: 0.75rem;
+        }
+
+        .config-modal-actions {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 0.75rem;
+        }
+
+        .config-status {
+            margin-top: 0.75rem;
+            font-size: 0.875rem;
+            min-height: 1.2rem;
+        }
+
+        .config-status.success {
+            color: #2e7d32;
+        }
+
+        .config-status.error {
+            color: #c62828;
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 1rem;
@@ -390,12 +448,17 @@
     <nav class="navbar">
         <h1>Copilot API Proxy</h1>
         <div class="navbar-actions">
+            <button type="button" onclick="openRuntimeConfigModal()">Runtime Config Override</button>
             <a href="/requests">Request Browser</a>
             <a href="/api/stats">API Stats</a>
         </div>
     </nav>
 
     <div class="container">
+        <div class="runtime-config-notice">
+            Runtime config overrides are in-memory only for the current running process and will not modify the config file.
+        </div>
+
         <div class="stats-grid" id="stats-cards">
             <div class="stat-card">
                 <h3>Total Requests</h3>
@@ -498,6 +561,26 @@
                 <div class="tab-content" id="tab-response">
                     <pre class="json-display" id="response-json"></pre>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="runtime-config-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Runtime Config Override</h3>
+                <button class="modal-close" onclick="closeRuntimeConfigModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="config-modal-notice">
+                    Changes here apply only to this running process and do not modify config.yaml.
+                </p>
+                <textarea id="runtime-config-editor" class="config-editor"></textarea>
+                <div class="config-modal-actions">
+                    <button class="refresh-btn" onclick="applyRuntimeConfig()">Apply Runtime Override</button>
+                    <button class="refresh-btn" onclick="openRuntimeConfigModal()">Reload Current Runtime Config</button>
+                </div>
+                <div id="runtime-config-status" class="config-status"></div>
             </div>
         </div>
     </div>
@@ -711,6 +794,61 @@
             document.getElementById('request-modal').classList.remove('active');
         }
 
+        async function openRuntimeConfigModal() {
+            const status = document.getElementById('runtime-config-status');
+            status.className = 'config-status';
+            status.textContent = '';
+
+            try {
+                const response = await fetch('/api/runtime-config');
+                const config = await response.json();
+                document.getElementById('runtime-config-editor').value = JSON.stringify(config, null, 2);
+                document.getElementById('runtime-config-modal').classList.add('active');
+            } catch (error) {
+                status.className = 'config-status error';
+                status.textContent = `Failed to load runtime config: ${error}`;
+                document.getElementById('runtime-config-modal').classList.add('active');
+            }
+        }
+
+        function closeRuntimeConfigModal() {
+            document.getElementById('runtime-config-modal').classList.remove('active');
+        }
+
+        async function applyRuntimeConfig() {
+            const status = document.getElementById('runtime-config-status');
+            status.className = 'config-status';
+            status.textContent = '';
+
+            let payload;
+            try {
+                payload = JSON.parse(document.getElementById('runtime-config-editor').value);
+            } catch (error) {
+                status.className = 'config-status error';
+                status.textContent = `Invalid JSON: ${error.message}`;
+                return;
+            }
+
+            try {
+                const response = await fetch('/api/runtime-config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const result = await response.json();
+                if (!response.ok) {
+                    throw new Error(result.error || 'Failed to apply runtime config');
+                }
+
+                document.getElementById('runtime-config-editor').value = JSON.stringify(result.config, null, 2);
+                status.className = 'config-status success';
+                status.textContent = result.message || 'Runtime config updated.';
+            } catch (error) {
+                status.className = 'config-status error';
+                status.textContent = error.message;
+            }
+        }
+
         // Tab switching
         document.querySelectorAll('.modal-tab').forEach(tab => {
             tab.addEventListener('click', () => {
@@ -728,11 +866,17 @@
                 closeModal();
             }
         });
+        document.getElementById('runtime-config-modal').addEventListener('click', (e) => {
+            if (e.target === e.currentTarget) {
+                closeRuntimeConfigModal();
+            }
+        });
 
         // Close modal on Escape key
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeModal();
+                closeRuntimeConfigModal();
             }
         });
 

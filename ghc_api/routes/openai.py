@@ -405,6 +405,7 @@ def responses():
                                 payload = retry_payload
                                 continue
                 last_connection_error = None
+                print('request finihsed wiht code', response.status_code)
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
                 last_connection_error = e
@@ -443,6 +444,24 @@ def responses():
             return jsonify(result)
         else:
             log_error_request("/v1/responses", payload, response.text, response.status_code)
+            usage = {}
+            try:
+                result = response.json()
+            except:
+                result = response.text
+            cache.add_request(request_id, {
+                "request_body": payload,
+                "response_body": result,
+                "model": original_model,
+                "translated_model": translated_model if translated_model != original_model else None,
+                "endpoint": "/v1/responses",
+                "status_code": response.status_code,
+                "request_size": request_size,
+                "response_size": response_size,
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "duration": duration,
+            })
             return Response(response.text, status=response.status_code, mimetype="application/json")
 
     except Exception as e:

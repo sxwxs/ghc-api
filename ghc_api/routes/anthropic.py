@@ -464,6 +464,25 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
             return jsonify(anthropic_response)
         else:
             log_error_request("/v1/messages", current_payload, response.text, response.status_code)
+            usage = {}
+            try:
+                anthropic_response = response.json()
+            except:
+                anthropic_response = response.text
+            cache.add_request(request_id, {
+                "original_request_body": original_request_body,
+                "request_body": current_payload,
+                "response_body": anthropic_response,
+                "model": original_model,
+                "translated_model": translated_model if translated_model != original_model else None,
+                "endpoint": "/v1/messages",
+                "status_code": response.status_code,
+                "request_size": request_size,
+                "response_size": len(json.dumps(anthropic_response)),
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+                "duration": duration,
+            })
 
             # Handle orphaned tool_result error with retry
             if is_orphaned_tool_result_error(response.status_code, response.text):
