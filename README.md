@@ -15,6 +15,10 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Request Details**: View full request/response bodies with JSON formatting
 - **Export/Import**: Export and import request history as JSON Lines files
 - **Content Filtering**: Remove or add content from system prompts and tool results
+- **Code Agent Manager UI**: Install Codex/Claude/Copilot CLI and manage config sync from dashboard
+- **Config Sync**: Sync Claude Code, Codex, and ghc-api config files with OneDrive
+- **Safe Backups**: Auto backup overwritten config files as `*.YYYYMMDD_HHMMSS.bak`
+- **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 
 ## Installation
 
@@ -45,6 +49,7 @@ By default, the server will start on `http://localhost:8313`.
 - `-p PORT` or `--port PORT`: Specify the port to listen on (default: 8313)
 - `-a ADDRESS` or `--address ADDRESS`: Specify the address to listen on (default: localhost)
 - `-c` or `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.8`)
 - `--help`: Show help message
 
 ### Configuration
@@ -97,6 +102,55 @@ The application follows this priority for getting the GitHub token:
 2. Token file at `~/.ghc-api/github_token.txt`
 3. Interactive GitHub Device Flow authentication
 
+### Config Sync and OneDrive
+
+`ghc-api` can manage and sync these files:
+
+- Claude Code: `~/.claude/settings.json`
+- Codex: `~/.codex/config.toml`
+- ghc-api: `~/.ghc-api/config.yaml` (or `%APPDATA%/ghc-api/config.yaml` on Windows)
+
+OneDrive detection priority:
+
+1. `~/OneDrive - *`
+2. `~/OneDrive`
+3. In WSL: `/mnt/c/Users/<username>/OneDrive - *` then `/mnt/c/Users/<username>/OneDrive`
+
+Sync target folder:
+
+- `.ghc-api/configSync` under detected OneDrive root
+
+Machine folder:
+
+- `.ghc-api/agents/{hostname}_{os}` where `os` is `Win`, `Linux`, or `WSL`
+
+Hash files:
+
+- `.ghc-api/configSync/config.sha1`
+- `.ghc-api/agents/{hostname}_{os}/ghc-api/config.sha1`
+
+Hashes are recalculated when local config file timestamp is newer than the hash file.
+On startup, ghc-api checks synced files and prints config differences to stdout (and UI indicator if different).
+
+### Token Usage Logging
+
+Every 5 minutes, ghc-api writes token usage delta (if non-zero) to:
+
+- OneDrive mode: `.ghc-api/agents/{hostname}_{os}/token_usage.jl`
+- Fallback when OneDrive is unavailable: `~/.ghc-api/token_usage.jl`
+
+Also flushes pending usage on shutdown (`Ctrl+C`/termination/normal exit).
+
+Each JSONL line includes:
+
+- `timestamp` (unix seconds)
+- `models` list with:
+  - `model`
+  - `request_count`
+  - `input_tokens`
+  - `output_tokens`
+  - `total_tokens`
+
 ## API Endpoints
 
 ### OpenAI Compatible
@@ -114,6 +168,8 @@ The application follows this priority for getting the GitHub token:
 
 - `GET /` - Web dashboard with statistics
 - `GET /requests` - Request browser page
+- `GET /api/runtime-config` - Read in-memory runtime config
+- `POST /api/runtime-config` - Update in-memory runtime config (no file write)
 - `GET /api/stats` - JSON statistics endpoint
 - `GET /api/requests` - Paginated list of requests
 - `GET /api/requests/search` - Full-text search in request/response bodies
@@ -122,6 +178,11 @@ The application follows this priority for getting the GitHub token:
 - `GET /api/request/<id>` - Individual request details
 - `GET /api/request/<id>/request-body` - Request body only
 - `GET /api/request/<id>/response-body` - Response body only
+- `GET /api/config-manager/status` - Config manager status and diff info
+- `POST /api/config-manager/install-tools` - Install Codex/Claude/Copilot CLI
+- `POST /api/config-manager/sync-to-onedrive` - Sync local config to OneDrive
+- `POST /api/config-manager/sync-from-onedrive` - Copy OneDrive config to local machine with backups
+- `GET /api/config-manager/token-usage?range=all|day|week|month` - Cross-machine token usage overview
 
 ## Example Usage
 
@@ -184,6 +245,11 @@ Access the web dashboard at `http://localhost:8313/` to:
 - See per-endpoint analytics
 - Browse recent requests
 - View detailed request/response bodies
+- Use Code Agent Manager to:
+  - Install code-agent CLIs
+  - Sync config files to/from OneDrive
+  - See config mismatch alerts
+  - View token usage overview by machine/model with time-range and machine filters
 
 ## Architecture
 
