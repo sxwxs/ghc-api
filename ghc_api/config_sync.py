@@ -173,7 +173,7 @@ def refresh_config_hash_files() -> Dict[str, object]:
             errors.append(f"{sync_hash}: {error}")
 
     if agent_root:
-        agent_hash = agent_root / "ghc-api" / "config.sha1"
+        agent_hash = agent_root / "config.sha1"
         hash_paths["agent_hash"] = str(agent_hash)
         refreshed, error = _write_hash_file_if_stale(agent_hash, latest_mtime)
         if refreshed:
