@@ -535,6 +535,50 @@
             font-weight: 600;
         }
 
+        .manager-page-tabs {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            margin-bottom: 0.75rem;
+            flex-wrap: wrap;
+        }
+
+        .manager-page-tab {
+            border: 1px solid #c5cae9;
+            background: #eef1ff;
+            color: #334;
+            border-radius: 999px;
+            padding: 0.35rem 0.8rem;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+
+        .manager-page-tab.active {
+            background: #667eea;
+            border-color: #667eea;
+            color: #fff;
+        }
+
+        .manager-page {
+            display: none;
+        }
+
+        .manager-page.active {
+            display: block;
+        }
+
+        .hash-table-wrap {
+            max-height: 300px;
+            overflow: auto;
+            border: 1px solid #ececec;
+            border-radius: 6px;
+        }
+
+        .hash-table .shared-row {
+            background: #f4f7ff;
+            font-weight: 600;
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 1rem;
@@ -741,33 +785,62 @@
                     </div>
                 </div>
                 <div id="config-manager-status" class="config-status"></div>
-                <div class="token-usage-section">
-                    <div class="token-usage-header">
-                        <h4>Token Usage Overview</h4>
-                        <div class="token-usage-controls">
-                            <label for="token-usage-range">Time Range</label>
-                            <select id="token-usage-range" onchange="onTokenUsageRangeChange()">
-                                <option value="all" selected>All the time</option>
-                                <option value="day">Past day</option>
-                                <option value="week">Past week</option>
-                                <option value="month">Past month</option>
-                            </select>
+                <div class="manager-page-tabs">
+                    <button id="manager-page-tab-usage" class="manager-page-tab active" onclick="showConfigManagerPage('usage')">Token Usage</button>
+                    <button id="manager-page-tab-hashes" class="manager-page-tab" onclick="showConfigManagerPage('hashes')">Config Hashes</button>
+                </div>
+                <div id="manager-page-usage" class="manager-page active">
+                    <div class="token-usage-section">
+                        <div class="token-usage-header">
+                            <h4>Token Usage Overview</h4>
+                            <div class="token-usage-controls">
+                                <label for="token-usage-range">Time Range</label>
+                                <select id="token-usage-range" onchange="onTokenUsageRangeChange()">
+                                    <option value="all" selected>All the time</option>
+                                    <option value="day">Past day</option>
+                                    <option value="week">Past week</option>
+                                    <option value="month">Past month</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="machine-filters" class="machine-filters"></div>
+                        <div class="token-usage-table-wrap">
+                            <table class="token-usage-table">
+                                <thead>
+                                    <tr>
+                                        <th>Model Id</th>
+                                        <th>Input Token</th>
+                                        <th>Output Token</th>
+                                        <th>Request Count</th>
+                                        <th>Total Token</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="token-usage-body"></tbody>
+                            </table>
                         </div>
                     </div>
-                    <div id="machine-filters" class="machine-filters"></div>
-                    <div class="token-usage-table-wrap">
-                        <table class="token-usage-table">
-                            <thead>
-                                <tr>
-                                    <th>Model Id</th>
-                                    <th>Input Token</th>
-                                    <th>Output Token</th>
-                                    <th>Request Count</th>
-                                    <th>Total Token</th>
-                                </tr>
-                            </thead>
-                            <tbody id="token-usage-body"></tbody>
-                        </table>
+                </div>
+                <div id="manager-page-hashes" class="manager-page">
+                    <div class="token-usage-section">
+                        <div class="token-usage-header">
+                            <h4>Config Hash Overview</h4>
+                            <div class="token-usage-controls">
+                                <button class="refresh-btn" onclick="refreshConfigHashOverview()">Refresh Hashes</button>
+                            </div>
+                        </div>
+                        <div class="hash-table-wrap">
+                            <table class="hash-table">
+                                <thead>
+                                    <tr>
+                                        <th>Machine</th>
+                                        <th>Config Hash</th>
+                                        <th>Create Time</th>
+                                        <th>Hash File</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="config-hash-body"></tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
                 <div id="config-manager-details" class="manager-status-list"></div>
@@ -779,6 +852,7 @@
         let configManagerLatestStatus = null;
         let tokenUsageOverviewData = { machines: [], rows: [], totals: {} };
         let tokenUsageSelectedMachines = new Set();
+        let configHashOverviewData = { shared_hash: {}, machines: [] };
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -1074,6 +1148,7 @@
             document.getElementById('config-manager-modal').classList.add('active');
             await refreshConfigManagerStatus();
             await refreshTokenUsageOverview();
+            await refreshConfigHashOverview();
         }
 
         function closeConfigManagerModal() {
@@ -1091,6 +1166,7 @@
                     throw new Error(result.error || `Request failed (${response.status})`);
                 }
                 await refreshConfigManagerStatus(successMessage);
+                await refreshConfigHashOverview();
                 const details = document.getElementById('config-manager-details');
                 details.textContent = `${details.textContent}\n\nLast action result:\n${JSON.stringify(result, null, 2)}`;
                 statusLine.className = 'config-status success';
@@ -1105,6 +1181,15 @@
             const data = await response.json();
             if (!response.ok) {
                 throw new Error(data.error || `Failed to load token usage (${response.status})`);
+            }
+            return data;
+        }
+
+        async function fetchConfigHashOverview() {
+            const response = await fetch('/api/config-manager/config-hashes');
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `Failed to load config hash overview (${response.status})`);
             }
             return data;
         }
@@ -1218,6 +1303,59 @@
             await refreshTokenUsageOverview(true);
         }
 
+        function showConfigManagerPage(pageId) {
+            document.querySelectorAll('.manager-page').forEach((el) => el.classList.remove('active'));
+            document.querySelectorAll('.manager-page-tab').forEach((el) => el.classList.remove('active'));
+            const page = document.getElementById(`manager-page-${pageId}`);
+            const tab = document.getElementById(`manager-page-tab-${pageId}`);
+            if (page) page.classList.add('active');
+            if (tab) tab.classList.add('active');
+        }
+
+        function renderConfigHashOverviewTable() {
+            const tbody = document.getElementById('config-hash-body');
+            tbody.innerHTML = '';
+
+            const shared = configHashOverviewData.shared_hash || {};
+            const sharedRow = document.createElement('tr');
+            sharedRow.className = 'shared-row';
+            sharedRow.innerHTML = `
+                <td>OneDrive Shared (configSync)</td>
+                <td>${shared.hash || '-'}</td>
+                <td>${shared.created_at ? new Date(shared.created_at).toLocaleString() : '-'}</td>
+                <td>${shared.path || '-'}</td>
+            `;
+            tbody.appendChild(sharedRow);
+
+            for (const machineRow of (configHashOverviewData.machines || [])) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${machineRow.machine || '-'}</td>
+                    <td>${machineRow.hash || '-'}</td>
+                    <td>${machineRow.created_at ? new Date(machineRow.created_at).toLocaleString() : '-'}</td>
+                    <td>${machineRow.path || '-'}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+
+            if ((configHashOverviewData.machines || []).length === 0) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = '<td colspan="4">No machine hash files found.</td>';
+                tbody.appendChild(tr);
+            }
+        }
+
+        async function refreshConfigHashOverview() {
+            const statusLine = document.getElementById('config-manager-status');
+            try {
+                configHashOverviewData = await fetchConfigHashOverview();
+                renderConfigHashOverviewTable();
+            } catch (error) {
+                statusLine.className = 'config-status error';
+                statusLine.textContent = `Failed to load config hash overview: ${error.message || error}`;
+            }
+        }
+
         async function installCodeAgents() {
             await runConfigManagerAction('/api/config-manager/install-tools', 'Tools install finished.');
         }
@@ -1306,6 +1444,7 @@
         loadRecentRequests();
         refreshConfigManagerStatus();
         refreshTokenUsageOverview(true);
+        refreshConfigHashOverview();
 
         // Auto-refresh every 30 seconds
         setInterval(() => {
@@ -1313,6 +1452,7 @@
             loadRecentRequests();
             refreshConfigManagerStatus();
             refreshTokenUsageOverview(false);
+            refreshConfigHashOverview();
         }, 30000);
     </script>
 </body>

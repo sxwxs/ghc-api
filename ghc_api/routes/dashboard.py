@@ -11,6 +11,7 @@ from flask import Blueprint, Response, jsonify, render_template, request
 from ..cache import cache
 from ..config import model_mappings
 from ..config_sync import (
+    get_config_hash_overview,
     get_sync_status,
     install_code_agents,
     sync_local_to_onedrive,
@@ -195,6 +196,12 @@ def api_config_manager_token_usage():
     if range_key not in {"all", "day", "week", "month"}:
         return jsonify({"error": "Invalid range. Use: all, day, week, month"}), 400
     return jsonify(get_token_usage_overview(range_key))
+
+
+@dashboard_bp.route("/api/config-manager/config-hashes", methods=["GET"])
+def api_config_manager_config_hashes():
+    """Get config hash values and creation times across machines."""
+    return jsonify(get_config_hash_overview())
 
 
 @dashboard_bp.route("/api/stats", methods=["GET"])

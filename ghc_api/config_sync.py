@@ -188,6 +188,62 @@ def refresh_config_hash_files() -> Dict[str, object]:
     }
 
 
+def _hash_file_info(path: Optional[Path]) -> Dict[str, object]:
+    if not path:
+        return {
+            "path": None,
+            "exists": False,
+            "hash": None,
+            "created_ts": None,
+            "created_at": None,
+        }
+    if not path.exists() or not path.is_file():
+        return {
+            "path": str(path),
+            "exists": False,
+            "hash": None,
+            "created_ts": None,
+            "created_at": None,
+        }
+    created_ts = int(path.stat().st_ctime)
+    try:
+        hash_value = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        hash_value = None
+    return {
+        "path": str(path),
+        "exists": True,
+        "hash": hash_value,
+        "created_ts": created_ts,
+        "created_at": datetime.fromtimestamp(created_ts).isoformat(),
+    }
+
+
+def get_config_hash_overview() -> Dict[str, object]:
+    refresh_config_hash_files()
+    onedrive = get_onedrive_path()
+    sync_root = get_sync_root()
+    shared_hash_path = sync_root / "config.sha1" if sync_root else None
+
+    machine_hashes = []
+    if onedrive:
+        agents_root = onedrive / ".ghc-api" / "agents"
+        if agents_root.exists() and agents_root.is_dir():
+            for machine_dir in sorted([p for p in agents_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower()):
+                preferred = machine_dir / "ghc-api" / "config.sha1"
+                legacy = machine_dir / "config.sha1"
+                selected = preferred if preferred.exists() else legacy
+                info = _hash_file_info(selected)
+                info["machine"] = machine_dir.name
+                machine_hashes.append(info)
+
+    return {
+        "onedrive_path": str(onedrive) if onedrive else None,
+        "shared_hash": _hash_file_info(shared_hash_path),
+        "machines": machine_hashes,
+    }
+
+
 def get_config_entries() -> Dict[str, ConfigEntry]:
     ghc_config_dir = Path(get_config_dir())
     return {
