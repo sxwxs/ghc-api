@@ -172,6 +172,17 @@ class RequestCache:
                 "endpoint_stats": dict(self.endpoint_stats),
             }
 
+    def get_model_token_snapshot(self) -> Dict[str, Dict[str, int]]:
+        """Get a thread-safe snapshot of model token counters."""
+        with self.lock:
+            return {
+                model: {
+                    "input_tokens": int(stats.get("input_tokens", 0)),
+                    "output_tokens": int(stats.get("output_tokens", 0)),
+                }
+                for model, stats in self.model_stats.items()
+            }
+
     def search_requests(self, query: str, limit: int = 50, offset: int = 0) -> List[Dict]:
         """Search requests by model, endpoint, or content"""
         with self.lock:

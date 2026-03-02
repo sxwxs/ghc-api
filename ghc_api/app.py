@@ -34,6 +34,7 @@ def initialize_app() -> None:
     """Initialize the application (token, models, etc.)"""
     from .api_helpers import fetch_models, refresh_copilot_token
     from .state import state
+    from .token_usage_reporter import start_token_usage_reporter
     from .token_manager import get_github_token
 
     # Get GitHub token using the token management system
@@ -55,5 +56,10 @@ def initialize_app() -> None:
 
     refresh_copilot_token()
     fetch_models()
+
+    if not state.token_usage_reporter_started:
+        start_token_usage_reporter()
+        state.token_usage_reporter_started = True
+
     print("Application initialized successfully")
 

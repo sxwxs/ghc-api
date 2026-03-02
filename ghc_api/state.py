@@ -40,6 +40,9 @@ class State:
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
         self.auto_remove_encrypted_content_on_parse_error: bool = False
 
+        # Background worker guards
+        self.token_usage_reporter_started: bool = False
+
     @property
     def editor_plugin_version(self) -> str:
         """Get the editor plugin version string"""
