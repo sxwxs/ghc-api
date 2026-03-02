@@ -83,6 +83,8 @@ def main():
             state.max_connection_retries = config['max_connection_retries']
         if 'auto_remove_encrypted_content_on_parse_error' in config:
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
+        if 'save_request_to_file' in config:
+            state.save_request_to_file = bool(config['save_request_to_file'])
 
         # Load model mappings from config
         if 'model_mappings' in config:

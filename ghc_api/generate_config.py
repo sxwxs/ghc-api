@@ -117,6 +117,9 @@ max_connection_retries: 3
 # all items containing "encrypted_content" in request.input are removed and retried once.
 auto_remove_encrypted_content_on_parse_error: false
 
+# If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
+save_request_to_file: false
+
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
         api_version=DEFAULT_API_VERSION,

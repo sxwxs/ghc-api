@@ -36,6 +36,7 @@ def _runtime_config() -> Dict[str, Any]:
         "system_prompt_add": state.system_prompt_add,
         "max_connection_retries": state.max_connection_retries,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
+        "save_request_to_file": state.save_request_to_file,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
@@ -92,6 +93,7 @@ def api_runtime_config_update():
         "system_prompt_add",
         "max_connection_retries",
         "auto_remove_encrypted_content_on_parse_error",
+        "save_request_to_file",
         "model_mappings",
     }
     unknown_keys = sorted(set(payload.keys()) - allowed_keys)
@@ -140,6 +142,12 @@ def api_runtime_config_update():
             if not isinstance(flag, bool):
                 raise ValueError("'auto_remove_encrypted_content_on_parse_error' must be a boolean")
             state.auto_remove_encrypted_content_on_parse_error = flag
+
+        if "save_request_to_file" in payload:
+            save_req = payload["save_request_to_file"]
+            if not isinstance(save_req, bool):
+                raise ValueError("'save_request_to_file' must be a boolean")
+            state.save_request_to_file = save_req
 
         if "model_mappings" in payload:
             mappings = payload["model_mappings"]
@@ -311,7 +319,7 @@ def api_export_requests():
     """Export all requests as JSON Lines (.jl) file"""
     def generate():
         for item in cache.get_all_requests():
-            yield json.dumps(item, ensure_ascii=False) + "\n"
+            yield cache.format_request_jsonl_line(item)
 
     return Response(
         generate(),

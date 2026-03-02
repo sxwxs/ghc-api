@@ -14,6 +14,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Web Dashboard**: Real-time statistics and request browser
 - **Request Details**: View full request/response bodies with JSON formatting
 - **Export/Import**: Export and import request history as JSON Lines files
+- **Optional Request File Logging**: Save completed requests to daily JSON Lines files
 - **Content Filtering**: Remove or add content from system prompts and tool results
 - **Code Agent Manager UI**: Install Codex/Claude/Copilot CLI and manage config sync from dashboard
 - **Config Sync**: Sync Claude Code, Codex, and ghc-api config files with OneDrive
@@ -92,6 +93,9 @@ model_mappings:
 system_prompt_remove: []    # Strings to remove from system prompts
 system_prompt_add: []       # Strings to append to system prompts
 tool_result_suffix_remove: [] # Strings to remove from end of tool results
+
+# Optional request persistence
+save_request_to_file: false # If true, save completed requests to requests/YYYY-MM-DD.jl
 ```
 
 ### Token Management
@@ -151,6 +155,14 @@ Each JSONL line includes:
   - `output_tokens`
   - `total_tokens`
 
+### Request File Logging
+
+When `save_request_to_file: true`, ghc-api appends each completed request to:
+
+- `<ghc-api config dir>/requests/YYYY-MM-DD.jl`
+
+The saved `.jl` line format is the same as dashboard export (`/api/requests/export`) and can be imported by dashboard import (`/api/requests/import`).
+
 ## API Endpoints
 
 ### OpenAI Compatible
@@ -183,6 +195,7 @@ Each JSONL line includes:
 - `POST /api/config-manager/sync-to-onedrive` - Sync local config to OneDrive
 - `POST /api/config-manager/sync-from-onedrive` - Copy OneDrive config to local machine with backups
 - `GET /api/config-manager/token-usage?range=all|day|week|month` - Cross-machine token usage overview
+- `GET /api/config-manager/config-hashes` - Config hash overview for shared OneDrive and each machine (with create time)
 
 ## Example Usage
 
@@ -250,6 +263,7 @@ Access the web dashboard at `http://localhost:8313/` to:
   - Sync config files to/from OneDrive
   - See config mismatch alerts
   - View token usage overview by machine/model with time-range and machine filters
+  - View config hash overview by machine and shared OneDrive hash with create times
 
 ## Architecture
 

@@ -3,6 +3,7 @@ Thread-safe cache for storing API requests and responses
 """
 
 import json
+import os
 import threading
 import uuid
 from collections import OrderedDict
@@ -65,6 +66,7 @@ class RequestCache:
 
     def complete_request(self, request_id: str, data: Dict) -> None:
         """Complete a request with response data and update statistics"""
+        entry_snapshot = None
         with self.lock:
             if request_id in self.cache:
                 # Update existing entry
@@ -130,6 +132,30 @@ class RequestCache:
             self.endpoint_stats[endpoint]["request_count"] += 1
             self.endpoint_stats[endpoint]["bytes_sent"] += data.get("request_size", 0)
             self.endpoint_stats[endpoint]["bytes_received"] += data.get("response_size", 0)
+            entry_snapshot = dict(self.cache[request_id])
+
+        if entry_snapshot:
+            self._append_request_to_daily_file(entry_snapshot)
+
+    def _append_request_to_daily_file(self, request_entry: Dict[str, Any]) -> None:
+        try:
+            from .state import state
+            if not getattr(state, "save_request_to_file", False):
+                return
+
+            from .utils import get_config_dir
+            requests_dir = os.path.join(get_config_dir(), "requests")
+            os.makedirs(requests_dir, exist_ok=True)
+            daily_file = os.path.join(requests_dir, f"{datetime.now().strftime('%Y-%m-%d')}.jl")
+            with open(daily_file, "a", encoding="utf-8") as f:
+                f.write(self.format_request_jsonl_line(request_entry))
+        except Exception as e:
+            print(f"[Request File Logging] Failed to append request: {e}")
+
+    @staticmethod
+    def format_request_jsonl_line(request_entry: Dict[str, Any]) -> str:
+        """Format a request entry as one JSON Lines record."""
+        return json.dumps(request_entry, ensure_ascii=False) + "\n"
 
     def add_request(self, request_id: str, data: Dict) -> None:
         """Add a request to the cache (legacy method for backwards compatibility)"""
