@@ -13,6 +13,7 @@ import yaml
 from . import __version__
 from .app import create_app, initialize_app
 from .config import DEBUG, model_mappings, DEFAULT_MODEL_MAPPINGS
+from .config_sync import print_sync_diff_status
 from .generate_config import generate_config_file
 from .state import state
 from .token_manager import get_config_dir
@@ -107,6 +108,9 @@ def main():
 
     # Create the Flask app
     app = create_app()
+
+    # Check config sync diff status on startup.
+    print_sync_diff_status()
 
     # Initialize the app context
     with app.app_context():

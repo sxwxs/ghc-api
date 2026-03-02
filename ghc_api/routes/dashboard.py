@@ -10,6 +10,12 @@ from flask import Blueprint, Response, jsonify, render_template, request
 
 from ..cache import cache
 from ..config import model_mappings
+from ..config_sync import (
+    get_sync_status,
+    install_code_agents,
+    sync_local_to_onedrive,
+    sync_onedrive_to_local,
+)
 from ..state import state
 
 dashboard_bp = Blueprint('dashboard', __name__)
@@ -149,6 +155,36 @@ def api_runtime_config_update():
         "message": "Runtime configuration updated. This does not modify config.yaml.",
         "config": _runtime_config(),
     })
+
+
+@dashboard_bp.route("/api/config-manager/status", methods=["GET"])
+def api_config_manager_status():
+    """Get OneDrive sync and local config diff status."""
+    return jsonify(get_sync_status())
+
+
+@dashboard_bp.route("/api/config-manager/install-tools", methods=["POST"])
+def api_config_manager_install_tools():
+    """Install Codex, Claude Code, and Copilot CLI via npm."""
+    result = install_code_agents()
+    status_code = 200 if result.get("ok") else 500
+    return jsonify(result), status_code
+
+
+@dashboard_bp.route("/api/config-manager/sync-to-onedrive", methods=["POST"])
+def api_config_manager_sync_to_onedrive():
+    """Copy local config files to OneDrive sync folder."""
+    result = sync_local_to_onedrive()
+    status_code = 200 if result.get("ok") else 400
+    return jsonify(result), status_code
+
+
+@dashboard_bp.route("/api/config-manager/sync-from-onedrive", methods=["POST"])
+def api_config_manager_sync_from_onedrive():
+    """Copy synced config files from OneDrive to local machine with backups."""
+    result = sync_onedrive_to_local()
+    status_code = 200 if result.get("ok") else 400
+    return jsonify(result), status_code
 
 
 @dashboard_bp.route("/api/stats", methods=["GET"])
