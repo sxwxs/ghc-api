@@ -177,6 +177,7 @@ class RequestCache:
         with self.lock:
             return {
                 model: {
+                    "request_count": int(stats.get("request_count", 0)),
                     "input_tokens": int(stats.get("input_tokens", 0)),
                     "output_tokens": int(stats.get("output_tokens", 0)),
                 }

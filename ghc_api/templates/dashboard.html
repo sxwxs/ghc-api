@@ -477,6 +477,64 @@
             min-height: 140px;
         }
 
+        .token-usage-section {
+            margin-top: 1rem;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 1rem;
+            background: #fff;
+        }
+
+        .token-usage-header {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .token-usage-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .token-usage-controls select {
+            padding: 0.4rem 0.5rem;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            background: #fff;
+        }
+
+        .machine-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            margin-bottom: 0.75rem;
+            font-size: 0.85rem;
+        }
+
+        .machine-filter-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+        }
+
+        .token-usage-table-wrap {
+            max-height: 260px;
+            overflow: auto;
+            border: 1px solid #ececec;
+            border-radius: 6px;
+        }
+
+        .token-usage-table .sum-row {
+            background: #f4f7ff;
+            font-weight: 600;
+        }
+
         @media (max-width: 768px) {
             .container {
                 padding: 1rem;
@@ -683,6 +741,35 @@
                     </div>
                 </div>
                 <div id="config-manager-status" class="config-status"></div>
+                <div class="token-usage-section">
+                    <div class="token-usage-header">
+                        <h4>Token Usage Overview</h4>
+                        <div class="token-usage-controls">
+                            <label for="token-usage-range">Time Range</label>
+                            <select id="token-usage-range" onchange="onTokenUsageRangeChange()">
+                                <option value="all" selected>All the time</option>
+                                <option value="day">Past day</option>
+                                <option value="week">Past week</option>
+                                <option value="month">Past month</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="machine-filters" class="machine-filters"></div>
+                    <div class="token-usage-table-wrap">
+                        <table class="token-usage-table">
+                            <thead>
+                                <tr>
+                                    <th>Model Id</th>
+                                    <th>Input Token</th>
+                                    <th>Output Token</th>
+                                    <th>Request Count</th>
+                                    <th>Total Token</th>
+                                </tr>
+                            </thead>
+                            <tbody id="token-usage-body"></tbody>
+                        </table>
+                    </div>
+                </div>
                 <div id="config-manager-details" class="manager-status-list"></div>
             </div>
         </div>
@@ -690,6 +777,8 @@
 
     <script>
         let configManagerLatestStatus = null;
+        let tokenUsageOverviewData = { machines: [], rows: [], totals: {} };
+        let tokenUsageSelectedMachines = new Set();
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -984,6 +1073,7 @@
         async function openConfigManagerModal() {
             document.getElementById('config-manager-modal').classList.add('active');
             await refreshConfigManagerStatus();
+            await refreshTokenUsageOverview();
         }
 
         function closeConfigManagerModal() {
@@ -1008,6 +1098,124 @@
                 statusLine.className = 'config-status error';
                 statusLine.textContent = error.message || String(error);
             }
+        }
+
+        async function fetchTokenUsageOverview(rangeKey) {
+            const response = await fetch(`/api/config-manager/token-usage?range=${encodeURIComponent(rangeKey)}`);
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || `Failed to load token usage (${response.status})`);
+            }
+            return data;
+        }
+
+        function renderMachineFilters(machines, resetSelection = false) {
+            const container = document.getElementById('machine-filters');
+            if (resetSelection || tokenUsageSelectedMachines.size === 0) {
+                tokenUsageSelectedMachines = new Set(machines);
+            } else {
+                const valid = new Set(machines);
+                tokenUsageSelectedMachines = new Set([...tokenUsageSelectedMachines].filter(name => valid.has(name)));
+                if (tokenUsageSelectedMachines.size === 0) {
+                    tokenUsageSelectedMachines = new Set(machines);
+                }
+            }
+
+            container.innerHTML = '';
+            if (!machines || machines.length === 0) {
+                container.textContent = 'No machine usage data found.';
+                return;
+            }
+
+            for (const machine of machines) {
+                const label = document.createElement('label');
+                label.className = 'machine-filter-item';
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.checked = tokenUsageSelectedMachines.has(machine);
+                checkbox.addEventListener('change', () => {
+                    if (checkbox.checked) {
+                        tokenUsageSelectedMachines.add(machine);
+                    } else {
+                        tokenUsageSelectedMachines.delete(machine);
+                    }
+                    renderTokenUsageTable();
+                });
+                const text = document.createElement('span');
+                text.textContent = machine;
+                label.appendChild(checkbox);
+                label.appendChild(text);
+                container.appendChild(label);
+            }
+        }
+
+        function renderTokenUsageTable() {
+            const tbody = document.getElementById('token-usage-body');
+            tbody.innerHTML = '';
+
+            const selectedRows = (tokenUsageOverviewData.rows || []).filter(row =>
+                tokenUsageSelectedMachines.has(row.machine)
+            );
+
+            const sum = {
+                input_tokens: 0,
+                output_tokens: 0,
+                request_count: 0,
+                total_tokens: 0,
+            };
+
+            for (const row of selectedRows) {
+                sum.input_tokens += row.input_tokens || 0;
+                sum.output_tokens += row.output_tokens || 0;
+                sum.request_count += row.request_count || 0;
+                sum.total_tokens += row.total_tokens || 0;
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${row.machine} / ${row.model_id}</td>
+                    <td>${formatNumber(row.input_tokens || 0)}</td>
+                    <td>${formatNumber(row.output_tokens || 0)}</td>
+                    <td>${formatNumber(row.request_count || 0)}</td>
+                    <td>${formatNumber(row.total_tokens || 0)}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+
+            if (selectedRows.length === 0) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = '<td colspan="5">No token usage in selected range/machines.</td>';
+                tbody.appendChild(tr);
+                return;
+            }
+
+            const sumRow = document.createElement('tr');
+            sumRow.className = 'sum-row';
+            sumRow.innerHTML = `
+                <td>Sum</td>
+                <td>${formatNumber(sum.input_tokens)}</td>
+                <td>${formatNumber(sum.output_tokens)}</td>
+                <td>${formatNumber(sum.request_count)}</td>
+                <td>${formatNumber(sum.total_tokens)}</td>
+            `;
+            tbody.appendChild(sumRow);
+        }
+
+        async function refreshTokenUsageOverview(resetSelection = false) {
+            const statusLine = document.getElementById('config-manager-status');
+            const rangeValue = document.getElementById('token-usage-range').value;
+            try {
+                const data = await fetchTokenUsageOverview(rangeValue);
+                tokenUsageOverviewData = data;
+                renderMachineFilters(data.machines || [], resetSelection);
+                renderTokenUsageTable();
+            } catch (error) {
+                statusLine.className = 'config-status error';
+                statusLine.textContent = `Failed to load token usage: ${error.message || error}`;
+            }
+        }
+
+        async function onTokenUsageRangeChange() {
+            await refreshTokenUsageOverview(true);
         }
 
         async function installCodeAgents() {
@@ -1097,12 +1305,14 @@
         loadStats();
         loadRecentRequests();
         refreshConfigManagerStatus();
+        refreshTokenUsageOverview(true);
 
         // Auto-refresh every 30 seconds
         setInterval(() => {
             loadStats();
             loadRecentRequests();
             refreshConfigManagerStatus();
+            refreshTokenUsageOverview(false);
         }, 30000);
     </script>
 </body>

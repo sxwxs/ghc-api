@@ -17,6 +17,7 @@ from ..config_sync import (
     sync_onedrive_to_local,
 )
 from ..state import state
+from ..token_usage_reporter import get_token_usage_overview
 
 dashboard_bp = Blueprint('dashboard', __name__)
 
@@ -185,6 +186,15 @@ def api_config_manager_sync_from_onedrive():
     result = sync_onedrive_to_local()
     status_code = 200 if result.get("ok") else 400
     return jsonify(result), status_code
+
+
+@dashboard_bp.route("/api/config-manager/token-usage", methods=["GET"])
+def api_config_manager_token_usage():
+    """Get token usage overview grouped by machine and model."""
+    range_key = request.args.get("range", "all")
+    if range_key not in {"all", "day", "week", "month"}:
+        return jsonify({"error": "Invalid range. Use: all, day, week, month"}), 400
+    return jsonify(get_token_usage_overview(range_key))
 
 
 @dashboard_bp.route("/api/stats", methods=["GET"])
