@@ -103,8 +103,8 @@ class RequestCache:
             self.bytes_sent += data.get("request_size", 0)
             self.bytes_received += data.get("response_size", 0)
 
-            # Update model stats
-            model = data.get("model", "unknown")
+            # Update model stats using translated name when available.
+            model = data.get("translated_model") or data.get("model", "unknown")
             if model not in self.model_stats:
                 self.model_stats[model] = {
                     "request_count": 0,
@@ -248,7 +248,7 @@ class RequestCache:
             self.bytes_sent += data.get("request_size", 0)
             self.bytes_received += data.get("response_size", 0)
 
-            model = data.get("model", "unknown")
+            model = data.get("translated_model") or data.get("model", "unknown")
             if model not in self.model_stats:
                 self.model_stats[model] = {
                     "request_count": 0,
