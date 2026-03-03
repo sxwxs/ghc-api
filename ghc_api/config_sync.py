@@ -43,6 +43,20 @@ class ConfigEntry:
 
 
 def _resolve_npm_executable() -> Optional[str]:
+    if _is_wsl():
+        # In WSL, prefer Linux npm and avoid Windows npm.cmd shims on /mnt/*.
+        npm_native = shutil.which("npm")
+        if npm_native:
+            npm_path = Path(npm_native)
+            if not str(npm_path).lower().endswith(".cmd") and not str(npm_path).startswith("/mnt/"):
+                return str(npm_path)
+
+        for candidate in ["/usr/bin/npm", "/usr/local/bin/npm", "/bin/npm"]:
+            candidate_path = Path(candidate)
+            if candidate_path.is_file():
+                return str(candidate_path)
+        return None
+
     # On Windows, npm is usually a .cmd shim and may not resolve as plain "npm".
     for candidate in ["npm.cmd", "npm"]:
         resolved = shutil.which(candidate)
@@ -103,9 +117,9 @@ def _resolve_windows_user_homes_from_wsl() -> list[Path]:
     candidates = [p for p in users_root.iterdir() if p.is_dir()]
     preferred: list[Path] = []
     other: list[Path] = []
-    for preferred in preferred_names:
+    for preferred_name in preferred_names:
         for candidate in candidates:
-            if candidate.name.lower() == preferred.lower():
+            if candidate.name.lower() == preferred_name.lower():
                 preferred.append(candidate)
     preferred_set = {p.resolve() for p in preferred}
     for candidate in candidates:
