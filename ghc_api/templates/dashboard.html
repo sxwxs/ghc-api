@@ -439,145 +439,6 @@
             color: #c62828;
         }
 
-        .manager-layout {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
-        }
-
-        .manager-card {
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 1rem;
-            background: #fafafa;
-        }
-
-        .manager-card h4 {
-            margin-bottom: 0.75rem;
-            color: #333;
-        }
-
-        .manager-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-            margin-bottom: 0.75rem;
-        }
-
-        .manager-status-list {
-            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-            font-size: 0.8125rem;
-            line-height: 1.4;
-            white-space: pre-wrap;
-            word-break: break-word;
-            background: #1e1e1e;
-            color: #d4d4d4;
-            border-radius: 8px;
-            padding: 0.75rem;
-            min-height: 140px;
-        }
-
-        .token-usage-section {
-            margin-top: 1rem;
-            border: 1px solid #e0e0e0;
-            border-radius: 8px;
-            padding: 1rem;
-            background: #fff;
-        }
-
-        .token-usage-header {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: space-between;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 0.75rem;
-        }
-
-        .token-usage-controls {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.75rem;
-            align-items: center;
-        }
-
-        .token-usage-controls select {
-            padding: 0.4rem 0.5rem;
-            border: 1px solid #ccc;
-            border-radius: 6px;
-            font-size: 0.875rem;
-            background: #fff;
-        }
-
-        .machine-filters {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.5rem 1rem;
-            margin-bottom: 0.75rem;
-            font-size: 0.85rem;
-        }
-
-        .machine-filter-item {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.3rem;
-        }
-
-        .token-usage-table-wrap {
-            max-height: 260px;
-            overflow: auto;
-            border: 1px solid #ececec;
-            border-radius: 6px;
-        }
-
-        .token-usage-table .sum-row {
-            background: #f4f7ff;
-            font-weight: 600;
-        }
-
-        .manager-page-tabs {
-            display: flex;
-            gap: 0.5rem;
-            margin-top: 0.75rem;
-            margin-bottom: 0.75rem;
-            flex-wrap: wrap;
-        }
-
-        .manager-page-tab {
-            border: 1px solid #c5cae9;
-            background: #eef1ff;
-            color: #334;
-            border-radius: 999px;
-            padding: 0.35rem 0.8rem;
-            font-size: 0.85rem;
-            cursor: pointer;
-        }
-
-        .manager-page-tab.active {
-            background: #667eea;
-            border-color: #667eea;
-            color: #fff;
-        }
-
-        .manager-page {
-            display: none;
-        }
-
-        .manager-page.active {
-            display: block;
-        }
-
-        .hash-table-wrap {
-            max-height: 300px;
-            overflow: auto;
-            border: 1px solid #ececec;
-            border-radius: 6px;
-        }
-
-        .hash-table .shared-row {
-            background: #f4f7ff;
-            font-weight: 600;
-        }
 
         @media (max-width: 768px) {
             .container {
@@ -594,10 +455,6 @@
             }
 
             .overview-grid {
-                grid-template-columns: 1fr;
-            }
-
-            .manager-layout {
                 grid-template-columns: 1fr;
             }
 
@@ -756,104 +613,7 @@
         </div>
     </div>
 
-    <div class="modal" id="config-manager-modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>Code Agent Manager</h3>
-                <button class="modal-close" onclick="closeConfigManagerModal()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="manager-layout">
-                    <div class="manager-card">
-                        <h4>Code Agent Tools</h4>
-                        <div class="manager-actions">
-                            <button class="refresh-btn" onclick="installCodeAgents()">Install Codex / Claude / Copilot CLI</button>
-                        </div>
-                        <div class="config-modal-notice">
-                            Before install, existing local Claude and Codex config files are backed up with timestamp + .bak.
-                        </div>
-                    </div>
-                    <div class="manager-card">
-                        <h4>Config Sync</h4>
-                        <div class="manager-actions">
-                            <button class="refresh-btn" onclick="syncConfigToOneDrive()">Backup Config To OneDrive</button>
-                            <button class="refresh-btn" onclick="syncConfigFromOneDrive()">Copy Config To This Machine</button>
-                        </div>
-                        <div class="config-modal-notice">
-                            Sync folder: <code>.ghc-api/configSync</code> under the detected OneDrive root.
-                        </div>
-                    </div>
-                </div>
-                <div id="config-manager-status" class="config-status"></div>
-                <div class="manager-page-tabs">
-                    <button id="manager-page-tab-usage" class="manager-page-tab active" onclick="showConfigManagerPage('usage')">Token Usage</button>
-                    <button id="manager-page-tab-hashes" class="manager-page-tab" onclick="showConfigManagerPage('hashes')">Config Hashes</button>
-                </div>
-                <div id="manager-page-usage" class="manager-page active">
-                    <div class="token-usage-section">
-                        <div class="token-usage-header">
-                            <h4>Token Usage Overview</h4>
-                            <div class="token-usage-controls">
-                                <label for="token-usage-range">Time Range</label>
-                                <select id="token-usage-range" onchange="onTokenUsageRangeChange()">
-                                    <option value="all" selected>All the time</option>
-                                    <option value="hour">Past hour</option>
-                                    <option value="day">Past day</option>
-                                    <option value="week">Past week</option>
-                                    <option value="month">Past month</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div id="machine-filters" class="machine-filters"></div>
-                        <div class="token-usage-table-wrap">
-                            <table class="token-usage-table">
-                                <thead>
-                                    <tr>
-                                        <th>Model Id</th>
-                                        <th>Input Token</th>
-                                        <th>Output Token</th>
-                                        <th>Request Count</th>
-                                        <th>Total Token</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="token-usage-body"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-                <div id="manager-page-hashes" class="manager-page">
-                    <div class="token-usage-section">
-                        <div class="token-usage-header">
-                            <h4>Config Hash Overview</h4>
-                            <div class="token-usage-controls">
-                                <button class="refresh-btn" onclick="refreshConfigHashOverview()">Refresh Hashes</button>
-                            </div>
-                        </div>
-                        <div class="hash-table-wrap">
-                            <table class="hash-table">
-                                <thead>
-                                    <tr>
-                                        <th>Machine</th>
-                                        <th>Config Hash</th>
-                                        <th>Create Time</th>
-                                        <th>Hash File</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="config-hash-body"></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-                <div id="config-manager-details" class="manager-status-list"></div>
-            </div>
-        </div>
-    </div>
-
     <script>
-        let configManagerLatestStatus = null;
-        let tokenUsageOverviewData = { machines: [], rows: [], totals: {} };
-        let tokenUsageSelectedMachines = new Set();
-        let configHashOverviewData = { shared_hash: {}, machines: [] };
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -1092,281 +852,25 @@
             return response.json();
         }
 
-        function renderConfigManagerStatus(status, extraMessage = '') {
-            configManagerLatestStatus = status;
-            const details = document.getElementById('config-manager-details');
+        function updateConfigManagerAlert(status) {
             const alert = document.getElementById('config-manager-alert');
-            const statusLine = document.getElementById('config-manager-status');
-
-            const lines = [];
-            lines.push(`OneDrive: ${status.onedrive_path || 'NOT FOUND'}`);
-            lines.push(`Sync Root: ${status.sync_root || 'N/A'}`);
-            lines.push(`Agent Root: ${status.agent_root || 'N/A'}`);
-            lines.push(`Has Sync Files: ${status.has_sync_files}`);
-            lines.push(`Has Differences: ${status.has_differences}`);
-            if (status.hash_paths) {
-                lines.push(`Hash(sync): ${status.hash_paths.config_sync_hash || 'N/A'}`);
-                lines.push(`Hash(agent): ${status.hash_paths.agent_hash || 'N/A'}`);
+            if (!alert) {
+                return;
             }
-            if (status.hash_refreshed && status.hash_refreshed.length > 0) {
-                lines.push(`Hash refreshed: ${status.hash_refreshed.join(', ')}`);
-            }
-            if (status.hash_errors && status.hash_errors.length > 0) {
-                lines.push(`Hash errors: ${status.hash_errors.join(' | ')}`);
-            }
-            lines.push('');
-            for (const [name, file] of Object.entries(status.files || {})) {
-                lines.push(`[${name}]`);
-                lines.push(`  local: ${file.local_path} (${file.local_exists ? 'exists' : 'missing'})`);
-                lines.push(`  sync:  ${file.sync_path || 'N/A'} (${file.sync_exists ? 'exists' : 'missing'})`);
-                lines.push(`  different: ${file.different}`);
-                lines.push('');
-            }
-            details.textContent = lines.join('\n').trim();
-
-            if (status.has_differences) {
+            if (status && status.has_differences) {
                 alert.classList.add('visible');
             } else {
                 alert.classList.remove('visible');
             }
-
-            statusLine.className = 'config-status';
-            statusLine.textContent = extraMessage || '';
         }
 
-        async function refreshConfigManagerStatus(extraMessage = '') {
+        async function refreshConfigManagerStatus() {
             try {
                 const status = await fetchConfigManagerStatus();
-                renderConfigManagerStatus(status, extraMessage);
+                updateConfigManagerAlert(status);
             } catch (error) {
-                const statusLine = document.getElementById('config-manager-status');
-                statusLine.className = 'config-status error';
-                statusLine.textContent = `Failed to load config status: ${error.message || error}`;
+                console.error('Failed to load config manager status:', error);
             }
-        }
-
-        async function openConfigManagerModal() {
-            document.getElementById('config-manager-modal').classList.add('active');
-            await refreshConfigManagerStatus();
-            await refreshTokenUsageOverview();
-            await refreshConfigHashOverview();
-        }
-
-        function closeConfigManagerModal() {
-            document.getElementById('config-manager-modal').classList.remove('active');
-        }
-
-        async function runConfigManagerAction(apiPath, successMessage) {
-            const statusLine = document.getElementById('config-manager-status');
-            statusLine.className = 'config-status';
-            statusLine.textContent = 'Running...';
-            try {
-                const response = await fetch(apiPath, { method: 'POST' });
-                const result = await response.json();
-                if (!response.ok || !result.ok) {
-                    throw new Error(result.error || `Request failed (${response.status})`);
-                }
-                await refreshConfigManagerStatus(successMessage);
-                await refreshConfigHashOverview();
-                const details = document.getElementById('config-manager-details');
-                details.textContent = `${details.textContent}\n\nLast action result:\n${JSON.stringify(result, null, 2)}`;
-                statusLine.className = 'config-status success';
-            } catch (error) {
-                statusLine.className = 'config-status error';
-                statusLine.textContent = error.message || String(error);
-            }
-        }
-
-        async function fetchTokenUsageOverview(rangeKey) {
-            const response = await fetch(`/api/config-manager/token-usage?range=${encodeURIComponent(rangeKey)}`);
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || `Failed to load token usage (${response.status})`);
-            }
-            return data;
-        }
-
-        async function fetchConfigHashOverview() {
-            const response = await fetch('/api/config-manager/config-hashes');
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || `Failed to load config hash overview (${response.status})`);
-            }
-            return data;
-        }
-
-        function renderMachineFilters(machines, resetSelection = false) {
-            const container = document.getElementById('machine-filters');
-            if (resetSelection || tokenUsageSelectedMachines.size === 0) {
-                tokenUsageSelectedMachines = new Set(machines);
-            } else {
-                const valid = new Set(machines);
-                tokenUsageSelectedMachines = new Set([...tokenUsageSelectedMachines].filter(name => valid.has(name)));
-                if (tokenUsageSelectedMachines.size === 0) {
-                    tokenUsageSelectedMachines = new Set(machines);
-                }
-            }
-
-            container.innerHTML = '';
-            if (!machines || machines.length === 0) {
-                container.textContent = 'No machine usage data found.';
-                return;
-            }
-
-            for (const machine of machines) {
-                const label = document.createElement('label');
-                label.className = 'machine-filter-item';
-                const checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.checked = tokenUsageSelectedMachines.has(machine);
-                checkbox.addEventListener('change', () => {
-                    if (checkbox.checked) {
-                        tokenUsageSelectedMachines.add(machine);
-                    } else {
-                        tokenUsageSelectedMachines.delete(machine);
-                    }
-                    renderTokenUsageTable();
-                });
-                const text = document.createElement('span');
-                text.textContent = machine;
-                label.appendChild(checkbox);
-                label.appendChild(text);
-                container.appendChild(label);
-            }
-        }
-
-        function renderTokenUsageTable() {
-            const tbody = document.getElementById('token-usage-body');
-            tbody.innerHTML = '';
-
-            const selectedRows = (tokenUsageOverviewData.rows || []).filter(row =>
-                tokenUsageSelectedMachines.has(row.machine)
-            );
-
-            const sum = {
-                input_tokens: 0,
-                output_tokens: 0,
-                request_count: 0,
-                total_tokens: 0,
-            };
-
-            for (const row of selectedRows) {
-                sum.input_tokens += row.input_tokens || 0;
-                sum.output_tokens += row.output_tokens || 0;
-                sum.request_count += row.request_count || 0;
-                sum.total_tokens += row.total_tokens || 0;
-
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td>${row.machine} / ${row.model_id}</td>
-                    <td>${formatNumber(row.input_tokens || 0)}</td>
-                    <td>${formatNumber(row.output_tokens || 0)}</td>
-                    <td>${formatNumber(row.request_count || 0)}</td>
-                    <td>${formatNumber(row.total_tokens || 0)}</td>
-                `;
-                tbody.appendChild(tr);
-            }
-
-            if (selectedRows.length === 0) {
-                const tr = document.createElement('tr');
-                tr.innerHTML = '<td colspan="5">No token usage in selected range/machines.</td>';
-                tbody.appendChild(tr);
-                return;
-            }
-
-            const sumRow = document.createElement('tr');
-            sumRow.className = 'sum-row';
-            sumRow.innerHTML = `
-                <td>Sum</td>
-                <td>${formatNumber(sum.input_tokens)}</td>
-                <td>${formatNumber(sum.output_tokens)}</td>
-                <td>${formatNumber(sum.request_count)}</td>
-                <td>${formatNumber(sum.total_tokens)}</td>
-            `;
-            tbody.appendChild(sumRow);
-        }
-
-        async function refreshTokenUsageOverview(resetSelection = false) {
-            const statusLine = document.getElementById('config-manager-status');
-            const rangeValue = document.getElementById('token-usage-range').value;
-            try {
-                const data = await fetchTokenUsageOverview(rangeValue);
-                tokenUsageOverviewData = data;
-                renderMachineFilters(data.machines || [], resetSelection);
-                renderTokenUsageTable();
-            } catch (error) {
-                statusLine.className = 'config-status error';
-                statusLine.textContent = `Failed to load token usage: ${error.message || error}`;
-            }
-        }
-
-        async function onTokenUsageRangeChange() {
-            await refreshTokenUsageOverview(true);
-        }
-
-        function showConfigManagerPage(pageId) {
-            document.querySelectorAll('.manager-page').forEach((el) => el.classList.remove('active'));
-            document.querySelectorAll('.manager-page-tab').forEach((el) => el.classList.remove('active'));
-            const page = document.getElementById(`manager-page-${pageId}`);
-            const tab = document.getElementById(`manager-page-tab-${pageId}`);
-            if (page) page.classList.add('active');
-            if (tab) tab.classList.add('active');
-        }
-
-        function renderConfigHashOverviewTable() {
-            const tbody = document.getElementById('config-hash-body');
-            tbody.innerHTML = '';
-
-            const shared = configHashOverviewData.shared_hash || {};
-            const sharedRow = document.createElement('tr');
-            sharedRow.className = 'shared-row';
-            sharedRow.innerHTML = `
-                <td>OneDrive Shared (configSync)</td>
-                <td>${shared.hash || '-'}</td>
-                <td>${shared.created_at ? new Date(shared.created_at).toLocaleString() : '-'}</td>
-                <td>${shared.path || '-'}</td>
-            `;
-            tbody.appendChild(sharedRow);
-
-            for (const machineRow of (configHashOverviewData.machines || [])) {
-                const tr = document.createElement('tr');
-                tr.innerHTML = `
-                    <td>${machineRow.machine || '-'}</td>
-                    <td>${machineRow.hash || '-'}</td>
-                    <td>${machineRow.created_at ? new Date(machineRow.created_at).toLocaleString() : '-'}</td>
-                    <td>${machineRow.path || '-'}</td>
-                `;
-                tbody.appendChild(tr);
-            }
-
-            if ((configHashOverviewData.machines || []).length === 0) {
-                const tr = document.createElement('tr');
-                tr.innerHTML = '<td colspan="4">No machine hash files found.</td>';
-                tbody.appendChild(tr);
-            }
-        }
-
-        async function refreshConfigHashOverview() {
-            const statusLine = document.getElementById('config-manager-status');
-            try {
-                configHashOverviewData = await fetchConfigHashOverview();
-                renderConfigHashOverviewTable();
-            } catch (error) {
-                statusLine.className = 'config-status error';
-                statusLine.textContent = `Failed to load config hash overview: ${error.message || error}`;
-            }
-        }
-
-        async function installCodeAgents() {
-            await runConfigManagerAction('/api/config-manager/install-tools', 'Tools install finished.');
-        }
-
-        async function syncConfigToOneDrive() {
-            await runConfigManagerAction('/api/config-manager/sync-to-onedrive', 'Config synced to OneDrive.');
-        }
-
-        async function syncConfigFromOneDrive() {
-            await runConfigManagerAction('/api/config-manager/sync-from-onedrive', 'Config copied to local machine.');
         }
 
         async function applyRuntimeConfig() {
@@ -1425,18 +929,11 @@
                 closeRuntimeConfigModal();
             }
         });
-        document.getElementById('config-manager-modal').addEventListener('click', (e) => {
-            if (e.target === e.currentTarget) {
-                closeConfigManagerModal();
-            }
-        });
-
         // Close modal on Escape key
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') {
                 closeModal();
                 closeRuntimeConfigModal();
-                closeConfigManagerModal();
             }
         });
 
@@ -1444,16 +941,12 @@
         loadStats();
         loadRecentRequests();
         refreshConfigManagerStatus();
-        refreshTokenUsageOverview(true);
-        refreshConfigHashOverview();
 
         // Auto-refresh every 30 seconds
         setInterval(() => {
             loadStats();
             loadRecentRequests();
             refreshConfigManagerStatus();
-            refreshTokenUsageOverview(false);
-            refreshConfigHashOverview();
         }, 30000);
     </script>
 </body>
