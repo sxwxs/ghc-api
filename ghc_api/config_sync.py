@@ -187,6 +187,40 @@ def _read_bytes(path: Path) -> Optional[bytes]:
     return path.read_bytes()
 
 
+def _split_codex_config_sections(raw: bytes) -> tuple[bytes, bytes]:
+    marker = b"\n[projects."
+    idx = raw.find(marker)
+    if idx == -1:
+        if raw.startswith(b"[projects."):
+            return b"", raw
+        return raw, b""
+    return raw[:idx], raw[idx + 1:]
+
+
+def _hash_bytes_for_entry(entry: ConfigEntry, raw: bytes) -> bytes:
+    if entry.key != "codex":
+        return raw
+    header, _ = _split_codex_config_sections(raw)
+    return header
+
+
+def _files_different(entry: ConfigEntry, left_path: Path, right_path: Path) -> bool:
+    left_raw = _read_bytes(left_path)
+    right_raw = _read_bytes(right_path)
+    if left_raw is None or right_raw is None:
+        return left_raw != right_raw
+    return _hash_bytes_for_entry(entry, left_raw) != _hash_bytes_for_entry(entry, right_raw)
+
+
+def _restore_codex_config_preserving_projects(source: Path, target: Path) -> None:
+    source_raw = _read_bytes(source) or b""
+    local_raw = _read_bytes(target) or b""
+    source_header, _ = _split_codex_config_sections(source_raw)
+    _, local_projects = _split_codex_config_sections(local_raw)
+    merged = source_header + (b"\n" + local_projects if local_projects else b"")
+    target.write_bytes(merged)
+
+
 def _config_hash_text() -> str:
     entries = get_config_entries()
     sha1 = hashlib.sha1()
@@ -194,7 +228,7 @@ def _config_hash_text() -> str:
         entry = entries[key]
         sha1.update(f"[{key}]".encode("utf-8"))
         if entry.local_path.exists():
-            sha1.update(entry.local_path.read_bytes())
+            sha1.update(_hash_bytes_for_entry(entry, entry.local_path.read_bytes()))
         else:
             sha1.update(b"<missing>")
     return sha1.hexdigest()
@@ -345,7 +379,7 @@ def get_sync_status() -> Dict[str, object]:
 
         different = False
         if sync_exists and local_exists:
-            different = _read_bytes(sync_path) != _read_bytes(entry.local_path)
+            different = _files_different(entry, sync_path, entry.local_path)
         elif sync_exists != local_exists:
             different = True
 
@@ -411,7 +445,11 @@ def sync_local_to_onedrive() -> Dict[str, object]:
             skipped[key] = "Local config file not found."
             continue
         target = sync_root / entry.sync_filename
-        shutil.copy2(entry.local_path, target)
+        if key == "codex":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _restore_codex_config_preserving_projects(entry.local_path, target)
+        else:
+            shutil.copy2(entry.local_path, target)
         copied[key] = str(target)
 
     return {
@@ -446,7 +484,10 @@ def sync_onedrive_to_local() -> Dict[str, object]:
         if backup_path:
             backups[key] = str(backup_path)
 
-        shutil.copy2(source, entry.local_path)
+        if key == "codex":
+            _restore_codex_config_preserving_projects(source, entry.local_path)
+        else:
+            shutil.copy2(source, entry.local_path)
         restored[key] = str(entry.local_path)
 
     return {
