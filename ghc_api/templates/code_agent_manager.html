@@ -292,6 +292,7 @@
                 </select>
             </div>
             <div class="machine-filters" id="machine-filters"></div>
+            <div id="usage-chart" style="margin-bottom:0.75rem;"></div>
             <div class="table-wrap">
                 <table>
                     <thead>
@@ -502,6 +503,7 @@
                         tokenUsageSelectedMachines.delete(machine);
                     }
                     renderTokenUsageTable();
+                    renderUsageChart();
                 });
                 const text = document.createElement("span");
                 text.textContent = machine;
@@ -600,6 +602,128 @@
             tbody.appendChild(sumRow);
         }
 
+        function formatCompact(n) {
+            if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+            return Math.round(n).toString();
+        }
+
+        function niceNumber(val) {
+            if (val <= 0) return 1;
+            const exp = Math.floor(Math.log10(val));
+            const frac = val / Math.pow(10, exp);
+            let nice;
+            if (frac <= 1) nice = 1;
+            else if (frac <= 2) nice = 2;
+            else if (frac <= 5) nice = 5;
+            else nice = 10;
+            return nice * Math.pow(10, exp);
+        }
+
+        function formatTimeLabel(ts, granularity) {
+            const d = new Date(ts * 1000);
+            const pad = (v) => v.toString().padStart(2, '0');
+            if (granularity === 'minute') {
+                return pad(d.getHours()) + ':' + pad(d.getMinutes());
+            } else if (granularity === 'hour') {
+                return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':00';
+            }
+            return (d.getMonth() + 1) + '/' + d.getDate();
+        }
+
+        function renderUsageChart() {
+            const container = document.getElementById("usage-chart");
+            const ts = tokenUsageOverviewData.timeseries;
+            if (!ts || !ts.times || ts.times.length === 0) {
+                container.innerHTML = '<div style="text-align:center;color:#999;padding:1.5rem 0;font-size:0.85rem;">No chart data available</div>';
+                return;
+            }
+
+            const { granularity, times, by_machine } = ts;
+            const n = times.length;
+
+            // Sum selected machines
+            const values = new Array(n).fill(0);
+            for (const machine of tokenUsageSelectedMachines) {
+                const mv = by_machine[machine];
+                if (mv) {
+                    for (let i = 0; i < n; i++) values[i] += mv[i] || 0;
+                }
+            }
+
+            const maxRaw = Math.max(...values, 0);
+            if (maxRaw === 0) {
+                container.innerHTML = '<div style="text-align:center;color:#999;padding:1.5rem 0;font-size:0.85rem;">No usage in selected range</div>';
+                return;
+            }
+
+            const W = 900, H = 240;
+            const PAD = { top: 20, right: 25, bottom: 50, left: 65 };
+            const plotW = W - PAD.left - PAD.right;
+            const plotH = H - PAD.top - PAD.bottom;
+            const maxVal = niceNumber(maxRaw);
+
+            const xScale = (i) => PAD.left + (n > 1 ? (i / (n - 1)) * plotW : plotW / 2);
+            const yScale = (v) => PAD.top + plotH - (v / maxVal) * plotH;
+
+            let svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" style="width:100%;height:auto;" xmlns="http://www.w3.org/2000/svg">`;
+            svg += `<style>text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;}</style>`;
+
+            // Plot background
+            svg += `<rect x="${PAD.left}" y="${PAD.top}" width="${plotW}" height="${plotH}" fill="#fafbfc" rx="3"/>`;
+
+            // Y grid + labels
+            const yTickCount = 5;
+            const yStep = maxVal / yTickCount;
+            for (let i = 0; i <= yTickCount; i++) {
+                const val = yStep * i;
+                const y = yScale(val);
+                svg += `<line x1="${PAD.left}" y1="${y.toFixed(1)}" x2="${W - PAD.right}" y2="${y.toFixed(1)}" stroke="#eee" stroke-width="1"/>`;
+                svg += `<text x="${PAD.left - 8}" y="${(y + 4).toFixed(1)}" text-anchor="end" fill="#888" font-size="11">${formatCompact(val)}</text>`;
+            }
+
+            // Build line path
+            let linePath = '';
+            for (let i = 0; i < n; i++) {
+                const x = xScale(i);
+                const y = yScale(values[i]);
+                linePath += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
+            }
+
+            // Area fill
+            const areaPath = linePath + ` L${xScale(n - 1).toFixed(1)},${yScale(0).toFixed(1)} L${xScale(0).toFixed(1)},${yScale(0).toFixed(1)} Z`;
+            svg += `<path d="${areaPath}" fill="rgba(102,126,234,0.1)"/>`;
+
+            // Line
+            svg += `<path d="${linePath}" fill="none" stroke="#667eea" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+            // Data point circles (skip if too many points)
+            if (n <= 72) {
+                for (let i = 0; i < n; i++) {
+                    if (values[i] > 0) {
+                        svg += `<circle cx="${xScale(i).toFixed(1)}" cy="${yScale(values[i]).toFixed(1)}" r="3" fill="#667eea" stroke="#fff" stroke-width="1.5"/>`;
+                    }
+                }
+            }
+
+            // X-axis labels
+            const maxLabels = 12;
+            const labelStep = Math.max(1, Math.ceil(n / maxLabels));
+            for (let i = 0; i < n; i += labelStep) {
+                const x = xScale(i);
+                const label = formatTimeLabel(times[i], granularity);
+                svg += `<text x="${x.toFixed(1)}" y="${H - 8}" text-anchor="middle" fill="#888" font-size="10" transform="rotate(-35,${x.toFixed(1)},${H - 8})">${label}</text>`;
+            }
+
+            // Axes lines
+            svg += `<line x1="${PAD.left}" y1="${PAD.top}" x2="${PAD.left}" y2="${PAD.top + plotH}" stroke="#ddd" stroke-width="1"/>`;
+            svg += `<line x1="${PAD.left}" y1="${PAD.top + plotH}" x2="${W - PAD.right}" y2="${PAD.top + plotH}" stroke="#ddd" stroke-width="1"/>`;
+
+            svg += '</svg>';
+            container.innerHTML = svg;
+        }
+
         async function refreshTokenUsageOverview(resetSelection = false) {
             const rangeValue = document.getElementById("token-usage-range").value;
             try {
@@ -607,6 +731,7 @@
                 tokenUsageOverviewData = data;
                 renderMachineFilters(data.machines || [], resetSelection);
                 renderTokenUsageTable();
+                renderUsageChart();
             } catch (error) {
                 setStatus("Failed to load token usage: " + (error.message || error), "error");
             }

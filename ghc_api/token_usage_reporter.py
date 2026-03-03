@@ -200,12 +200,62 @@ def _range_cutoff_ts(range_key: str) -> int | None:
     return now_ts - delta if delta else None
 
 
+def _build_timeseries(
+    raw_ts_data: list[tuple[str, int, int]],
+    cutoff: int | None,
+    now_ts: int,
+) -> dict:
+    """Build time-bucketed series from raw (machine, timestamp, total_tokens) tuples."""
+    if not raw_ts_data:
+        return {"granularity": "hour", "times": [], "by_machine": {}}
+
+    all_ts = [ts for _, ts, _ in raw_ts_data]
+    min_ts = min(all_ts)
+
+    if cutoff is not None:
+        span = now_ts - cutoff
+        start_ts = cutoff
+    else:
+        span = max(now_ts - min_ts, 1)
+        start_ts = min_ts
+
+    if span < 7200:  # < 2 hours → minute
+        granularity, bucket = "minute", 60
+    elif span < 259200:  # < 3 days → hour
+        granularity, bucket = "hour", 3600
+    else:  # >= 3 days → day
+        granularity, bucket = "day", 86400
+
+    machine_buckets: Dict[str, Dict[int, int]] = {}
+    for machine, ts, total in raw_ts_data:
+        b = (ts // bucket) * bucket
+        if machine not in machine_buckets:
+            machine_buckets[machine] = {}
+        machine_buckets[machine][b] = machine_buckets[machine].get(b, 0) + total
+
+    t0 = (start_ts // bucket) * bucket
+    t1 = (now_ts // bucket) * bucket
+    times: list[int] = []
+    t = t0
+    while t <= t1:
+        times.append(t)
+        t += bucket
+
+    by_machine = {
+        m: [buckets.get(t, 0) for t in times]
+        for m, buckets in machine_buckets.items()
+    }
+    return {"granularity": granularity, "times": times, "by_machine": by_machine}
+
+
 def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
     usage_files = _resolve_usage_files()
     cutoff = _range_cutoff_ts(range_key)
+    now_ts = int(time.time())
     machines = sorted([machine for machine, _ in usage_files], key=str.lower)
 
     aggregate: Dict[tuple[str, str], Dict[str, int]] = {}
+    raw_ts_data: list[tuple[str, int, int]] = []
 
     for machine, path in usage_files:
         try:
@@ -227,6 +277,7 @@ def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
                     if not isinstance(models, list):
                         continue
 
+                    line_total_tokens = 0
                     for model_usage in models:
                         if not isinstance(model_usage, dict):
                             continue
@@ -257,6 +308,10 @@ def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
                         aggregate[key]["data_sent"] += data_sent
                         aggregate[key]["data_received"] += data_received
                         aggregate[key]["total_data"] += total_data
+                        line_total_tokens += total_tokens
+
+                    if line_total_tokens > 0:
+                        raw_ts_data.append((machine, ts, line_total_tokens))
         except Exception:
             continue
 
@@ -297,4 +352,5 @@ def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
         "machines": machines,
         "rows": rows,
         "totals": totals,
+        "timeseries": _build_timeseries(raw_ts_data, cutoff, now_ts),
     }
