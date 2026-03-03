@@ -70,6 +70,12 @@ def requests_page():
     return render_template("requests.html")
 
 
+@dashboard_bp.route("/code-agent-manager", methods=["GET"])
+def code_agent_manager_page():
+    """Serve the code agent manager page"""
+    return render_template("code_agent_manager.html")
+
+
 @dashboard_bp.route("/api/runtime-config", methods=["GET"])
 def api_runtime_config():
     """Get current in-memory runtime configuration"""
@@ -201,8 +207,8 @@ def api_config_manager_sync_from_onedrive():
 def api_config_manager_token_usage():
     """Get token usage overview grouped by machine and model."""
     range_key = request.args.get("range", "all")
-    if range_key not in {"all", "day", "week", "month"}:
-        return jsonify({"error": "Invalid range. Use: all, day, week, month"}), 400
+    if range_key not in {"all", "hour", "day", "week", "month"}:
+        return jsonify({"error": "Invalid range. Use: all, hour, day, week, month"}), 400
     return jsonify(get_token_usage_overview(range_key))
 
 

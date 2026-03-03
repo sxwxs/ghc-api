@@ -616,7 +616,7 @@
         <h1>Copilot API Proxy</h1>
         <div class="navbar-actions">
             <button type="button" onclick="openRuntimeConfigModal()">Runtime Config Override</button>
-            <button id="config-manager-btn" class="config-manager-btn" type="button" onclick="openConfigManagerModal()">
+            <button id="config-manager-btn" class="config-manager-btn" type="button" onclick="window.location.href='/code-agent-manager'">
                 Code Agent Manager
                 <span id="config-manager-alert" class="config-manager-alert">!</span>
             </button>
@@ -797,6 +797,7 @@
                                 <label for="token-usage-range">Time Range</label>
                                 <select id="token-usage-range" onchange="onTokenUsageRangeChange()">
                                     <option value="all" selected>All the time</option>
+                                    <option value="hour">Past hour</option>
                                     <option value="day">Past day</option>
                                     <option value="week">Past week</option>
                                     <option value="month">Past month</option>

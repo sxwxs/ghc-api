@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copilot API Proxy - Code Agent Manager</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #fff;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .navbar h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .navbar-actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .navbar-actions a {
+            color: #fff;
+            text-decoration: none;
+            padding: 0.45rem 0.8rem;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.2);
+            transition: background 0.2s;
+            font-size: 0.875rem;
+        }
+
+        .navbar-actions a:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem;
+        }
+
+        .page-intro {
+            margin-bottom: 1rem;
+            padding: 0.875rem 1rem;
+            border-radius: 8px;
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            color: #6d4c41;
+            font-size: 0.9rem;
+        }
+
+        .section {
+            background: #fff;
+            border-radius: 12px;
+            padding: 1.25rem;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+            margin-bottom: 1rem;
+        }
+
+        .section h2 {
+            font-size: 1.1rem;
+            margin-bottom: 0.8rem;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 0.5rem;
+        }
+
+        .manager-actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+            margin-bottom: 0.75rem;
+        }
+
+        .btn {
+            border: 1px solid transparent;
+            border-radius: 6px;
+            padding: 0.45rem 0.8rem;
+            font-size: 0.875rem;
+            cursor: pointer;
+            color: #fff;
+            background: #667eea;
+        }
+
+        .btn:hover {
+            background: #5a6fd6;
+        }
+
+        .btn.secondary {
+            background: #4a5568;
+        }
+
+        .btn.secondary:hover {
+            background: #3f4857;
+        }
+
+        .status-line {
+            min-height: 1.2rem;
+            font-size: 0.875rem;
+        }
+
+        .status-line.success {
+            color: #2e7d32;
+        }
+
+        .status-line.error {
+            color: #c62828;
+        }
+
+        .status-block {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.8125rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 8px;
+            padding: 0.85rem;
+            min-height: 170px;
+        }
+
+        .token-controls {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 0.75rem;
+        }
+
+        .token-controls select {
+            padding: 0.35rem 0.55rem;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            background: #fff;
+        }
+
+        .machine-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            margin-bottom: 0.75rem;
+            font-size: 0.85rem;
+        }
+
+        .machine-filter-item {
+            display: inline-flex;
+            gap: 0.3rem;
+            align-items: center;
+        }
+
+        .table-wrap {
+            max-height: 360px;
+            overflow: auto;
+            border: 1px solid #ececec;
+            border-radius: 8px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.6rem 0.75rem;
+            border-bottom: 1px solid #efefef;
+            text-align: left;
+            font-size: 0.85rem;
+        }
+
+        th {
+            background: #f8f9fa;
+            color: #555;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        .sum-row {
+            background: #f4f7ff;
+            font-weight: 600;
+        }
+
+        .shared-row {
+            background: #f4f7ff;
+            font-weight: 600;
+        }
+
+        @media (max-width: 768px) {
+            .navbar {
+                padding: 0.9rem 1rem;
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.6rem;
+            }
+
+            .container {
+                padding: 1rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <h1>Code Agent Manager</h1>
+        <div class="navbar-actions">
+            <a href="/">Dashboard</a>
+            <a href="/requests">Request Browser</a>
+            <a href="/api/stats">API Stats</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <div class="page-intro">
+            This page provides a full-size view of code agent config sync status, token usage, and config hash overview.
+        </div>
+
+        <div class="section">
+            <h2>Actions</h2>
+            <div class="manager-actions">
+                <button class="btn" type="button" onclick="installCodeAgents()">Install/Update Tools</button>
+                <button class="btn" type="button" onclick="syncConfigToOneDrive()">Sync Local to OneDrive</button>
+                <button class="btn" type="button" onclick="syncConfigFromOneDrive()">Sync OneDrive to Local</button>
+                <button class="btn secondary" type="button" onclick="refreshAll()">Refresh All</button>
+            </div>
+            <div class="status-line" id="status-line"></div>
+        </div>
+
+        <div class="section">
+            <h2>Sync Status</h2>
+            <div class="status-block" id="config-manager-details">Loading...</div>
+        </div>
+
+        <div class="section">
+            <h2>Token Usage Overview</h2>
+            <div class="token-controls">
+                <label for="token-usage-range">Range</label>
+                <select id="token-usage-range" onchange="onTokenUsageRangeChange()">
+                    <option value="all">All</option>
+                    <option value="hour">Last 1h</option>
+                    <option value="day">Last 24h</option>
+                    <option value="week">Last 7d</option>
+                    <option value="month">Last 30d</option>
+                </select>
+            </div>
+            <div class="machine-filters" id="machine-filters"></div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Machine / Model</th>
+                            <th>Input Tokens</th>
+                            <th>Output Tokens</th>
+                            <th>Requests</th>
+                            <th>Total Tokens</th>
+                        </tr>
+                    </thead>
+                    <tbody id="token-usage-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Config Hash Overview</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Machine</th>
+                            <th>Hash</th>
+                            <th>Created At</th>
+                            <th>Path</th>
+                        </tr>
+                    </thead>
+                    <tbody id="config-hash-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let tokenUsageOverviewData = { machines: [], rows: [] };
+        let tokenUsageSelectedMachines = new Set();
+        let configHashOverviewData = { shared_hash: null, machines: [] };
+
+        function formatNumber(value) {
+            return (value || 0).toLocaleString();
+        }
+
+        function setStatus(message, className = "") {
+            const statusLine = document.getElementById("status-line");
+            statusLine.className = "status-line" + (className ? " " + className : "");
+            statusLine.textContent = message;
+        }
+
+        async function fetchConfigManagerStatus() {
+            const response = await fetch("/api/config-manager/status");
+            if (!response.ok) {
+                throw new Error("HTTP " + response.status);
+            }
+            return response.json();
+        }
+
+        function renderConfigManagerStatus(status, extraMessage = "") {
+            const details = document.getElementById("config-manager-details");
+            const lines = [];
+            lines.push("OneDrive: " + (status.onedrive_path || "NOT FOUND"));
+            lines.push("Sync Root: " + (status.sync_root || "N/A"));
+            lines.push("Agent Root: " + (status.agent_root || "N/A"));
+            lines.push("Has Sync Files: " + status.has_sync_files);
+            lines.push("Has Differences: " + status.has_differences);
+            if (status.hash_paths) {
+                lines.push("Hash(sync): " + (status.hash_paths.config_sync_hash || "N/A"));
+                lines.push("Hash(agent): " + (status.hash_paths.agent_hash || "N/A"));
+            }
+            if (status.hash_refreshed && status.hash_refreshed.length > 0) {
+                lines.push("Hash refreshed: " + status.hash_refreshed.join(", "));
+            }
+            if (status.hash_errors && status.hash_errors.length > 0) {
+                lines.push("Hash errors: " + status.hash_errors.join(" | "));
+            }
+            lines.push("");
+            for (const [name, file] of Object.entries(status.files || {})) {
+                lines.push("[" + name + "]");
+                lines.push("  local: " + file.local_path + " (" + (file.local_exists ? "exists" : "missing") + ")");
+                lines.push("  sync:  " + (file.sync_path || "N/A") + " (" + (file.sync_exists ? "exists" : "missing") + ")");
+                lines.push("  different: " + file.different);
+                lines.push("");
+            }
+            details.textContent = lines.join("\n").trim();
+            if (extraMessage) {
+                setStatus(extraMessage, "success");
+            }
+        }
+
+        async function refreshConfigManagerStatus(extraMessage = "") {
+            try {
+                const status = await fetchConfigManagerStatus();
+                renderConfigManagerStatus(status, extraMessage);
+            } catch (error) {
+                setStatus("Failed to load config status: " + (error.message || error), "error");
+            }
+        }
+
+        async function runConfigManagerAction(apiPath, successMessage) {
+            setStatus("Running...");
+            try {
+                const response = await fetch(apiPath, { method: "POST" });
+                const result = await response.json();
+                if (!response.ok || !result.ok) {
+                    throw new Error(result.error || ("Request failed (" + response.status + ")"));
+                }
+                await refreshConfigManagerStatus(successMessage);
+                await refreshConfigHashOverview();
+            } catch (error) {
+                setStatus(error.message || String(error), "error");
+            }
+        }
+
+        async function installCodeAgents() {
+            await runConfigManagerAction("/api/config-manager/install-tools", "Tools install finished.");
+        }
+
+        async function syncConfigToOneDrive() {
+            await runConfigManagerAction("/api/config-manager/sync-to-onedrive", "Config synced to OneDrive.");
+        }
+
+        async function syncConfigFromOneDrive() {
+            await runConfigManagerAction("/api/config-manager/sync-from-onedrive", "Config copied to local machine.");
+        }
+
+        async function fetchTokenUsageOverview(rangeKey) {
+            const response = await fetch("/api/config-manager/token-usage?range=" + encodeURIComponent(rangeKey));
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || ("Failed to load token usage (" + response.status + ")"));
+            }
+            return data;
+        }
+
+        function renderMachineFilters(machines, resetSelection = false) {
+            const container = document.getElementById("machine-filters");
+            if (resetSelection || tokenUsageSelectedMachines.size === 0) {
+                tokenUsageSelectedMachines = new Set(machines);
+            } else {
+                const valid = new Set(machines);
+                tokenUsageSelectedMachines = new Set([...tokenUsageSelectedMachines].filter((name) => valid.has(name)));
+                if (tokenUsageSelectedMachines.size === 0) {
+                    tokenUsageSelectedMachines = new Set(machines);
+                }
+            }
+
+            container.innerHTML = "";
+            if (!machines || machines.length === 0) {
+                container.textContent = "No machine usage data found.";
+                return;
+            }
+
+            for (const machine of machines) {
+                const label = document.createElement("label");
+                label.className = "machine-filter-item";
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.checked = tokenUsageSelectedMachines.has(machine);
+                checkbox.addEventListener("change", () => {
+                    if (checkbox.checked) {
+                        tokenUsageSelectedMachines.add(machine);
+                    } else {
+                        tokenUsageSelectedMachines.delete(machine);
+                    }
+                    renderTokenUsageTable();
+                });
+                const text = document.createElement("span");
+                text.textContent = machine;
+                label.appendChild(checkbox);
+                label.appendChild(text);
+                container.appendChild(label);
+            }
+        }
+
+        function renderTokenUsageTable() {
+            const tbody = document.getElementById("token-usage-body");
+            tbody.innerHTML = "";
+
+            const selectedRows = (tokenUsageOverviewData.rows || []).filter((row) =>
+                tokenUsageSelectedMachines.has(row.machine)
+            );
+
+            const sum = {
+                input_tokens: 0,
+                output_tokens: 0,
+                request_count: 0,
+                total_tokens: 0
+            };
+
+            for (const row of selectedRows) {
+                sum.input_tokens += row.input_tokens || 0;
+                sum.output_tokens += row.output_tokens || 0;
+                sum.request_count += row.request_count || 0;
+                sum.total_tokens += row.total_tokens || 0;
+
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td>${row.machine} / ${row.model_id}</td>
+                    <td>${formatNumber(row.input_tokens || 0)}</td>
+                    <td>${formatNumber(row.output_tokens || 0)}</td>
+                    <td>${formatNumber(row.request_count || 0)}</td>
+                    <td>${formatNumber(row.total_tokens || 0)}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+
+            if (selectedRows.length === 0) {
+                const tr = document.createElement("tr");
+                tr.innerHTML = "<td colspan=\"5\">No token usage in selected range/machines.</td>";
+                tbody.appendChild(tr);
+                return;
+            }
+
+            const sumRow = document.createElement("tr");
+            sumRow.className = "sum-row";
+            sumRow.innerHTML = `
+                <td>Sum</td>
+                <td>${formatNumber(sum.input_tokens)}</td>
+                <td>${formatNumber(sum.output_tokens)}</td>
+                <td>${formatNumber(sum.request_count)}</td>
+                <td>${formatNumber(sum.total_tokens)}</td>
+            `;
+            tbody.appendChild(sumRow);
+        }
+
+        async function refreshTokenUsageOverview(resetSelection = false) {
+            const rangeValue = document.getElementById("token-usage-range").value;
+            try {
+                const data = await fetchTokenUsageOverview(rangeValue);
+                tokenUsageOverviewData = data;
+                renderMachineFilters(data.machines || [], resetSelection);
+                renderTokenUsageTable();
+            } catch (error) {
+                setStatus("Failed to load token usage: " + (error.message || error), "error");
+            }
+        }
+
+        async function onTokenUsageRangeChange() {
+            await refreshTokenUsageOverview(true);
+        }
+
+        async function fetchConfigHashOverview() {
+            const response = await fetch("/api/config-manager/config-hashes");
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || ("Failed to load config hash overview (" + response.status + ")"));
+            }
+            return data;
+        }
+
+        function renderConfigHashOverviewTable() {
+            const tbody = document.getElementById("config-hash-body");
+            tbody.innerHTML = "";
+
+            const shared = configHashOverviewData.shared_hash || {};
+            const sharedRow = document.createElement("tr");
+            sharedRow.className = "shared-row";
+            sharedRow.innerHTML = `
+                <td>OneDrive Shared (configSync)</td>
+                <td>${shared.hash || "-"}</td>
+                <td>${shared.created_at ? new Date(shared.created_at).toLocaleString() : "-"}</td>
+                <td>${shared.path || "-"}</td>
+            `;
+            tbody.appendChild(sharedRow);
+
+            for (const machineRow of (configHashOverviewData.machines || [])) {
+                const tr = document.createElement("tr");
+                tr.innerHTML = `
+                    <td>${machineRow.machine || "-"}</td>
+                    <td>${machineRow.hash || "-"}</td>
+                    <td>${machineRow.created_at ? new Date(machineRow.created_at).toLocaleString() : "-"}</td>
+                    <td>${machineRow.path || "-"}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+
+            if ((configHashOverviewData.machines || []).length === 0) {
+                const tr = document.createElement("tr");
+                tr.innerHTML = "<td colspan=\"4\">No machine hash files found.</td>";
+                tbody.appendChild(tr);
+            }
+        }
+
+        async function refreshConfigHashOverview() {
+            try {
+                configHashOverviewData = await fetchConfigHashOverview();
+                renderConfigHashOverviewTable();
+            } catch (error) {
+                setStatus("Failed to load config hash overview: " + (error.message || error), "error");
+            }
+        }
+
+        async function refreshAll() {
+            setStatus("");
+            await refreshConfigManagerStatus();
+            await refreshTokenUsageOverview(false);
+            await refreshConfigHashOverview();
+        }
+
+        refreshAll();
+        setInterval(refreshAll, 30000);
+    </script>
+</body>
+</html>

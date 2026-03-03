@@ -32,6 +32,54 @@ class ConfigEntry:
     sync_filename: str
 
 
+def _resolve_npm_executable() -> Optional[str]:
+    # On Windows, npm is usually a .cmd shim and may not resolve as plain "npm".
+    for candidate in ["npm.cmd", "npm"]:
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+
+    if platform.system() == "Windows":
+        common_paths = [
+            Path(os.environ.get("ProgramFiles", "")) / "nodejs" / "npm.cmd",
+            Path(os.environ.get("ProgramFiles(x86)", "")) / "nodejs" / "npm.cmd",
+        ]
+        for path in common_paths:
+            if path.exists():
+                return str(path)
+
+    return None
+
+
+def _resolve_install_command(command: list[str]) -> tuple[list[str], Optional[str]]:
+    if not command:
+        return command, None
+    if command[0] != "npm":
+        return command, None
+
+    npm_exec = _resolve_npm_executable()
+    if npm_exec:
+        return [npm_exec, *command[1:]], None
+
+    return command, "npm was not found in PATH. Install Node.js/npm and restart the service process."
+
+
+def _install_log_file() -> Path:
+    return Path.home() / ".ghc-api" / "code_agent_install.log"
+
+
+def _log_install_event(message: str) -> None:
+    line = f"{datetime.now().isoformat(timespec='seconds')} {message}"
+    print(line)
+    try:
+        log_path = _install_log_file()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:
+        print(f"[Config Sync] Failed to write install log file: {e}")
+
+
 def _is_wsl() -> bool:
     return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
 
@@ -388,6 +436,7 @@ def sync_onedrive_to_local() -> Dict[str, object]:
 
 
 def install_code_agents() -> Dict[str, object]:
+    _log_install_event("[Config Sync] Starting code agent install/update.")
     entries = get_config_entries()
     backups: Dict[str, str] = {}
 
@@ -396,32 +445,61 @@ def install_code_agents() -> Dict[str, object]:
         backup = _backup_file(entries[key].local_path)
         if backup:
             backups[key] = str(backup)
+            _log_install_event(f"[Config Sync] Backed up {key} config: {backup}")
 
     command_results: Dict[str, object] = {}
     failures = 0
 
     for tool_name, command in TOOL_INSTALL_COMMANDS.items():
-        try:
-            proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        resolved_command, resolution_error = _resolve_install_command(command)
+        _log_install_event(f"[Config Sync] Installing {tool_name}: {' '.join(resolved_command)}")
+        if resolution_error:
+            failures += 1
+            _log_install_event(f"[Config Sync] {tool_name} install failed before execution: {resolution_error}")
             command_results[tool_name] = {
                 "command": " ".join(command),
+                "resolved_command": " ".join(resolved_command),
+                "returncode": -1,
+                "stdout": "",
+                "stderr": resolution_error,
+            }
+            continue
+
+        try:
+            proc = subprocess.run(resolved_command, capture_output=True, text=True, check=False)
+            command_results[tool_name] = {
+                "command": " ".join(command),
+                "resolved_command": " ".join(resolved_command),
                 "returncode": proc.returncode,
                 "stdout": proc.stdout[-4000:],
                 "stderr": proc.stderr[-4000:],
             }
             if proc.returncode != 0:
                 failures += 1
+                err_preview = (proc.stderr or "").strip().splitlines()
+                err_preview_text = err_preview[-1] if err_preview else "unknown error"
+                _log_install_event(f"[Config Sync] {tool_name} install failed (rc={proc.returncode}): {err_preview_text}")
+            else:
+                _log_install_event(f"[Config Sync] {tool_name} install succeeded.")
         except Exception as e:
             failures += 1
+            _log_install_event(f"[Config Sync] {tool_name} install exception: {e}")
             command_results[tool_name] = {
                 "command": " ".join(command),
+                "resolved_command": " ".join(resolved_command),
                 "returncode": -1,
                 "stdout": "",
                 "stderr": str(e),
             }
 
+    if failures == 0:
+        _log_install_event("[Config Sync] Code agent install/update completed successfully.")
+    else:
+        _log_install_event(f"[Config Sync] Code agent install/update completed with {failures} failure(s).")
+
     return {
         "ok": failures == 0,
+        "log_file": str(_install_log_file()),
         "backups": backups,
         "results": command_results,
     }

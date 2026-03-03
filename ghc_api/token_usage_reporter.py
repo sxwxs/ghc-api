@@ -187,6 +187,7 @@ def _resolve_usage_files() -> list[tuple[str, Path]]:
 def _range_cutoff_ts(range_key: str) -> int | None:
     now_ts = int(time.time())
     mapping = {
+        "hour": 60 * 60,
         "day": 24 * 60 * 60,
         "week": 7 * 24 * 60 * 60,
         "month": 30 * 24 * 60 * 60,
