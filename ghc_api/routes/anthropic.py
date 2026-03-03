@@ -261,6 +261,12 @@ def anthropic_count_tokens():
 
         model_id = payload.get("model", "")
 
+        # Translate model name (e.g., "claude-opus-4-6" -> "claude-opus-4")
+        translated_model = translate_model_name(model_id)
+        if translated_model != model_id:
+            print(f"[count_tokens] Model name translated: {model_id} -> {translated_model}")
+            model_id = translated_model
+
         # Find the model in cached models
         selected_model = None
         if state.models and state.models.get("data"):
