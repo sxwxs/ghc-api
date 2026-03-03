@@ -11,6 +11,7 @@ from flask import Blueprint, Response, jsonify, render_template, request
 from ..cache import cache
 from ..config import model_mappings
 from ..config_sync import (
+    get_software_versions,
     get_config_hash_overview,
     get_sync_status,
     install_code_agents,
@@ -216,6 +217,12 @@ def api_config_manager_token_usage():
 def api_config_manager_config_hashes():
     """Get config hash values and creation times across machines."""
     return jsonify(get_config_hash_overview())
+
+
+@dashboard_bp.route("/api/config-manager/software-versions", methods=["GET"])
+def api_config_manager_software_versions():
+    """Get software install/version status for common code agent tools."""
+    return jsonify(get_software_versions())
 
 
 @dashboard_bp.route("/api/stats", methods=["GET"])

@@ -207,6 +207,16 @@
             font-weight: 600;
         }
 
+        .software-installed {
+            color: #2e7d32;
+            font-weight: 600;
+        }
+
+        .software-missing {
+            color: #c62828;
+            font-weight: 600;
+        }
+
         @media (max-width: 768px) {
             .navbar {
                 padding: 0.9rem 1rem;
@@ -250,6 +260,23 @@
         <div class="section">
             <h2>Sync Status</h2>
             <div class="status-block" id="config-manager-details">Loading...</div>
+        </div>
+
+        <div class="section">
+            <h2>Software Versions</h2>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Software</th>
+                            <th>Status</th>
+                            <th>Version</th>
+                            <th>Command</th>
+                        </tr>
+                    </thead>
+                    <tbody id="software-versions-body"></tbody>
+                </table>
+            </div>
         </div>
 
         <div class="section">
@@ -397,6 +424,48 @@
                 throw new Error(data.error || ("Failed to load token usage (" + response.status + ")"));
             }
             return data;
+        }
+
+        async function fetchSoftwareVersions() {
+            const response = await fetch("/api/config-manager/software-versions");
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || ("Failed to load software versions (" + response.status + ")"));
+            }
+            return data;
+        }
+
+        function renderSoftwareVersionsTable(data) {
+            const tbody = document.getElementById("software-versions-body");
+            tbody.innerHTML = "";
+
+            for (const tool of (data.tools || [])) {
+                const tr = document.createElement("tr");
+                const statusClass = tool.installed ? "software-installed" : "software-missing";
+                const statusText = tool.installed ? "Installed" : "Not installed";
+                tr.innerHTML = `
+                    <td>${tool.name || "-"}</td>
+                    <td class="${statusClass}">${statusText}</td>
+                    <td>${tool.version || "-"}</td>
+                    <td>${tool.command || "-"}</td>
+                `;
+                tbody.appendChild(tr);
+            }
+
+            if ((data.tools || []).length === 0) {
+                const tr = document.createElement("tr");
+                tr.innerHTML = "<td colspan=\"4\">No software data available.</td>";
+                tbody.appendChild(tr);
+            }
+        }
+
+        async function refreshSoftwareVersions() {
+            try {
+                const data = await fetchSoftwareVersions();
+                renderSoftwareVersionsTable(data);
+            } catch (error) {
+                setStatus("Failed to load software versions: " + (error.message || error), "error");
+            }
         }
 
         function renderMachineFilters(machines, resetSelection = false) {
@@ -560,6 +629,7 @@
         async function refreshAll() {
             setStatus("");
             await refreshConfigManagerStatus();
+            await refreshSoftwareVersions();
             await refreshTokenUsageOverview(false);
             await refreshConfigHashOverview();
         }

@@ -25,6 +25,16 @@ TOOL_INSTALL_COMMANDS = {
 }
 
 
+SOFTWARE_VERSION_COMMANDS = [
+    ("nodejs", "Node.js", [["node", "--version"]]),
+    ("python", "Python", [["python", "--version"], ["py", "--version"]]),
+    ("claude_code", "Claude Code", [["claude", "--version"]]),
+    ("codex", "Codex", [["codex", "--version"]]),
+    ("copilot_cli", "Copilot CLI", [["copilot", "--version"]]),
+    ("visual_studio_code", "Visual Studio Code", [["code", "--version"]]),
+]
+
+
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
@@ -502,4 +512,82 @@ def install_code_agents() -> Dict[str, object]:
         "log_file": str(_install_log_file()),
         "backups": backups,
         "results": command_results,
+    }
+
+
+def _probe_version_command(command: list[str]) -> Optional[Dict[str, object]]:
+    executable = shutil.which(command[0])
+    if not executable:
+        return None
+    resolved_command = [executable, *command[1:]]
+
+    try:
+        proc = subprocess.run(
+            resolved_command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=8,
+        )
+    except Exception as e:
+        return {
+            "installed": True,
+            "version": "unknown",
+            "detail": str(e),
+            "command": " ".join(resolved_command),
+        }
+
+    combined = "\n".join([proc.stdout or "", proc.stderr or ""]).strip()
+    first_line = ""
+    for line in combined.splitlines():
+        clean = line.strip()
+        if clean:
+            first_line = clean
+            break
+
+    version_text = first_line or "unknown"
+    if proc.returncode != 0:
+        version_text = f"error (rc={proc.returncode})"
+
+    return {
+        "installed": True,
+        "version": version_text,
+        "detail": combined[-2000:],
+        "command": " ".join(resolved_command),
+    }
+
+
+def get_software_versions() -> Dict[str, object]:
+    tools = []
+
+    for tool_id, name, candidates in SOFTWARE_VERSION_COMMANDS:
+        result = None
+        for command in candidates:
+            result = _probe_version_command(command)
+            if result:
+                break
+
+        if not result:
+            tools.append({
+                "id": tool_id,
+                "name": name,
+                "installed": False,
+                "version": "Not installed",
+                "command": " / ".join(" ".join(c) for c in candidates),
+                "detail": "",
+            })
+            continue
+
+        tools.append({
+            "id": tool_id,
+            "name": name,
+            "installed": bool(result["installed"]),
+            "version": result["version"],
+            "command": result["command"],
+            "detail": result["detail"],
+        })
+
+    return {
+        "tools": tools,
+        "checked_at": datetime.now().isoformat(timespec="seconds"),
     }
