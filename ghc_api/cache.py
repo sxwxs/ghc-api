@@ -206,6 +206,8 @@ class RequestCache:
                     "request_count": int(stats.get("request_count", 0)),
                     "input_tokens": int(stats.get("input_tokens", 0)),
                     "output_tokens": int(stats.get("output_tokens", 0)),
+                    "bytes_sent": int(stats.get("bytes_sent", 0)),
+                    "bytes_received": int(stats.get("bytes_received", 0)),
                 }
                 for model, stats in self.model_stats.items()
             }

@@ -296,11 +296,14 @@
                 <table>
                     <thead>
                         <tr>
-                            <th>Machine / Model</th>
-                            <th>Input Tokens</th>
-                            <th>Output Tokens</th>
-                            <th>Requests</th>
-                            <th>Total Tokens</th>
+                            <th>Model Id</th>
+                            <th>Request Count</th>
+                            <th>Token Input</th>
+                            <th>Token Output</th>
+                            <th>Total Token</th>
+                            <th>Data Send</th>
+                            <th>Data Recieve</th>
+                            <th>Total Data</th>
                         </tr>
                     </thead>
                     <tbody id="token-usage-body"></tbody>
@@ -516,33 +519,68 @@
                 tokenUsageSelectedMachines.has(row.machine)
             );
 
+            const rowsByModel = new Map();
+            for (const row of selectedRows) {
+                const key = row.model_id || "unknown";
+                if (!rowsByModel.has(key)) {
+                    rowsByModel.set(key, {
+                        model_id: key,
+                        request_count: 0,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        total_tokens: 0,
+                        data_sent: 0,
+                        data_received: 0,
+                        total_data: 0
+                    });
+                }
+                const agg = rowsByModel.get(key);
+                agg.request_count += row.request_count || 0;
+                agg.input_tokens += row.input_tokens || 0;
+                agg.output_tokens += row.output_tokens || 0;
+                agg.total_tokens += row.total_tokens || 0;
+                agg.data_sent += row.data_sent || 0;
+                agg.data_received += row.data_received || 0;
+                agg.total_data += row.total_data || 0;
+            }
+
+            const modelRows = [...rowsByModel.values()].sort((a, b) => a.model_id.localeCompare(b.model_id));
             const sum = {
+                request_count: 0,
                 input_tokens: 0,
                 output_tokens: 0,
-                request_count: 0,
-                total_tokens: 0
+                total_tokens: 0,
+                data_sent: 0,
+                data_received: 0,
+                total_data: 0
             };
 
-            for (const row of selectedRows) {
+            for (const row of modelRows) {
+                sum.request_count += row.request_count || 0;
                 sum.input_tokens += row.input_tokens || 0;
                 sum.output_tokens += row.output_tokens || 0;
-                sum.request_count += row.request_count || 0;
                 sum.total_tokens += row.total_tokens || 0;
+                sum.data_sent += row.data_sent || 0;
+                sum.data_received += row.data_received || 0;
+                sum.total_data += row.total_data || 0;
 
                 const tr = document.createElement("tr");
                 tr.innerHTML = `
-                    <td>${row.machine} / ${row.model_id}</td>
+                    <td>${row.model_id}</td>
+                    <td>${formatNumber(row.request_count || 0)}</td>
                     <td>${formatNumber(row.input_tokens || 0)}</td>
                     <td>${formatNumber(row.output_tokens || 0)}</td>
-                    <td>${formatNumber(row.request_count || 0)}</td>
                     <td>${formatNumber(row.total_tokens || 0)}</td>
+                    <td>${formatNumber(row.data_sent || 0)}</td>
+                    <td>${formatNumber(row.data_received || 0)}</td>
+                    <td>${formatNumber(row.total_data || 0)}</td>
                 `;
                 tbody.appendChild(tr);
             }
 
-            if (selectedRows.length === 0) {
+            if (modelRows.length === 0) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"5\">No token usage in selected range/machines.</td>";
+                tr.innerHTML = "<td colspan=\"8\">No token usage in selected range/machines.</td>";
                 tbody.appendChild(tr);
                 return;
             }
@@ -551,10 +589,13 @@
             sumRow.className = "sum-row";
             sumRow.innerHTML = `
                 <td>Sum</td>
+                <td>${formatNumber(sum.request_count)}</td>
                 <td>${formatNumber(sum.input_tokens)}</td>
                 <td>${formatNumber(sum.output_tokens)}</td>
-                <td>${formatNumber(sum.request_count)}</td>
                 <td>${formatNumber(sum.total_tokens)}</td>
+                <td>${formatNumber(sum.data_sent)}</td>
+                <td>${formatNumber(sum.data_received)}</td>
+                <td>${formatNumber(sum.total_data)}</td>
             `;
             tbody.appendChild(sumRow);
         }

@@ -55,7 +55,6 @@ class TokenUsageReporter:
 
         current = cache.get_model_token_snapshot()
         delta_models = []
-        total_delta_tokens = 0
 
         model_names = sorted(set(self._last_snapshot.keys()) | set(current.keys()))
         for model_name in model_names:
@@ -65,21 +64,26 @@ class TokenUsageReporter:
             delta_request_count = max(0, int(now.get("request_count", 0)) - int(prev.get("request_count", 0)))
             delta_input = max(0, int(now.get("input_tokens", 0)) - int(prev.get("input_tokens", 0)))
             delta_output = max(0, int(now.get("output_tokens", 0)) - int(prev.get("output_tokens", 0)))
+            delta_bytes_sent = max(0, int(now.get("bytes_sent", 0)) - int(prev.get("bytes_sent", 0)))
+            delta_bytes_received = max(0, int(now.get("bytes_received", 0)) - int(prev.get("bytes_received", 0)))
             delta_total = delta_input + delta_output
-            if delta_total == 0:
+            delta_total_data = delta_bytes_sent + delta_bytes_received
+            if delta_total == 0 and delta_total_data == 0 and delta_request_count == 0:
                 continue
 
-            total_delta_tokens += delta_total
             delta_models.append({
                 "model": model_name,
                 "request_count": delta_request_count,
                 "input_tokens": delta_input,
                 "output_tokens": delta_output,
                 "total_tokens": delta_total,
+                "data_sent": delta_bytes_sent,
+                "data_received": delta_bytes_received,
+                "total_data": delta_total_data,
             })
 
         self._last_snapshot = current
-        if total_delta_tokens == 0:
+        if not delta_models:
             return
 
         payload = {
@@ -234,16 +238,25 @@ def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
                                 "input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
+                                "data_sent": 0,
+                                "data_received": 0,
+                                "total_data": 0,
                             }
                         req_count = int(model_usage.get("request_count", 0) or 0)
                         input_tokens = int(model_usage.get("input_tokens", 0) or 0)
                         output_tokens = int(model_usage.get("output_tokens", 0) or 0)
                         total_tokens = int(model_usage.get("total_tokens", input_tokens + output_tokens) or 0)
+                        data_sent = int(model_usage.get("data_sent", model_usage.get("bytes_sent", 0)) or 0)
+                        data_received = int(model_usage.get("data_received", model_usage.get("bytes_received", 0)) or 0)
+                        total_data = int(model_usage.get("total_data", data_sent + data_received) or 0)
 
                         aggregate[key]["request_count"] += req_count
                         aggregate[key]["input_tokens"] += input_tokens
                         aggregate[key]["output_tokens"] += output_tokens
                         aggregate[key]["total_tokens"] += total_tokens
+                        aggregate[key]["data_sent"] += data_sent
+                        aggregate[key]["data_received"] += data_received
+                        aggregate[key]["total_data"] += total_data
         except Exception:
             continue
 
@@ -253,6 +266,9 @@ def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
+        "data_sent": 0,
+        "data_received": 0,
+        "total_data": 0,
     }
 
     for (machine, model_id), stats in sorted(aggregate.items(), key=lambda item: (item[0][0].lower(), item[0][1].lower())):
@@ -263,12 +279,18 @@ def get_token_usage_overview(range_key: str = "all") -> Dict[str, object]:
             "input_tokens": stats["input_tokens"],
             "output_tokens": stats["output_tokens"],
             "total_tokens": stats["total_tokens"],
+            "data_sent": stats["data_sent"],
+            "data_received": stats["data_received"],
+            "total_data": stats["total_data"],
         }
         rows.append(row)
         totals["request_count"] += row["request_count"]
         totals["input_tokens"] += row["input_tokens"]
         totals["output_tokens"] += row["output_tokens"]
         totals["total_tokens"] += row["total_tokens"]
+        totals["data_sent"] += row["data_sent"]
+        totals["data_received"] += row["data_received"]
+        totals["total_data"] += row["total_data"]
 
     return {
         "range": range_key,
