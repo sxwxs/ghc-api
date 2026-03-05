@@ -253,6 +253,7 @@ def api_requests():
         summary = dict(item)
         summary["request_body"] = None  # Remove for list view
         summary["response_body"] = None  # Remove for list view
+        summary["request_headers"] = None  # Remove for list view
         items_summary.append(summary)
 
     return jsonify({
@@ -316,6 +317,7 @@ def api_fulltext_search():
         summary = dict(item)
         summary["request_body"] = None
         summary["response_body"] = None
+        summary["request_headers"] = None
         items_summary.append(summary)
 
     return jsonify({

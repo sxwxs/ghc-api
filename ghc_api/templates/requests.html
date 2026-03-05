@@ -666,6 +666,12 @@
                 </div>
                 <div class="checkbox-group">
                     <label>
+                        <input type="checkbox" id="show-request-headers">
+                        Request Headers
+                    </label>
+                </div>
+                <div class="checkbox-group">
+                    <label>
                         <input type="checkbox" id="show-original-request">
                         Original Request
                     </label>
@@ -703,6 +709,10 @@
                     <div class="detail-section" id="section-overview">
                         <div class="section-title">Overview</div>
                         <div class="overview-grid" id="overview-content"></div>
+                    </div>
+                    <div class="detail-section hidden" id="section-request-headers">
+                        <div class="section-title">Request Headers</div>
+                        <div id="request-headers-content"></div>
                     </div>
                     <div class="detail-section hidden" id="section-original-request">
                         <div class="section-title">Original Request (before modifications)</div>
@@ -954,6 +964,7 @@
 
             const data = currentRequestData;
             const showOverview = document.getElementById('show-overview').checked;
+            const showRequestHeaders = document.getElementById('show-request-headers').checked;
             const showOriginalRequest = document.getElementById('show-original-request').checked;
             const showRequest = document.getElementById('show-request').checked;
             const showResponse = document.getElementById('show-response').checked;
@@ -963,9 +974,18 @@
 
             // Toggle section visibility
             document.getElementById('section-overview').classList.toggle('hidden', !showOverview);
+            document.getElementById('section-request-headers').classList.toggle('hidden', !showRequestHeaders);
             document.getElementById('section-original-request').classList.toggle('hidden', !showOriginalRequest);
             document.getElementById('section-request').classList.toggle('hidden', !showRequest);
             document.getElementById('section-response').classList.toggle('hidden', !showResponse);
+
+            // Update request headers content
+            const requestHeadersContent = document.getElementById('request-headers-content');
+            if (data.request_headers) {
+                requestHeadersContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.request_headers)}</pre>`;
+            } else {
+                requestHeadersContent.innerHTML = '<div class="message-box">No request headers captured</div>';
+            }
 
             // Update original request content
             const originalRequestContent = document.getElementById('original-request-content');
@@ -1255,6 +1275,7 @@
 
         // Checkbox event listeners
         document.getElementById('show-overview').addEventListener('change', updateDetailView);
+        document.getElementById('show-request-headers').addEventListener('change', updateDetailView);
         document.getElementById('show-original-request').addEventListener('change', updateDetailView);
         document.getElementById('show-request').addEventListener('change', updateDetailView);
         document.getElementById('show-response').addEventListener('change', updateDetailView);

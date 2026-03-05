@@ -40,6 +40,7 @@ class RequestCache:
             self.cache[request_id] = {
                 "id": request_id,
                 "timestamp": datetime.now().isoformat(),
+                "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
                 "response_body": None,
@@ -86,6 +87,7 @@ class RequestCache:
                 self.cache[request_id] = {
                     "id": request_id,
                     "timestamp": datetime.now().isoformat(),
+                    "request_headers": data.get("request_headers"),
                     "original_request_body": data.get("original_request_body"),
                     "request_body": data.get("request_body"),
                     "response_body": data.get("response_body"),
@@ -257,6 +259,7 @@ class RequestCache:
             self.cache[request_id] = {
                 "id": request_id,
                 "timestamp": data.get("timestamp", datetime.now().isoformat()),
+                "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
                 "response_body": data.get("response_body"),

@@ -68,6 +68,9 @@ def chat_completions():
         payload = request.get_json()
         request_id = str(uuid.uuid4())
 
+        # Capture incoming request headers
+        request_headers = dict(request.headers)
+
         # Get the original and translated model names
         original_model = payload.get("model", "unknown")
         translated_model = translate_model_name(original_model)
@@ -100,7 +103,7 @@ def chat_completions():
 
         if payload.get("stream"):
             return stream_chat_completions(payload, headers, request_id, request_body, request_size, start_time,
-                                           original_model, translated_model)
+                                           original_model, translated_model, request_headers)
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
@@ -161,6 +164,7 @@ def chat_completions():
             # Cache the request/response
             usage = result.get("usage", {})
             cache.add_request(request_id, {
+                "request_headers": request_headers,
                 "request_body": payload,
                 "response_body": result,
                 "model": original_model,
@@ -185,10 +189,12 @@ def chat_completions():
 
 def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                             request_body: str, request_size: int, start_time: float,
-                            original_model: str, translated_model: str) -> Response:
+                            original_model: str, translated_model: str,
+                            request_headers: Dict = None) -> Response:
     """Handle streaming chat completions"""
     # Start tracking request immediately
     cache.start_request(request_id, {
+        "request_headers": request_headers,
         "request_body": payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
@@ -319,6 +325,9 @@ def responses():
             print("after remove \\r \\n the json can be parsed")
         request_id = str(uuid.uuid4())
 
+        # Capture incoming request headers
+        request_headers = dict(request.headers)
+
         original_model = payload.get("model", "unknown")
         translated_model = translate_model_name(original_model)
 
@@ -383,7 +392,7 @@ def responses():
                 if use_streaming:
                     if response.ok:
                         return stream_responses(response, request_id, request_size, start_time,
-                                        original_model, translated_model, payload)
+                                        original_model, translated_model, payload, request_headers)
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
                     log_error_request("/v1/responses", payload, response.text, response.status_code)
@@ -427,6 +436,7 @@ def responses():
 
             usage = result.get("usage", {})
             cache.add_request(request_id, {
+                "request_headers": request_headers,
                 "request_body": payload,
                 "response_body": result,
                 "model": original_model,
@@ -449,6 +459,7 @@ def responses():
             except:
                 result = response.text
             cache.add_request(request_id, {
+                "request_headers": request_headers,
                 "request_body": payload,
                 "response_body": result,
                 "model": original_model,
@@ -469,9 +480,11 @@ def responses():
 
 def stream_responses(response: requests.Response, request_id: str,
                      request_size: int, start_time: float,
-                     original_model: str, translated_model: str, payload: dict) -> Response:
+                     original_model: str, translated_model: str, payload: dict,
+                     request_headers: Dict = None) -> Response:
     """Handle streaming Responses API (passthrough SSE events)"""
     cache.start_request(request_id, {
+        "request_headers": request_headers,
         "request_body": payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
