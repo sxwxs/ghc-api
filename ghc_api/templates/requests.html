@@ -210,10 +210,29 @@
             gap: 0.75rem;
         }
 
+        .parsed-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            font-size: 0.75rem;
+            color: #666;
+            padding: 0.25rem 0;
+        }
+
+        .parsed-actions a {
+            color: #4f46e5;
+            text-decoration: none;
+        }
+
+        .parsed-actions a:hover {
+            text-decoration: underline;
+        }
+
         .message-box {
             border-radius: 8px;
-            padding: 0.75rem 1rem;
             border-left: 4px solid;
+            overflow: hidden;
         }
 
         .message-box.role-user {
@@ -241,13 +260,61 @@
             font-weight: 600;
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            margin-bottom: 0.5rem;
             opacity: 0.8;
+            display: block;
+        }
+
+        .parsed-summary,
+        .content-block-summary,
+        .tool-use-summary {
+            list-style: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
+
+        .parsed-summary::-webkit-details-marker,
+        .content-block-summary::-webkit-details-marker,
+        .tool-use-summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .parsed-summary {
+            padding: 0.75rem 1rem;
+        }
+
+        .parsed-summary-main,
+        .tool-use-summary-main {
+            display: block;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .parsed-toggle-indicator {
+            flex-shrink: 0;
+            color: #666;
+            font-size: 0.875rem;
+            transition: transform 0.15s ease;
+        }
+
+        details[open] > .parsed-summary .parsed-toggle-indicator,
+        details[open] > .content-block-summary .parsed-toggle-indicator,
+        details[open] > .tool-use-summary .parsed-toggle-indicator {
+            transform: rotate(0deg);
+        }
+
+        details:not([open]) > .parsed-summary .parsed-toggle-indicator,
+        details:not([open]) > .content-block-summary .parsed-toggle-indicator,
+        details:not([open]) > .tool-use-summary .parsed-toggle-indicator {
+            transform: rotate(-90deg);
         }
 
         .message-content {
             font-size: 0.8125rem;
             line-height: 1.5;
+            padding: 0 1rem 0.75rem;
         }
 
         .message-content pre {
@@ -262,15 +329,23 @@
             word-break: break-word;
         }
 
+        .message-content > pre:first-child {
+            margin-top: 0;
+        }
+
         .content-block {
             margin-bottom: 0.5rem;
-            padding: 0.5rem;
             background: rgba(255, 255, 255, 0.5);
             border-radius: 4px;
+            overflow: hidden;
         }
 
         .content-block:last-child {
             margin-bottom: 0;
+        }
+
+        .content-block-summary {
+            padding: 0.5rem;
         }
 
         .content-block-type {
@@ -278,26 +353,40 @@
             font-weight: 600;
             text-transform: uppercase;
             color: #666;
-            margin-bottom: 0.25rem;
+            display: block;
+        }
+
+        .content-block-body {
+            padding: 0 0.5rem 0.5rem;
         }
 
         .tool-use-block {
             background: #e0e7ff;
-            padding: 0.5rem;
             border-radius: 4px;
             margin-top: 0.5rem;
+            overflow: hidden;
+        }
+
+        .tool-use-summary {
+            padding: 0.5rem;
         }
 
         .tool-use-name {
             font-weight: 600;
             font-size: 0.75rem;
             color: #3730a3;
+            display: block;
         }
 
         .tool-use-meta {
             font-size: 0.625rem;
             color: #5b6478;
             margin-top: 0.25rem;
+            display: block;
+        }
+
+        .tool-use-body {
+            padding: 0 0.5rem 0.5rem;
         }
 
         .tool-use-input {
@@ -881,31 +970,72 @@
             return `<pre>${escapeHtml(safeStringify(value))}</pre>`;
         }
 
-        function renderMessageBox(title, contentHtml, roleClass = 'role-system') {
-            return `<div class="message-box ${roleClass}">
-                <div class="message-role">${escapeHtml(title)}</div>
+        function renderToggleIndicator() {
+            return '<span class="parsed-toggle-indicator" aria-hidden="true">▾</span>';
+        }
+
+        function renderParsedToolbar() {
+            return `<div class="parsed-actions">
+                <span>Parsed blocks can now be folded.</span>
+                <a href="javascript:void(0)" onclick="return toggleParsedBlocks(this, true)">Expand all</a>
+                <a href="javascript:void(0)" onclick="return toggleParsedBlocks(this, false)">Collapse all</a>
+            </div>`;
+        }
+
+        function toggleParsedBlocks(link, shouldExpand) {
+            const container = link.closest('.parsed-content');
+            if (!container) {
+                return false;
+            }
+            container.querySelectorAll('details').forEach((element) => {
+                element.open = shouldExpand;
+            });
+            return false;
+        }
+
+        function renderMessageBox(title, contentHtml, roleClass = 'role-system', isOpen = false) {
+            const openAttr = isOpen ? ' open' : '';
+            return `<details class="message-box ${roleClass}"${openAttr}>
+                <summary class="parsed-summary">
+                    <span class="parsed-summary-main">
+                        <span class="message-role">${escapeHtml(title)}</span>
+                    </span>
+                    ${renderToggleIndicator()}
+                </summary>
                 <div class="message-content">${contentHtml || ''}</div>
-            </div>`;
+            </details>`;
         }
 
-        function renderContentBlock(type, contentHtml) {
-            return `<div class="content-block">
-                <div class="content-block-type">${escapeHtml(formatTypeLabel(type))}</div>
-                ${contentHtml}
-            </div>`;
+        function renderContentBlock(type, contentHtml, isOpen = false) {
+            const openAttr = isOpen ? ' open' : '';
+            return `<details class="content-block"${openAttr}>
+                <summary class="content-block-summary">
+                    <span class="content-block-type">${escapeHtml(formatTypeLabel(type))}</span>
+                    ${renderToggleIndicator()}
+                </summary>
+                <div class="content-block-body">${contentHtml || ''}</div>
+            </details>`;
         }
 
-        function renderToolBlock(title, payload, meta = []) {
+        function renderToolBlock(title, payload, meta = [], isOpen = false) {
             const metaText = meta.filter(Boolean).join(' | ');
             const metaHtml = metaText ? `<div class="tool-use-meta">${escapeHtml(metaText)}</div>` : '';
             const payloadText = payload === undefined || payload === null || payload === ''
                 ? '(empty)'
                 : safeStringify(payload);
-            return `<div class="tool-use-block">
-                <div class="tool-use-name">${escapeHtml(title || 'Unknown Tool')}</div>
-                ${metaHtml}
-                <div class="tool-use-input">${escapeHtml(payloadText)}</div>
-            </div>`;
+            const openAttr = isOpen ? ' open' : '';
+            return `<details class="tool-use-block"${openAttr}>
+                <summary class="tool-use-summary">
+                    <span class="tool-use-summary-main">
+                        <span class="tool-use-name">${escapeHtml(title || 'Unknown Tool')}</span>
+                        ${metaHtml}
+                    </span>
+                    ${renderToggleIndicator()}
+                </summary>
+                <div class="tool-use-body">
+                    <div class="tool-use-input">${escapeHtml(payloadText)}</div>
+                </div>
+            </details>`;
         }
 
         function renderLegacyContentBlock(block) {
@@ -919,7 +1049,8 @@
             if (blockType === 'tool_use') {
                 return renderContentBlock(
                     blockType,
-                    renderToolBlock(block.name || 'Unknown Tool', block.input || {}, block.id ? [`id: ${block.id}`] : [])
+                    renderToolBlock(block.name || 'Unknown Tool', block.input || {}, block.id ? [`id: ${block.id}`] : [], true),
+                    true
                 );
             }
             if (blockType === 'tool_result') {
@@ -1013,7 +1144,7 @@
 
             const title = isOutput ? `Output: ${toolName}` : toolName;
             const sectionTitle = isOutput ? 'Tool Output' : 'Tool Call';
-            return renderMessageBox(sectionTitle, renderToolBlock(title, payload, meta), 'role-tool');
+            return renderMessageBox(sectionTitle, renderToolBlock(title, payload, meta, !isOutput), 'role-tool', !isOutput);
         }
 
         function renderResponsesItem(item, callNames) {
@@ -1046,7 +1177,7 @@
         function renderParsedRequest(requestBody) {
             if (!requestBody) return '<div class="message-box">No request body</div>';
 
-            let html = '<div class="parsed-content">';
+            let html = `<div class="parsed-content">${renderParsedToolbar()}`;
 
             if (requestBody.object === 'response' || Array.isArray(requestBody.input)) {
                 if (requestBody.instructions) {
@@ -1103,7 +1234,7 @@
         function renderParsedResponse(responseBody) {
             if (!responseBody) return '<div class="message-box">No response body</div>';
 
-            let html = '<div class="parsed-content">';
+            let html = `<div class="parsed-content">${renderParsedToolbar()}`;
 
             if (responseBody.object === 'response' || Array.isArray(responseBody.output)) {
                 html += renderResponsesItems(responseBody.output);
