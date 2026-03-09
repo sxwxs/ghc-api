@@ -389,6 +389,19 @@
             padding: 0 0.5rem 0.5rem;
         }
 
+        .tool-related-output {
+            margin-top: 0.5rem;
+        }
+
+        .tool-related-output-label {
+            display: block;
+            font-size: 0.625rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: #5b6478;
+            margin-bottom: 0.25rem;
+        }
+
         .tool-use-input {
             font-family: monospace;
             font-size: 0.6875rem;
@@ -1017,7 +1030,7 @@
             </details>`;
         }
 
-        function renderToolBlock(title, payload, meta = [], isOpen = false) {
+        function renderToolBlock(title, payload, meta = [], isOpen = false, extraContentHtml = '') {
             const metaText = meta.filter(Boolean).join(' | ');
             const metaHtml = metaText ? `<div class="tool-use-meta">${escapeHtml(metaText)}</div>` : '';
             const payloadText = payload === undefined || payload === null || payload === ''
@@ -1034,6 +1047,7 @@
                 </summary>
                 <div class="tool-use-body">
                     <div class="tool-use-input">${escapeHtml(payloadText)}</div>
+                    ${extraContentHtml || ''}
                 </div>
             </details>`;
         }
@@ -1103,6 +1117,17 @@
             return callNames;
         }
 
+        function buildToolCallIdSet(items) {
+            const callIds = new Set();
+            for (const item of items || []) {
+                const type = item?.type || '';
+                if (type.endsWith('_call') && item.call_id) {
+                    callIds.add(item.call_id);
+                }
+            }
+            return callIds;
+        }
+
         function renderResponsesReasoningItem(item) {
             let contentHtml = '';
             if (Array.isArray(item.summary)) {
@@ -1120,9 +1145,8 @@
             return renderMessageBox('Reasoning', contentHtml || renderPreformatted('No reasoning summary'), 'role-system');
         }
 
-        function renderResponsesToolItem(item, callNames) {
+        function renderResponsesToolOutputInline(item, callNames) {
             const itemType = item?.type || 'tool_call';
-            const isOutput = itemType.endsWith('_output');
             const toolName = item.name || callNames[item.call_id] || formatTypeLabel(itemType);
             const meta = [
                 formatTypeLabel(itemType),
@@ -1142,12 +1166,39 @@
                 payload = rest;
             }
 
-            const title = isOutput ? `Output: ${toolName}` : toolName;
-            const sectionTitle = isOutput ? 'Tool Output' : 'Tool Call';
-            return renderMessageBox(sectionTitle, renderToolBlock(title, payload, meta, !isOutput), 'role-tool', !isOutput);
+            return `<div class="tool-related-output">
+                <span class="tool-related-output-label">Output</span>
+                ${renderToolBlock(`Output: ${toolName}`, payload, meta)}
+            </div>`;
         }
 
-        function renderResponsesItem(item, callNames) {
+        function renderResponsesToolItem(item, callNames, relatedOutputs = []) {
+            const itemType = item?.type || 'tool_call';
+            const isOutput = itemType.endsWith('_output');
+            if (isOutput) {
+                return renderMessageBox('Tool Output', renderToolBlock(`Output: ${item.name || callNames[item.call_id] || formatTypeLabel(itemType)}`, tryParseJsonString(item.output), [
+                    formatTypeLabel(itemType),
+                    item.call_id ? `call_id: ${item.call_id}` : '',
+                    item.status ? `status: ${item.status}` : '',
+                ]), 'role-tool');
+            }
+
+            const toolName = item.name || callNames[item.call_id] || formatTypeLabel(itemType);
+            const meta = [
+                formatTypeLabel(itemType),
+                item.call_id ? `call_id: ${item.call_id}` : '',
+                item.status ? `status: ${item.status}` : '',
+            ];
+            const payload = Object.prototype.hasOwnProperty.call(item, 'arguments')
+                ? tryParseJsonString(item.arguments)
+                : Object.prototype.hasOwnProperty.call(item, 'input')
+                    ? item.input
+                    : item;
+            const outputsHtml = relatedOutputs.map((outputItem) => renderResponsesToolOutputInline(outputItem, callNames)).join('');
+            return renderMessageBox('Tool Call', renderToolBlock(toolName, payload, meta, true, outputsHtml), 'role-tool', true);
+        }
+
+        function renderResponsesItem(item, callNames, relatedOutputs = []) {
             const itemType = item?.type || 'unknown';
             if (itemType === 'message') {
                 const title = item.phase ? `${item.role || 'assistant'} (${item.phase})` : (item.role || 'assistant');
@@ -1161,7 +1212,7 @@
                 return renderResponsesReasoningItem(item);
             }
             if (itemType.endsWith('_call') || itemType.endsWith('_output')) {
-                return renderResponsesToolItem(item, callNames);
+                return renderResponsesToolItem(item, callNames, relatedOutputs);
             }
             return renderMessageBox(formatTypeLabel(itemType), renderPreformatted(item), 'role-system');
         }
@@ -1171,7 +1222,28 @@
                 return '';
             }
             const callNames = buildToolCallNameMap(items);
-            return items.map((item) => renderResponsesItem(item, callNames)).join('');
+            const callIds = buildToolCallIdSet(items);
+            const outputsByCallId = {};
+            for (const item of items) {
+                const itemType = item?.type || '';
+                if (itemType.endsWith('_output') && item.call_id) {
+                    if (!outputsByCallId[item.call_id]) {
+                        outputsByCallId[item.call_id] = [];
+                    }
+                    outputsByCallId[item.call_id].push(item);
+                }
+            }
+
+            return items.map((item) => {
+                const itemType = item?.type || '';
+                if (itemType.endsWith('_output') && item.call_id && callIds.has(item.call_id)) {
+                    return '';
+                }
+                const relatedOutputs = itemType.endsWith('_call') && item.call_id
+                    ? (outputsByCallId[item.call_id] || [])
+                    : [];
+                return renderResponsesItem(item, callNames, relatedOutputs);
+            }).join('');
         }
 
         function renderParsedRequest(requestBody) {
