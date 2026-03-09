@@ -294,6 +294,12 @@
             color: #3730a3;
         }
 
+        .tool-use-meta {
+            font-size: 0.625rem;
+            color: #5b6478;
+            margin-top: 0.25rem;
+        }
+
         .tool-use-input {
             font-family: monospace;
             font-size: 0.6875rem;
@@ -831,74 +837,263 @@
             });
         }
 
+        function safeStringify(value) {
+            if (value === null || value === undefined) {
+                return '';
+            }
+            if (typeof value === 'string') {
+                return value;
+            }
+            try {
+                return JSON.stringify(value, null, 2);
+            } catch (error) {
+                return String(value);
+            }
+        }
+
+        function tryParseJsonString(value) {
+            if (typeof value !== 'string') {
+                return value;
+            }
+            const trimmed = value.trim();
+            if (!trimmed || !['{', '['].includes(trimmed[0])) {
+                return value;
+            }
+            try {
+                return JSON.parse(trimmed);
+            } catch (error) {
+                return value;
+            }
+        }
+
+        function formatTypeLabel(value) {
+            return (value || 'unknown').replace(/_/g, ' ');
+        }
+
+        function getRoleClass(role) {
+            if (role === 'developer') {
+                return 'role-system';
+            }
+            return `role-${role || 'system'}`;
+        }
+
+        function renderPreformatted(value) {
+            return `<pre>${escapeHtml(safeStringify(value))}</pre>`;
+        }
+
+        function renderMessageBox(title, contentHtml, roleClass = 'role-system') {
+            return `<div class="message-box ${roleClass}">
+                <div class="message-role">${escapeHtml(title)}</div>
+                <div class="message-content">${contentHtml || ''}</div>
+            </div>`;
+        }
+
+        function renderContentBlock(type, contentHtml) {
+            return `<div class="content-block">
+                <div class="content-block-type">${escapeHtml(formatTypeLabel(type))}</div>
+                ${contentHtml}
+            </div>`;
+        }
+
+        function renderToolBlock(title, payload, meta = []) {
+            const metaText = meta.filter(Boolean).join(' | ');
+            const metaHtml = metaText ? `<div class="tool-use-meta">${escapeHtml(metaText)}</div>` : '';
+            const payloadText = payload === undefined || payload === null || payload === ''
+                ? '(empty)'
+                : safeStringify(payload);
+            return `<div class="tool-use-block">
+                <div class="tool-use-name">${escapeHtml(title || 'Unknown Tool')}</div>
+                ${metaHtml}
+                <div class="tool-use-input">${escapeHtml(payloadText)}</div>
+            </div>`;
+        }
+
+        function renderLegacyContentBlock(block) {
+            const blockType = block?.type || 'unknown';
+            if (blockType === 'text') {
+                return renderContentBlock(blockType, renderPreformatted(block.text || ''));
+            }
+            if (blockType === 'thinking') {
+                return renderContentBlock(blockType, renderPreformatted(block.thinking || ''));
+            }
+            if (blockType === 'tool_use') {
+                return renderContentBlock(
+                    blockType,
+                    renderToolBlock(block.name || 'Unknown Tool', block.input || {}, block.id ? [`id: ${block.id}`] : [])
+                );
+            }
+            if (blockType === 'tool_result') {
+                return renderContentBlock(
+                    blockType,
+                    renderToolBlock(`Result for: ${block.tool_use_id || ''}`, block.content, block.is_error ? ['error'] : [])
+                );
+            }
+            if (blockType === 'image') {
+                return renderContentBlock(blockType, renderPreformatted(block.source || block));
+            }
+            return renderContentBlock(blockType, renderPreformatted(block));
+        }
+
+        function renderResponseMessageBlock(block) {
+            const blockType = block?.type || 'unknown';
+            if (['input_text', 'output_text', 'summary_text', 'reasoning_text', 'text'].includes(blockType)) {
+                return renderContentBlock(blockType, renderPreformatted(block.text || ''));
+            }
+            if (blockType === 'refusal') {
+                return renderContentBlock(blockType, renderPreformatted(block.refusal || ''));
+            }
+            if (blockType === 'input_image' || blockType === 'input_file') {
+                return renderContentBlock(blockType, renderPreformatted(block));
+            }
+            return renderContentBlock(blockType, renderPreformatted(block));
+        }
+
+        function renderMessageContent(content, blockRenderer) {
+            if (typeof content === 'string') {
+                return renderPreformatted(content);
+            }
+            if (Array.isArray(content)) {
+                return content.map((block) => blockRenderer(block)).join('');
+            }
+            if (content !== null && content !== undefined) {
+                return renderPreformatted(content);
+            }
+            return '';
+        }
+
+        function buildToolCallNameMap(items) {
+            const callNames = {};
+            for (const item of items || []) {
+                const type = item?.type || '';
+                if (type.endsWith('_call') && item.call_id && item.name) {
+                    callNames[item.call_id] = item.name;
+                }
+            }
+            return callNames;
+        }
+
+        function renderResponsesReasoningItem(item) {
+            let contentHtml = '';
+            if (Array.isArray(item.summary)) {
+                contentHtml += item.summary.map((block) => renderResponseMessageBlock(block)).join('');
+            }
+            if (Array.isArray(item.content)) {
+                contentHtml += item.content.map((block) => renderResponseMessageBlock(block)).join('');
+            }
+            if (item.encrypted_content) {
+                contentHtml += renderContentBlock(
+                    'encrypted_content',
+                    renderPreformatted(`[Encrypted reasoning content: ${item.encrypted_content.length} chars]`)
+                );
+            }
+            return renderMessageBox('Reasoning', contentHtml || renderPreformatted('No reasoning summary'), 'role-system');
+        }
+
+        function renderResponsesToolItem(item, callNames) {
+            const itemType = item?.type || 'tool_call';
+            const isOutput = itemType.endsWith('_output');
+            const toolName = item.name || callNames[item.call_id] || formatTypeLabel(itemType);
+            const meta = [
+                formatTypeLabel(itemType),
+                item.call_id ? `call_id: ${item.call_id}` : '',
+                item.status ? `status: ${item.status}` : '',
+            ];
+
+            let payload;
+            if (Object.prototype.hasOwnProperty.call(item, 'arguments')) {
+                payload = tryParseJsonString(item.arguments);
+            } else if (Object.prototype.hasOwnProperty.call(item, 'input')) {
+                payload = item.input;
+            } else if (Object.prototype.hasOwnProperty.call(item, 'output')) {
+                payload = tryParseJsonString(item.output);
+            } else {
+                const { type, id, call_id, name, status, ...rest } = item;
+                payload = rest;
+            }
+
+            const title = isOutput ? `Output: ${toolName}` : toolName;
+            const sectionTitle = isOutput ? 'Tool Output' : 'Tool Call';
+            return renderMessageBox(sectionTitle, renderToolBlock(title, payload, meta), 'role-tool');
+        }
+
+        function renderResponsesItem(item, callNames) {
+            const itemType = item?.type || 'unknown';
+            if (itemType === 'message') {
+                const title = item.phase ? `${item.role || 'assistant'} (${item.phase})` : (item.role || 'assistant');
+                return renderMessageBox(
+                    title,
+                    renderMessageContent(item.content, renderResponseMessageBlock),
+                    getRoleClass(item.role)
+                );
+            }
+            if (itemType === 'reasoning') {
+                return renderResponsesReasoningItem(item);
+            }
+            if (itemType.endsWith('_call') || itemType.endsWith('_output')) {
+                return renderResponsesToolItem(item, callNames);
+            }
+            return renderMessageBox(formatTypeLabel(itemType), renderPreformatted(item), 'role-system');
+        }
+
+        function renderResponsesItems(items) {
+            if (!Array.isArray(items) || items.length === 0) {
+                return '';
+            }
+            const callNames = buildToolCallNameMap(items);
+            return items.map((item) => renderResponsesItem(item, callNames)).join('');
+        }
+
         function renderParsedRequest(requestBody) {
             if (!requestBody) return '<div class="message-box">No request body</div>';
 
             let html = '<div class="parsed-content">';
 
+            if (requestBody.object === 'response' || Array.isArray(requestBody.input)) {
+                if (requestBody.instructions) {
+                    if (typeof requestBody.instructions === 'string') {
+                        html += renderMessageBox('Instructions', renderPreformatted(requestBody.instructions), 'role-system');
+                    } else if (Array.isArray(requestBody.instructions)) {
+                        html += renderResponsesItems(requestBody.instructions);
+                    } else {
+                        html += renderMessageBox('Instructions', renderPreformatted(requestBody.instructions), 'role-system');
+                    }
+                }
+
+                if (typeof requestBody.input === 'string') {
+                    html += renderMessageBox('user', renderPreformatted(requestBody.input), 'role-user');
+                } else {
+                    html += renderResponsesItems(requestBody.input);
+                }
+
+                if (!requestBody.instructions && !requestBody.input) {
+                    html += '<div class="message-box">No request input</div>';
+                }
+
+                html += '</div>';
+                return html;
+            }
+
             // Handle system message
             const system = requestBody.system;
             if (system) {
-                html += `<div class="message-box role-system">
-                    <div class="message-role">System</div>
-                    <div class="message-content">`;
                 if (typeof system === 'string') {
-                    html += `<pre>${escapeHtml(system)}</pre>`;
+                    html += renderMessageBox('System', renderPreformatted(system), 'role-system');
                 } else if (Array.isArray(system)) {
-                    for (const block of system) {
-                        if (block.type === 'text') {
-                            html += `<pre>${escapeHtml(block.text || '')}</pre>`;
-                        }
-                    }
+                    html += renderMessageBox('System', system.map((block) => renderLegacyContentBlock(block)).join(''), 'role-system');
+                } else {
+                    html += renderMessageBox('System', renderPreformatted(system), 'role-system');
                 }
-                html += `</div></div>`;
             }
 
             // Handle messages
             const messages = requestBody.messages || [];
             for (const msg of messages) {
                 const role = msg.role || 'unknown';
-                const roleClass = `role-${role}`;
-
-                html += `<div class="message-box ${roleClass}">
-                    <div class="message-role">${escapeHtml(role)}</div>
-                    <div class="message-content">`;
-
-                const content = msg.content;
-                if (typeof content === 'string') {
-                    html += `<pre>${escapeHtml(content)}</pre>`;
-                } else if (Array.isArray(content)) {
-                    for (const block of content) {
-                        html += `<div class="content-block">`;
-                        const blockType = block.type || 'unknown';
-                        html += `<div class="content-block-type">${escapeHtml(blockType)}</div>`;
-
-                        if (blockType === 'text') {
-                            html += `<pre>${escapeHtml(block.text || '')}</pre>`;
-                        } else if (blockType === 'thinking') {
-                            html += `<pre>${escapeHtml(block.thinking || '')}</pre>`;
-                        } else if (blockType === 'tool_use') {
-                            html += `<div class="tool-use-block">
-                                <div class="tool-use-name">${escapeHtml(block.name || 'Unknown Tool')}</div>
-                                <div class="tool-use-input">${escapeHtml(JSON.stringify(block.input || {}, null, 2))}</div>
-                            </div>`;
-                        } else if (blockType === 'tool_result') {
-                            html += `<div class="tool-use-block">
-                                <div class="tool-use-name">Result for: ${escapeHtml(block.tool_use_id || '')}</div>
-                                <div class="tool-use-input">${escapeHtml(typeof block.content === 'string' ? block.content : JSON.stringify(block.content || {}, null, 2))}</div>
-                            </div>`;
-                        } else if (blockType === 'image') {
-                            html += `<div>[Image: ${escapeHtml(block.source?.media_type || 'unknown type')}]</div>`;
-                        } else {
-                            html += `<pre>${escapeHtml(JSON.stringify(block, null, 2))}</pre>`;
-                        }
-                        html += `</div>`;
-                    }
-                } else if (content) {
-                    html += `<pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>`;
-                }
-
-                html += `</div></div>`;
+                html += renderMessageBox(
+                    role,
+                    renderMessageContent(msg.content, renderLegacyContentBlock),
+                    getRoleClass(role)
+                );
             }
 
             html += '</div>';
@@ -910,49 +1105,24 @@
 
             let html = '<div class="parsed-content">';
 
-            // Response is typically an assistant message
-            html += `<div class="message-box role-assistant">
-                <div class="message-role">Assistant Response</div>
-                <div class="message-content">`;
-
-            const content = responseBody.content;
-            if (typeof content === 'string') {
-                html += `<pre>${escapeHtml(content)}</pre>`;
-            } else if (Array.isArray(content)) {
-                for (const block of content) {
-                    html += `<div class="content-block">`;
-                    const blockType = block.type || 'unknown';
-                    html += `<div class="content-block-type">${escapeHtml(blockType)}</div>`;
-
-                    if (blockType === 'text') {
-                        html += `<pre>${escapeHtml(block.text || '')}</pre>`;
-                    } else if (blockType === 'thinking') {
-                        html += `<pre>${escapeHtml(block.thinking || '')}</pre>`;
-                    } else if (blockType === 'tool_use') {
-                        html += `<div class="tool-use-block">
-                            <div class="tool-use-name">${escapeHtml(block.name || 'Unknown Tool')}</div>
-                            <div class="tool-use-input">${escapeHtml(JSON.stringify(block.input || {}, null, 2))}</div>
-                        </div>`;
-                    } else {
-                        html += `<pre>${escapeHtml(JSON.stringify(block, null, 2))}</pre>`;
-                    }
-                    html += `</div>`;
+            if (responseBody.object === 'response' || Array.isArray(responseBody.output)) {
+                html += renderResponsesItems(responseBody.output);
+                if (!responseBody.output?.length && responseBody.output_text) {
+                    html += renderMessageBox('assistant', renderPreformatted(responseBody.output_text), 'role-assistant');
                 }
-            } else if (content) {
-                html += `<pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>`;
+            } else {
+            // Response is typically an assistant message
+                html += renderMessageBox(
+                    'Assistant Response',
+                    renderMessageContent(responseBody.content, renderLegacyContentBlock),
+                    'role-assistant'
+                );
             }
-
-            html += `</div></div>`;
 
             // Show usage info if available
             const usage = responseBody.usage;
             if (usage) {
-                html += `<div class="message-box role-system">
-                    <div class="message-role">Usage</div>
-                    <div class="message-content">
-                        <pre>${escapeHtml(JSON.stringify(usage, null, 2))}</pre>
-                    </div>
-                </div>`;
+                html += renderMessageBox('Usage', renderPreformatted(usage), 'role-system');
             }
 
             html += '</div>';
