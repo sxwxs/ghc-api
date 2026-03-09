@@ -432,6 +432,45 @@
             background: white;
         }
 
+        .list-actions {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.75rem;
+            padding: 0.625rem 0.75rem;
+            border: 1px solid #e6e8f2;
+            border-radius: 8px;
+            background: linear-gradient(180deg, #f8faff 0%, #eef3ff 100%);
+        }
+
+        .list-actions-label {
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: #4a5568;
+        }
+
+        .list-actions button {
+            border: none;
+            border-radius: 6px;
+            background: #4f46e5;
+            color: white;
+            padding: 0.45rem 0.8rem;
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.2s, opacity 0.2s;
+        }
+
+        .list-actions button:hover {
+            background: #4338ca;
+        }
+
+        .list-actions button.is-refreshing {
+            opacity: 0.75;
+            cursor: wait;
+        }
+
         .search-row {
             display: flex;
             gap: 0.5rem;
@@ -841,6 +880,10 @@
         <!-- Right: Request list -->
         <div class="list-panel">
             <div class="list-controls">
+                <div class="list-actions">
+                    <div class="list-actions-label">Request Controls</div>
+                    <button id="refresh-requests-btn" onclick="refreshRequests()" title="Reload the request list and current selection">Refresh</button>
+                </div>
                 <div class="search-row">
                     <div class="search-box">
                         <input type="text" id="search-input" placeholder="Search requests...">
@@ -883,6 +926,7 @@
         let searchTimeout = null;
         let selectedRequestId = null;
         let currentRequestData = null;
+        let refreshInProgress = false;
 
         function formatBytes(bytes) {
             if (bytes === 0) return '0 B';
@@ -1466,6 +1510,34 @@
                 renderPagination(data.total);
             } catch (error) {
                 console.error('Failed to load requests:', error);
+            }
+        }
+
+        async function refreshRequests() {
+            if (refreshInProgress) {
+                return;
+            }
+
+            refreshInProgress = true;
+            const refreshButton = document.getElementById('refresh-requests-btn');
+            if (refreshButton) {
+                refreshButton.disabled = true;
+                refreshButton.classList.add('is-refreshing');
+                refreshButton.textContent = 'Refreshing...';
+            }
+
+            try {
+                await loadRequests();
+                if (selectedRequestId) {
+                    await selectRequest(selectedRequestId);
+                }
+            } finally {
+                refreshInProgress = false;
+                if (refreshButton) {
+                    refreshButton.disabled = false;
+                    refreshButton.classList.remove('is-refreshing');
+                    refreshButton.textContent = 'Refresh';
+                }
             }
         }
 
