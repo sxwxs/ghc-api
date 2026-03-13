@@ -40,6 +40,7 @@ class State:
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
         self.auto_remove_encrypted_content_on_parse_error: bool = False
         self.save_request_to_file: bool = False
+        self.disable_onedrive_access: bool = True
 
         # Background worker guards
         self.token_usage_reporter_started: bool = False
