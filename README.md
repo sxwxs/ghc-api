@@ -96,6 +96,9 @@ tool_result_suffix_remove: [] # Strings to remove from end of tool results
 
 # Optional request persistence
 save_request_to_file: false # If true, save completed requests to requests/YYYY-MM-DD.jl
+
+# Optional OneDrive access gate
+disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared reads
 ```
 
 ### Token Management
@@ -119,6 +122,9 @@ OneDrive detection priority:
 1. `~/OneDrive - *`
 2. `~/OneDrive`
 3. In WSL: `/mnt/c/Users/<username>/OneDrive - *` then `/mnt/c/Users/<username>/OneDrive`
+
+To disable all OneDrive-dependent operations, set `disable_onedrive_access: true` in `config.yaml`.
+When enabled, ghc-api skips OneDrive detection, config sync actions, and shared OneDrive hash reads.
 
 Sync target folder:
 

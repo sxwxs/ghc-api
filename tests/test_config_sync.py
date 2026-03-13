@@ -8,7 +8,11 @@ from ghc_api.config_sync import (
     _hash_bytes_for_entry,
     _restore_codex_config_preserving_projects,
     _split_codex_config_sections,
+    get_onedrive_path,
+    sync_local_to_onedrive,
+    sync_onedrive_to_local,
 )
+from ghc_api.state import state
 
 
 class ConfigSyncCodexTests(unittest.TestCase):
@@ -94,6 +98,24 @@ class ConfigSyncCodexTests(unittest.TestCase):
             with mock.patch.object(Path, "write_bytes", autospec=True) as write_mock:
                 _restore_codex_config_preserving_projects(source, target)
                 write_mock.assert_called_once_with(target, expected)
+
+    def test_get_onedrive_path_returns_none_when_access_disabled(self) -> None:
+        with mock.patch.object(state, "disable_onedrive_access", True):
+            self.assertIsNone(get_onedrive_path())
+
+    def test_sync_local_to_onedrive_skips_when_access_disabled(self) -> None:
+        with mock.patch.object(state, "disable_onedrive_access", True):
+            self.assertEqual(
+                sync_local_to_onedrive(),
+                {"ok": False, "error": "OneDrive access is disabled by config."},
+            )
+
+    def test_sync_onedrive_to_local_skips_when_access_disabled(self) -> None:
+        with mock.patch.object(state, "disable_onedrive_access", True):
+            self.assertEqual(
+                sync_onedrive_to_local(),
+                {"ok": False, "error": "OneDrive access is disabled by config."},
+            )
 
 
 if __name__ == "__main__":

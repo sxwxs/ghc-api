@@ -38,6 +38,7 @@ def _runtime_config() -> Dict[str, Any]:
         "max_connection_retries": state.max_connection_retries,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
         "save_request_to_file": state.save_request_to_file,
+        "disable_onedrive_access": state.disable_onedrive_access,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
@@ -101,6 +102,7 @@ def api_runtime_config_update():
         "max_connection_retries",
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
+        "disable_onedrive_access",
         "model_mappings",
     }
     unknown_keys = sorted(set(payload.keys()) - allowed_keys)
@@ -155,6 +157,12 @@ def api_runtime_config_update():
             if not isinstance(save_req, bool):
                 raise ValueError("'save_request_to_file' must be a boolean")
             state.save_request_to_file = save_req
+
+        if "disable_onedrive_access" in payload:
+            disable_onedrive = payload["disable_onedrive_access"]
+            if not isinstance(disable_onedrive, bool):
+                raise ValueError("'disable_onedrive_access' must be a boolean")
+            state.disable_onedrive_access = disable_onedrive
 
         if "model_mappings" in payload:
             mappings = payload["model_mappings"]

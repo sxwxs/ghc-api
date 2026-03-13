@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
+from .state import state
 from .utils import get_config_dir
 
 
@@ -128,8 +129,14 @@ def _resolve_windows_user_homes_from_wsl() -> list[Path]:
     return preferred + other
 
 
+def onedrive_access_disabled() -> bool:
+    return bool(state.disable_onedrive_access)
+
+
 def get_onedrive_path() -> Optional[Path]:
     """Locate OneDrive root, preferring 'OneDrive - *' over 'OneDrive'."""
+    if onedrive_access_disabled():
+        return None
     if _is_wsl():
         base_homes = _resolve_windows_user_homes_from_wsl()
     else:
@@ -344,6 +351,7 @@ def get_config_hash_overview() -> Dict[str, object]:
                 machine_hashes.append(info)
 
     return {
+        "onedrive_access_disabled": onedrive_access_disabled(),
         "onedrive_path": str(onedrive) if onedrive else None,
         "shared_hash": _hash_file_info(shared_hash_path),
         "machines": machine_hashes,
@@ -395,6 +403,7 @@ def get_sync_status() -> Dict[str, object]:
         }
 
     return {
+        "onedrive_access_disabled": onedrive_access_disabled(),
         "onedrive_path": str(onedrive_path) if onedrive_path else None,
         "sync_root": str(sync_root) if sync_root else None,
         "agent_root": str(agent_root) if agent_root else None,
@@ -412,6 +421,9 @@ def print_sync_diff_status() -> Dict[str, object]:
     if status.get("hash_errors"):
         for err in status["hash_errors"]:
             print(f"[Config Sync] Failed to update hash file: {err}")
+    if status["onedrive_access_disabled"]:
+        print("[Config Sync] OneDrive access disabled by config.")
+        return status
     if not status["onedrive_path"]:
         print("[Config Sync] OneDrive path not found.")
         return status
@@ -431,6 +443,8 @@ def print_sync_diff_status() -> Dict[str, object]:
 
 
 def sync_local_to_onedrive() -> Dict[str, object]:
+    if onedrive_access_disabled():
+        return {"ok": False, "error": "OneDrive access is disabled by config."}
     sync_root = get_sync_root()
     if not sync_root:
         return {"ok": False, "error": "OneDrive path not found."}
@@ -462,6 +476,8 @@ def sync_local_to_onedrive() -> Dict[str, object]:
 
 
 def sync_onedrive_to_local() -> Dict[str, object]:
+    if onedrive_access_disabled():
+        return {"ok": False, "error": "OneDrive access is disabled by config."}
     sync_root = get_sync_root()
     if not sync_root:
         return {"ok": False, "error": "OneDrive path not found."}
