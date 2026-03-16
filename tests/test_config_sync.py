@@ -6,8 +6,10 @@ from ghc_api.config_sync import (
     ConfigEntry,
     _files_different,
     _hash_bytes_for_entry,
+    _prioritize_windows_user_homes,
     _restore_codex_config_preserving_projects,
     _split_codex_config_sections,
+    _windows_path_to_wsl_path,
 )
 
 
@@ -94,6 +96,39 @@ class ConfigSyncCodexTests(unittest.TestCase):
             with mock.patch.object(Path, "write_bytes", autospec=True) as write_mock:
                 _restore_codex_config_preserving_projects(source, target)
                 write_mock.assert_called_once_with(target, expected)
+
+
+class ConfigSyncWslPathTests(unittest.TestCase):
+    def test_windows_path_to_wsl_path_for_user_profile(self) -> None:
+        self.assertEqual(
+            _windows_path_to_wsl_path(r"C:\Users\Alice"),
+            Path("/mnt/c/Users/Alice"),
+        )
+
+    def test_windows_path_to_wsl_path_rejects_non_windows_path(self) -> None:
+        self.assertIsNone(_windows_path_to_wsl_path("%USERPROFILE%"))
+
+    def test_prioritize_windows_user_homes_prefers_actual_windows_home(self) -> None:
+        candidates = [
+            Path("/mnt/c/Users/Admin"),
+            Path("/mnt/c/Users/alice"),
+            Path("/mnt/c/Users/bob"),
+        ]
+
+        ordered = _prioritize_windows_user_homes(
+            candidates,
+            preferred_home=Path("/mnt/c/Users/bob"),
+            preferred_names=["alice", "ubuntu"],
+        )
+
+        self.assertEqual(
+            ordered,
+            [
+                Path("/mnt/c/Users/bob"),
+                Path("/mnt/c/Users/alice"),
+                Path("/mnt/c/Users/Admin"),
+            ],
+        )
 
 
 if __name__ == "__main__":

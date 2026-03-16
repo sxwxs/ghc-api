@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import socket
@@ -108,24 +109,90 @@ def _is_wsl() -> bool:
     return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
 
 
+def _windows_path_to_wsl_path(raw_path: str) -> Optional[Path]:
+    value = raw_path.strip().strip('"')
+    if not value:
+        return None
+    if value.startswith("/"):
+        return Path(value)
+
+    match = re.match(r"^([a-zA-Z]):[\\/](.*)$", value)
+    if not match:
+        return None
+
+    drive = match.group(1).lower()
+    tail = match.group(2).replace("\\", "/").strip("/")
+    if not tail:
+        return Path(f"/mnt/{drive}")
+    return Path(f"/mnt/{drive}/{tail}")
+
+
+def _resolve_windows_home_from_wsl_interop() -> Optional[Path]:
+    commands = [
+        ["cmd.exe", "/c", "echo", "%USERPROFILE%"],
+        ["powershell.exe", "-NoProfile", "-Command", "[Environment]::GetFolderPath('UserProfile')"],
+    ]
+    for command in commands:
+        try:
+            proc = subprocess.run(command, capture_output=True, text=True, check=False, timeout=3)
+        except Exception:
+            continue
+
+        for line in (proc.stdout or "").splitlines():
+            print(f"[Config Sync] WSL interop path candidate: {line}")
+            home = _windows_path_to_wsl_path(line)
+            print(home)
+
+            if home:
+                print(f"[Config Sync] Resolved Windows home from WSL interop: {home}")
+                return home
+    return None
+
+
+def _prioritize_windows_user_homes(
+    candidates: list[Path],
+    preferred_home: Optional[Path],
+    preferred_names: list[str],
+) -> list[Path]:
+    ordered: list[Path] = []
+    seen: set[str] = set()
+
+    def add_candidate(candidate: Path) -> None:
+        key = str(candidate).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(candidate)
+
+    if preferred_home:
+        for candidate in candidates:
+            if candidate == preferred_home:
+                add_candidate(candidate)
+                break
+
+    for preferred_name in preferred_names:
+        if not preferred_name:
+            continue
+        preferred_name_lower = preferred_name.lower()
+        for candidate in candidates:
+            if candidate.name.lower() == preferred_name_lower:
+                add_candidate(candidate)
+
+    for candidate in candidates:
+        add_candidate(candidate)
+    return ordered
+
+
 def _resolve_windows_user_homes_from_wsl() -> list[Path]:
     users_root = Path("/mnt/c/Users")
     if not users_root.exists():
         return []
-
-    preferred_names = [name for name in [os.environ.get("USER"), os.environ.get("USERNAME")] if name]
-    candidates = [p for p in users_root.iterdir() if p.is_dir()]
-    preferred: list[Path] = []
-    other: list[Path] = []
-    for preferred_name in preferred_names:
-        for candidate in candidates:
-            if candidate.name.lower() == preferred_name.lower():
-                preferred.append(candidate)
-    preferred_set = {p.resolve() for p in preferred}
-    for candidate in candidates:
-        if candidate.resolve() not in preferred_set:
-            other.append(candidate)
-    return preferred + other
+    preferred_home = _resolve_windows_home_from_wsl_interop()
+    preferred_names = [name for name in [os.environ.get("USERNAME"), os.environ.get("USER")] if name]
+    candidates = sorted([p for p in users_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+    if preferred_home and preferred_home.is_dir() and preferred_home not in candidates:
+        candidates.insert(0, preferred_home)
+    return _prioritize_windows_user_homes(candidates, preferred_home, preferred_names)
 
 
 def get_onedrive_path() -> Optional[Path]:
