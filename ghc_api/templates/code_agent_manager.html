@@ -356,7 +356,8 @@
         function renderConfigManagerStatus(status, extraMessage = "") {
             const details = document.getElementById("config-manager-details");
             const lines = [];
-            lines.push("OneDrive: " + (status.onedrive_path || "NOT FOUND"));
+            const onedriveLabel = status.onedrive_access_disabled ? "DISABLED BY CONFIG" : (status.onedrive_path || "NOT FOUND");
+            lines.push("OneDrive: " + onedriveLabel);
             lines.push("Sync Root: " + (status.sync_root || "N/A"));
             lines.push("Agent Root: " + (status.agent_root || "N/A"));
             lines.push("Has Sync Files: " + status.has_sync_files);
@@ -755,10 +756,13 @@
             tbody.innerHTML = "";
 
             const shared = configHashOverviewData.shared_hash || {};
+            const sharedLabel = configHashOverviewData.onedrive_access_disabled
+                ? "OneDrive Shared (disabled by config)"
+                : "OneDrive Shared (configSync)";
             const sharedRow = document.createElement("tr");
             sharedRow.className = "shared-row";
             sharedRow.innerHTML = `
-                <td>OneDrive Shared (configSync)</td>
+                <td>${sharedLabel}</td>
                 <td>${shared.hash || "-"}</td>
                 <td>${shared.created_at ? new Date(shared.created_at).toLocaleString() : "-"}</td>
                 <td>${shared.path || "-"}</td>
@@ -778,7 +782,11 @@
 
             if ((configHashOverviewData.machines || []).length === 0) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"4\">No machine hash files found.</td>";
+                tr.innerHTML = "<td colspan=\"4\">" + (
+                    configHashOverviewData.onedrive_access_disabled
+                        ? "OneDrive access is disabled by config."
+                        : "No machine hash files found."
+                ) + "</td>";
                 tbody.appendChild(tr);
             }
         }

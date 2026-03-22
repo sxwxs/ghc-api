@@ -120,6 +120,10 @@ auto_remove_encrypted_content_on_parse_error: false
 # If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
 save_request_to_file: false
 
+# If true, skip all OneDrive detection, sync, and OneDrive-backed shared status reads.
+# Local fallback files such as ~/.ghc-api/token_usage.jl are still used where supported.
+disable_onedrive_access: true
+
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
         api_version=DEFAULT_API_VERSION,

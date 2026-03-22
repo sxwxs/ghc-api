@@ -85,6 +85,8 @@ def main():
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
         if 'save_request_to_file' in config:
             state.save_request_to_file = bool(config['save_request_to_file'])
+        if 'disable_onedrive_access' in config:
+            state.disable_onedrive_access = bool(config['disable_onedrive_access'])
 
         # Load model mappings from config
         if 'model_mappings' in config:
