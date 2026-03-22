@@ -1,0 +1,1607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copilot API Proxy - Chat</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .navbar h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .navbar-actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .navbar-actions a {
+            color: white;
+            text-decoration: none;
+            padding: 0.4rem 0.75rem;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
+            transition: background 0.2s;
+            border: none;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+
+        .navbar-actions a:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .main-container {
+            display: flex;
+            height: calc(100vh - 52px);
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 280px;
+            background: #fff;
+            border-right: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        .sidebar-header {
+            padding: 1rem;
+            border-bottom: 1px solid #eee;
+        }
+
+        .new-chat-btn {
+            width: 100%;
+            padding: 0.6rem 1rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        .new-chat-btn:hover {
+            opacity: 0.9;
+        }
+
+        .session-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0.5rem;
+        }
+
+        .session-item {
+            display: flex;
+            align-items: center;
+            padding: 0.6rem 0.75rem;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.15s;
+            margin-bottom: 2px;
+        }
+
+        .session-item:hover {
+            background: #f0f0f0;
+        }
+
+        .session-item.active {
+            background: #e8ecff;
+        }
+
+        .session-item .session-title {
+            flex: 1;
+            font-size: 0.8125rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #333;
+        }
+
+        .session-item .session-delete {
+            display: none;
+            background: none;
+            border: none;
+            color: #999;
+            cursor: pointer;
+            font-size: 1rem;
+            padding: 0 0.25rem;
+            line-height: 1;
+        }
+
+        .session-item:hover .session-delete {
+            display: block;
+        }
+
+        .session-item .session-delete:hover {
+            color: #e53935;
+        }
+
+        /* Chat area */
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .chat-header {
+            padding: 0.75rem 1.5rem;
+            border-bottom: 1px solid #eee;
+            background: #fff;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .chat-header label {
+            font-size: 0.8125rem;
+            color: #666;
+            font-weight: 500;
+        }
+
+        .model-select {
+            padding: 0.4rem 0.6rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.8125rem;
+            background: #fff;
+            color: #333;
+            min-width: 250px;
+        }
+
+        .model-select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .messages-container {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .message {
+            max-width: 75%;
+            padding: 0.75rem 1rem;
+            border-radius: 12px;
+            font-size: 0.9rem;
+            line-height: 1.6;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.assistant {
+            align-self: flex-start;
+            background: #fff;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            border-bottom-left-radius: 4px;
+        }
+
+        .message.assistant .message-content {
+            overflow-x: auto;
+        }
+
+        .message.error {
+            align-self: center;
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef9a9a;
+            font-size: 0.8125rem;
+            max-width: 90%;
+        }
+
+        .message-content pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 0.75rem 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-size: 0.8125rem;
+            line-height: 1.5;
+            margin: 0.5rem 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .message-content code {
+            background: rgba(0,0,0,0.06);
+            padding: 0.15rem 0.35rem;
+            border-radius: 3px;
+            font-size: 0.85em;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        .message-content pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+            font-size: inherit;
+        }
+
+        .message-content p {
+            margin: 0.4rem 0;
+        }
+
+        .message-content p:first-child {
+            margin-top: 0;
+        }
+
+        .message-content p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message-content ul, .message-content ol {
+            margin: 0.4rem 0;
+            padding-left: 1.5rem;
+        }
+
+        .message-content li {
+            margin: 0.2rem 0;
+        }
+
+        .message-content h1, .message-content h2, .message-content h3 {
+            margin: 0.6rem 0 0.3rem;
+            font-weight: 600;
+        }
+
+        .message-content h1 { font-size: 1.2em; }
+        .message-content h2 { font-size: 1.1em; }
+        .message-content h3 { font-size: 1.0em; }
+
+        .message-content blockquote {
+            border-left: 3px solid #ccc;
+            margin: 0.5rem 0;
+            padding: 0.25rem 0.75rem;
+            color: #666;
+        }
+
+        /* Thinking block */
+        .thinking-block {
+            margin-bottom: 0.5rem;
+            border: 1px solid #e0d4f5;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .thinking-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 0.75rem;
+            background: #f5f0ff;
+            border: none;
+            cursor: pointer;
+            font-size: 0.75rem;
+            color: #7c5cbf;
+            font-weight: 500;
+            width: 100%;
+            text-align: left;
+        }
+
+        .thinking-toggle:hover {
+            background: #ece4fd;
+        }
+
+        .thinking-toggle .arrow {
+            font-size: 0.6rem;
+            transition: transform 0.2s;
+        }
+
+        .thinking-toggle .arrow.open {
+            transform: rotate(90deg);
+        }
+
+        .thinking-content {
+            display: none;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.8125rem;
+            color: #666;
+            background: #faf8ff;
+            border-top: 1px solid #e0d4f5;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.5;
+        }
+
+        .thinking-content.open {
+            display: block;
+        }
+
+        .thinking-content p {
+            margin: 0.3rem 0;
+        }
+
+        .thinking-content p:first-child {
+            margin-top: 0;
+        }
+
+        /* Streaming thinking indicator */
+        .thinking-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.4rem 0.75rem;
+            background: #f5f0ff;
+            border: 1px solid #e0d4f5;
+            border-radius: 8px;
+            font-size: 0.75rem;
+            color: #7c5cbf;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+        }
+
+        .thinking-indicator .spinner {
+            width: 12px;
+            height: 12px;
+            border: 2px solid #e0d4f5;
+            border-top-color: #7c5cbf;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Message meta (timing) */
+        .message-meta {
+            display: flex;
+            gap: 0.75rem;
+            margin-top: 0.4rem;
+            font-size: 0.7rem;
+            color: #999;
+        }
+
+        .message-meta span {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.2rem;
+        }
+
+        .empty-state {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #999;
+            font-size: 1rem;
+        }
+
+        /* Input area */
+        .input-area {
+            padding: 1rem 1.5rem;
+            border-top: 1px solid #eee;
+            background: #fff;
+        }
+
+        .input-wrapper {
+            display: flex;
+            gap: 0.5rem;
+            align-items: flex-end;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        .input-wrapper textarea {
+            flex: 1;
+            padding: 0.6rem 0.75rem;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            font-family: inherit;
+            line-height: 1.5;
+            resize: none;
+            max-height: 150px;
+            min-height: 40px;
+            overflow-y: auto;
+        }
+
+        .input-wrapper textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .send-btn {
+            padding: 0.6rem 1.25rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: opacity 0.2s;
+            white-space: nowrap;
+        }
+
+        .send-btn:hover {
+            opacity: 0.9;
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .typing-indicator {
+            display: inline-block;
+            font-size: 0.8125rem;
+            color: #999;
+            padding: 0.4rem 0;
+        }
+
+        .typing-indicator::after {
+            content: '';
+            animation: dots 1.5s steps(4, end) infinite;
+        }
+
+        @keyframes dots {
+            0% { content: ''; }
+            25% { content: '.'; }
+            50% { content: '..'; }
+            75% { content: '...'; }
+            100% { content: ''; }
+        }
+
+        /* Raw mode */
+        .mode-toggle {
+            display: flex;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            overflow: hidden;
+            font-size: 0.75rem;
+        }
+
+        .mode-toggle button {
+            padding: 0.35rem 0.7rem;
+            border: none;
+            background: #fff;
+            color: #666;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 500;
+            transition: background 0.15s, color 0.15s;
+        }
+
+        .mode-toggle button.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .mode-toggle button:not(.active):hover {
+            background: #f0f0f0;
+        }
+
+        .endpoint-select {
+            display: none;
+            padding: 0.35rem 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            background: #fff;
+            color: #333;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        .endpoint-select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .endpoint-select.visible {
+            display: inline-block;
+        }
+
+        .input-wrapper textarea.raw-mode {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.8125rem;
+            min-height: 120px;
+            max-height: 300px;
+            line-height: 1.4;
+            white-space: pre;
+            tab-size: 2;
+        }
+
+        .message.raw-request {
+            align-self: flex-end;
+            background: #2d2d2d;
+            color: #d4d4d4;
+            border-bottom-right-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.75rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-width: 85%;
+        }
+
+        .message.raw-request .raw-label {
+            display: inline-block;
+            font-size: 0.65rem;
+            color: #999;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .message.raw-response {
+            align-self: flex-start;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #333;
+            border-bottom-left-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 0.75rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-width: 85%;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .message.raw-response .raw-label {
+            display: inline-block;
+            font-size: 0.65rem;
+            color: #888;
+            margin-bottom: 0.25rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .raw-response .json-key { color: #9cdcfe; }
+        .raw-response .json-string { color: #ce9178; }
+        .raw-response .json-number { color: #b5cea8; }
+        .raw-response .json-boolean { color: #569cd6; }
+        .raw-response .json-null { color: #569cd6; }
+
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 220px;
+            }
+            .message {
+                max-width: 90%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <h1>Copilot API Proxy</h1>
+        <div class="navbar-actions">
+            <a href="/">Dashboard</a>
+            <a href="/requests">Request Browser</a>
+            <a href="/chat" style="background: rgba(255,255,255,0.35);">Chat</a>
+            <a href="/api/stats">API Stats</a>
+        </div>
+    </nav>
+
+    <div class="main-container">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <button class="new-chat-btn" onclick="newSession()">+ New Chat</button>
+            </div>
+            <div class="session-list" id="session-list"></div>
+        </div>
+
+        <div class="chat-area">
+            <div class="chat-header">
+                <label>Model:</label>
+                <select class="model-select" id="model-select" onchange="onModelChange()">
+                    <option value="">Loading models...</option>
+                </select>
+                <select class="endpoint-select" id="endpoint-select">
+                    <option value="auto">auto</option>
+                    <option value="/v1/responses">/v1/responses</option>
+                    <option value="/v1/chat/completions">/v1/chat/completions</option>
+                </select>
+                <div class="mode-toggle">
+                    <button id="mode-chat" class="active" onclick="setRawMode(false)">Chat</button>
+                    <button id="mode-raw" onclick="setRawMode(true)">Raw</button>
+                </div>
+            </div>
+            <div class="messages-container" id="messages-container">
+                <div class="empty-state" id="empty-state">Select or create a chat session to begin</div>
+            </div>
+            <div class="input-area">
+                <div class="input-wrapper">
+                    <textarea id="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+                    <button class="send-btn" id="send-btn" onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const STORAGE_KEY = 'ghc_chat_sessions';
+        const MODEL_KEY = 'ghc_chat_last_model';
+
+        let sessions = [];
+        let activeSessionId = null;
+        let isStreaming = false;
+        let abortController = null;
+        let modelsData = [];
+        let modelEndpoints = {};  // model id -> supported_endpoints array
+        let modelContextSizes = {}; // model id -> max_context_window_tokens
+        let rawMode = false;
+
+        // ---- Session management ----
+
+        function loadSessions() {
+            try {
+                sessions = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+            } catch {
+                sessions = [];
+            }
+        }
+
+        function saveSessions() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
+        }
+
+        function newSession() {
+            const session = {
+                id: crypto.randomUUID(),
+                title: 'New Chat',
+                messages: [],
+                model: document.getElementById('model-select').value,
+                createdAt: new Date().toISOString(),
+            };
+            sessions.unshift(session);
+            saveSessions();
+            setActiveSession(session.id);
+            renderSessionList();
+        }
+
+        function deleteSession(id, e) {
+            e.stopPropagation();
+            sessions = sessions.filter(s => s.id !== id);
+            saveSessions();
+            if (activeSessionId === id) {
+                activeSessionId = null;
+                renderMessages();
+            }
+            renderSessionList();
+        }
+
+        function setActiveSession(id) {
+            activeSessionId = id;
+            const session = sessions.find(s => s.id === id);
+            if (session && session.model) {
+                document.getElementById('model-select').value = session.model;
+            }
+            renderSessionList();
+            renderMessages();
+            document.getElementById('chat-input').focus();
+        }
+
+        function getActiveSession() {
+            return sessions.find(s => s.id === activeSessionId);
+        }
+
+        function renderSessionList() {
+            const container = document.getElementById('session-list');
+            container.innerHTML = '';
+            for (const s of sessions) {
+                const div = document.createElement('div');
+                div.className = 'session-item' + (s.id === activeSessionId ? ' active' : '');
+                div.onclick = () => setActiveSession(s.id);
+                div.innerHTML = `
+                    <span class="session-title" title="${escapeHtml(s.title)}">${escapeHtml(s.title)}</span>
+                    <button class="session-delete" title="Delete" onclick="deleteSession('${s.id}', event)">&times;</button>
+                `;
+                container.appendChild(div);
+            }
+        }
+
+        // ---- Message rendering ----
+
+        function renderMessages() {
+            const container = document.getElementById('messages-container');
+            const session = getActiveSession();
+
+            if (!session) {
+                container.innerHTML = '<div class="empty-state">Select or create a chat session to begin</div>';
+                return;
+            }
+
+            if (session.messages.length === 0) {
+                container.innerHTML = '<div class="empty-state">Send a message to start chatting</div>';
+                return;
+            }
+
+            container.innerHTML = '';
+            for (const msg of session.messages) {
+                if (msg.role === 'raw-request') {
+                    appendRawRequestEl(msg.content, msg.endpoint);
+                } else if (msg.role === 'raw-response') {
+                    appendRawResponseEl(msg.content, msg.statusCode);
+                } else {
+                    appendMessageEl(msg.role, msg.content, {
+                        thinking: msg.thinking,
+                        thinkingTime: msg.thinkingTime,
+                        totalTime: msg.totalTime,
+                    });
+                }
+            }
+            scrollToBottom();
+        }
+
+        function appendMessageEl(role, content, meta) {
+            meta = meta || {};
+            const container = document.getElementById('messages-container');
+            // Remove empty-state if present
+            const empty = container.querySelector('.empty-state');
+            if (empty) empty.remove();
+
+            const div = document.createElement('div');
+            div.className = 'message ' + role;
+
+            // Thinking block (for assistant messages with thinking)
+            if (role === 'assistant' && meta.thinking) {
+                div.appendChild(buildThinkingBlock(meta.thinking));
+            }
+
+            const inner = document.createElement('div');
+            inner.className = 'message-content';
+            if (role === 'user') {
+                inner.textContent = content;
+            } else if (role === 'error') {
+                inner.textContent = content;
+            } else {
+                inner.innerHTML = renderMarkdown(content);
+            }
+            div.appendChild(inner);
+
+            // Timing meta
+            if (role === 'assistant' && (meta.thinkingTime != null || meta.totalTime != null)) {
+                const metaDiv = document.createElement('div');
+                metaDiv.className = 'message-meta';
+                if (meta.thinkingTime != null) {
+                    metaDiv.innerHTML += `<span>Thinking: ${formatDuration(meta.thinkingTime)}</span>`;
+                }
+                if (meta.totalTime != null) {
+                    metaDiv.innerHTML += `<span>Total: ${formatDuration(meta.totalTime)}</span>`;
+                }
+                div.appendChild(metaDiv);
+            }
+
+            container.appendChild(div);
+            return div;
+        }
+
+        function buildThinkingBlock(thinkingText) {
+            const block = document.createElement('div');
+            block.className = 'thinking-block';
+
+            const toggle = document.createElement('button');
+            toggle.className = 'thinking-toggle';
+            toggle.innerHTML = '<span class="arrow">&#9654;</span> Thinking';
+            block.appendChild(toggle);
+
+            const content = document.createElement('div');
+            content.className = 'thinking-content';
+            content.innerHTML = renderMarkdown(thinkingText);
+            block.appendChild(content);
+
+            toggle.onclick = () => {
+                const arrow = toggle.querySelector('.arrow');
+                const isOpen = content.classList.toggle('open');
+                arrow.classList.toggle('open', isOpen);
+            };
+
+            return block;
+        }
+
+        function appendRawRequestEl(content, endpoint) {
+            const container = document.getElementById('messages-container');
+            const empty = container.querySelector('.empty-state');
+            if (empty) empty.remove();
+
+            const div = document.createElement('div');
+            div.className = 'message raw-request';
+            try {
+                const parsed = JSON.parse(content);
+                div.innerHTML = `<span class="raw-label">${escapeHtml(endpoint || '')}</span>\n` + syntaxHighlightJson(parsed);
+            } catch {
+                div.innerHTML = `<span class="raw-label">${escapeHtml(endpoint || '')}</span>\n` + escapeHtml(content);
+            }
+            container.appendChild(div);
+            return div;
+        }
+
+        function appendRawResponseEl(content, statusCode) {
+            const container = document.getElementById('messages-container');
+            const div = document.createElement('div');
+            div.className = 'message raw-response';
+
+            // Try to detect if it's JSON or SSE
+            let display = escapeHtml(content || '');
+            display = display.replace(/^(event: .+)$/gm, '<span class="json-key">$1</span>');
+            display = display.replace(/^(data: )(\[DONE\])$/gm, '<span class="json-null">$1$2</span>');
+
+            const label = statusCode ? `Response ${statusCode}` : 'Response';
+            div.innerHTML = `<span class="raw-label">${label}</span>\n` + display;
+            container.appendChild(div);
+            return div;
+        }
+
+        function formatDuration(seconds) {
+            if (seconds < 1) return Math.round(seconds * 1000) + 'ms';
+            return seconds.toFixed(1) + 's';
+        }
+
+        function scrollToBottom() {
+            const container = document.getElementById('messages-container');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // ---- Simple markdown renderer ----
+
+        function renderMarkdown(text) {
+            if (!text) return '';
+            let html = text;
+
+            // Code blocks: ```lang\n...\n```
+            html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+                return '<pre><code>' + escapeHtml(code.trim()) + '</code></pre>';
+            });
+
+            // Inline code
+            html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+            // Split into blocks but preserve pre blocks
+            const parts = [];
+            const preRegex = /<pre><code>[\s\S]*?<\/code><\/pre>/g;
+            let match;
+            let lastIndex = 0;
+            while ((match = preRegex.exec(html)) !== null) {
+                if (match.index > lastIndex) {
+                    parts.push({ type: 'text', content: html.substring(lastIndex, match.index) });
+                }
+                parts.push({ type: 'pre', content: match[0] });
+                lastIndex = preRegex.lastIndex;
+            }
+            if (lastIndex < html.length) {
+                parts.push({ type: 'text', content: html.substring(lastIndex) });
+            }
+
+            return parts.map(part => {
+                if (part.type === 'pre') return part.content;
+                return renderTextBlock(part.content);
+            }).join('');
+        }
+
+        function renderTextBlock(text) {
+            text = text.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+            text = text.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+            text = text.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+            text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+            text = text.replace(/\*(.+?)\*/g, '<em>$1</em>');
+            text = text.replace(/^> (.+)$/gm, '<blockquote>$1</blockquote>');
+
+            text = text.replace(/(?:^|\n)((?:- .+\n?)+)/g, (_, block) => {
+                const items = block.trim().split('\n').map(line => '<li>' + line.replace(/^- /, '') + '</li>').join('');
+                return '<ul>' + items + '</ul>';
+            });
+
+            text = text.replace(/(?:^|\n)((?:\d+\. .+\n?)+)/g, (_, block) => {
+                const items = block.trim().split('\n').map(line => '<li>' + line.replace(/^\d+\. /, '') + '</li>').join('');
+                return '<ol>' + items + '</ol>';
+            });
+
+            const blocks = text.split(/\n{2,}/);
+            return blocks.map(b => {
+                b = b.trim();
+                if (!b) return '';
+                if (b.startsWith('<h') || b.startsWith('<ul') || b.startsWith('<ol') || b.startsWith('<blockquote')) return b;
+                return '<p>' + b.replace(/\n/g, '<br>') + '</p>';
+            }).join('');
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ---- Model loading ----
+
+        function formatTokenCount(n) {
+            if (n == null) return '';
+            if (n >= 1000000) return (n / 1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(n % 1000 === 0 ? 0 : 1) + 'K';
+            return String(n);
+        }
+
+        async function loadModels() {
+            const select = document.getElementById('model-select');
+            try {
+                const res = await fetch('/v1/models');
+                const data = await res.json();
+                modelsData = data.data || [];
+
+                // Also fetch full model data for endpoint + context info
+                try {
+                    const fullRes = await fetch('/v1/models/full/');
+                    const fullData = await fullRes.json();
+                    const fullModels = fullData.data || fullData || [];
+                    if (Array.isArray(fullModels)) {
+                        for (const m of fullModels) {
+                            if (m.id && m.supported_endpoints) {
+                                modelEndpoints[m.id] = m.supported_endpoints;
+                            }
+                            const ctx = m.capabilities?.limits?.max_context_window_tokens;
+                            if (m.id && ctx) {
+                                modelContextSizes[m.id] = ctx;
+                            }
+                        }
+                    }
+                } catch {
+                    // Ignore - will fall back to chat completions, no context info
+                }
+
+                select.innerHTML = '';
+                if (modelsData.length === 0) {
+                    select.innerHTML = '<option value="">No models available</option>';
+                    return;
+                }
+
+                for (const m of modelsData) {
+                    const opt = document.createElement('option');
+                    opt.value = m.id;
+                    let label = m.id;
+                    if (m.owned_by) label += ' (' + m.owned_by + ')';
+                    const ctx = modelContextSizes[m.id];
+                    if (ctx) label += ' [' + formatTokenCount(ctx) + ' ctx]';
+                    opt.textContent = label;
+                    select.appendChild(opt);
+                }
+
+                // Restore last used model
+                const last = localStorage.getItem(MODEL_KEY);
+                if (last && modelsData.some(m => m.id === last)) {
+                    select.value = last;
+                }
+            } catch (err) {
+                select.innerHTML = '<option value="">Failed to load models</option>';
+            }
+        }
+
+        function onModelChange() {
+            const model = document.getElementById('model-select').value;
+            localStorage.setItem(MODEL_KEY, model);
+            const session = getActiveSession();
+            if (session) {
+                session.model = model;
+                saveSessions();
+            }
+        }
+
+        function supportsResponses(modelId) {
+            const endpoints = modelEndpoints[modelId];
+            if (!endpoints) return false;
+            return endpoints.some(e =>
+                e === '/v1/responses' || e === '/responses' || e === 'responses'
+            );
+        }
+
+        // ---- Sending messages ----
+
+        async function sendMessage() {
+            if (rawMode) {
+                return sendRawMessage();
+            }
+
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text || isStreaming) return;
+
+            let session = getActiveSession();
+            if (!session) {
+                newSession();
+                session = getActiveSession();
+            }
+
+            const model = document.getElementById('model-select').value;
+            if (!model) {
+                appendMessageEl('error', 'Please select a model first.');
+                return;
+            }
+            session.model = model;
+
+            // Add user message
+            session.messages.push({ role: 'user', content: text });
+
+            // Auto-title from first message
+            if (session.messages.length === 1) {
+                session.title = text.substring(0, 60) + (text.length > 60 ? '...' : '');
+                renderSessionList();
+            }
+
+            saveSessions();
+            appendMessageEl('user', text);
+            input.value = '';
+            autoResize(input);
+            scrollToBottom();
+
+            // Create assistant message placeholder
+            const assistantDiv = appendMessageEl('assistant', '');
+            const contentDiv = assistantDiv.querySelector('.message-content');
+            contentDiv.innerHTML = '<span class="typing-indicator">Thinking</span>';
+            scrollToBottom();
+
+            isStreaming = true;
+            document.getElementById('send-btn').disabled = true;
+            abortController = new AbortController();
+
+            const startTime = performance.now();
+
+            try {
+                let result;
+                if (supportsResponses(model)) {
+                    result = await streamResponses(model, session.messages, assistantDiv, contentDiv);
+                } else {
+                    result = await streamChatCompletions(model, session.messages, assistantDiv, contentDiv);
+                }
+
+                const totalTime = (performance.now() - startTime) / 1000;
+
+                const msgData = {
+                    role: 'assistant',
+                    content: result.text,
+                    totalTime: Math.round(totalTime * 10) / 10,
+                };
+                if (result.thinking) {
+                    msgData.thinking = result.thinking;
+                }
+                if (result.thinkingTime != null) {
+                    msgData.thinkingTime = Math.round(result.thinkingTime * 10) / 10;
+                }
+
+                session.messages.push(msgData);
+                saveSessions();
+
+                // Add timing meta to displayed message
+                const metaDiv = document.createElement('div');
+                metaDiv.className = 'message-meta';
+                if (msgData.thinkingTime != null) {
+                    metaDiv.innerHTML += `<span>Thinking: ${formatDuration(msgData.thinkingTime)}</span>`;
+                }
+                metaDiv.innerHTML += `<span>Total: ${formatDuration(msgData.totalTime)}</span>`;
+                assistantDiv.appendChild(metaDiv);
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                contentDiv.innerHTML = '';
+                assistantDiv.className = 'message error';
+                contentDiv.textContent = 'Error: ' + err.message;
+            } finally {
+                isStreaming = false;
+                document.getElementById('send-btn').disabled = false;
+                abortController = null;
+            }
+            scrollToBottom();
+        }
+
+        // ---- Streaming: /v1/responses ----
+
+        async function streamResponses(model, messages, assistantDiv, contentDiv) {
+            const input = messages.map(m => ({
+                role: m.role,
+                content: m.content,
+            }));
+
+            const body = {
+                model: model,
+                input: input,
+                stream: true,
+            };
+
+            const res = await fetch('/v1/responses', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: abortController.signal,
+            });
+
+            if (!res.ok) {
+                const errBody = await res.text();
+                throw new Error(`HTTP ${res.status}: ${errBody.substring(0, 200)}`);
+            }
+
+            let fullText = '';
+            let thinkingText = '';
+            let thinkingStartTime = null;
+            let thinkingEndTime = null;
+            let isThinking = false;
+            let thinkingEl = null;
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let lastEventType = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    // Track SSE event type from event: lines
+                    if (line.startsWith('event: ')) {
+                        lastEventType = line.substring(7).trim();
+                        continue;
+                    }
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.substring(6).trim();
+                    if (data === '[DONE]') continue;
+
+                    try {
+                        const event = JSON.parse(data);
+                        const eventType = event.type || lastEventType;
+
+                        // Reasoning/thinking events
+                        if (eventType === 'response.reasoning_summary_text.delta' ||
+                            eventType === 'response.reasoning_summary_part.delta') {
+                            if (!isThinking) {
+                                isThinking = true;
+                                thinkingStartTime = performance.now();
+                                // Show thinking indicator
+                                thinkingEl = document.createElement('div');
+                                thinkingEl.className = 'thinking-indicator';
+                                thinkingEl.innerHTML = '<div class="spinner"></div> Thinking...';
+                                assistantDiv.insertBefore(thinkingEl, contentDiv);
+                            }
+                            thinkingText += event.delta || '';
+                        } else if (eventType === 'response.reasoning_summary_text.done' ||
+                                   eventType === 'response.reasoning_summary_part.done') {
+                            // Thinking phase complete
+                            if (isThinking) {
+                                thinkingEndTime = performance.now();
+                                isThinking = false;
+                            }
+                        } else if (eventType === 'response.output_item.added') {
+                            // Check if a reasoning item was added
+                            const item = event.item || {};
+                            if (item.type === 'reasoning' && !isThinking) {
+                                isThinking = true;
+                                thinkingStartTime = performance.now();
+                                thinkingEl = document.createElement('div');
+                                thinkingEl.className = 'thinking-indicator';
+                                thinkingEl.innerHTML = '<div class="spinner"></div> Thinking...';
+                                assistantDiv.insertBefore(thinkingEl, contentDiv);
+                            }
+                        } else if (eventType === 'response.output_item.done') {
+                            const item = event.item || {};
+                            if (item.type === 'reasoning') {
+                                if (isThinking) {
+                                    thinkingEndTime = performance.now();
+                                    isThinking = false;
+                                }
+                                // Extract summary text from completed reasoning item
+                                if (!thinkingText && item.summary) {
+                                    for (const s of item.summary) {
+                                        if (s.text) thinkingText += s.text;
+                                    }
+                                }
+                            }
+                        } else if (eventType === 'response.output_text.delta') {
+                            // If thinking was happening but we didn't get a done event
+                            if (isThinking) {
+                                thinkingEndTime = performance.now();
+                                isThinking = false;
+                            }
+                            fullText += event.delta || '';
+                            contentDiv.innerHTML = renderMarkdown(fullText);
+                            scrollToBottom();
+                        } else if (eventType === 'response.completed') {
+                            // Extract reasoning from final response if not captured via streaming events
+                            const resp = event.response || {};
+                            if (!thinkingText && resp.output) {
+                                for (const item of resp.output) {
+                                    if (item.type === 'reasoning' && item.summary) {
+                                        for (const s of item.summary) {
+                                            if (s.text) thinkingText += s.text;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        lastEventType = '';
+                    } catch {
+                        // Skip unparseable
+                    }
+                }
+            }
+
+            // Replace thinking indicator with collapsible block
+            if (thinkingEl) thinkingEl.remove();
+            if (thinkingText) {
+                assistantDiv.insertBefore(buildThinkingBlock(thinkingText), contentDiv);
+            }
+
+            if (!fullText) {
+                contentDiv.innerHTML = '<em>(empty response)</em>';
+            }
+
+            const thinkingTime = (thinkingStartTime != null && thinkingEndTime != null)
+                ? (thinkingEndTime - thinkingStartTime) / 1000
+                : null;
+
+            return { text: fullText, thinking: thinkingText || null, thinkingTime };
+        }
+
+        // ---- Streaming: /v1/chat/completions ----
+
+        async function streamChatCompletions(model, messages, assistantDiv, contentDiv) {
+            const msgs = messages.map(m => ({
+                role: m.role,
+                content: m.content,
+            }));
+
+            const res = await fetch('/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: model,
+                    messages: msgs,
+                    stream: true,
+                }),
+                signal: abortController.signal,
+            });
+
+            if (!res.ok) {
+                const errBody = await res.text();
+                throw new Error(`HTTP ${res.status}: ${errBody.substring(0, 200)}`);
+            }
+
+            let fullText = '';
+            let thinkingText = '';
+            let thinkingStartTime = null;
+            let thinkingEndTime = null;
+            let isThinking = false;
+            let thinkingEl = null;
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line.startsWith('data: ')) continue;
+                    const data = line.substring(6).trim();
+                    if (data === '[DONE]') continue;
+
+                    try {
+                        const chunk = JSON.parse(data);
+                        const delta = chunk.choices && chunk.choices[0] && chunk.choices[0].delta;
+                        if (!delta) continue;
+
+                        // Check for reasoning/thinking content (OpenAI o-series models)
+                        const reasoning = delta.reasoning_content || delta.reasoning;
+                        if (reasoning) {
+                            if (!isThinking) {
+                                isThinking = true;
+                                thinkingStartTime = performance.now();
+                                thinkingEl = document.createElement('div');
+                                thinkingEl.className = 'thinking-indicator';
+                                thinkingEl.innerHTML = '<div class="spinner"></div> Thinking...';
+                                assistantDiv.insertBefore(thinkingEl, contentDiv);
+                            }
+                            thinkingText += reasoning;
+                        }
+
+                        if (delta.content) {
+                            if (isThinking) {
+                                thinkingEndTime = performance.now();
+                                isThinking = false;
+                            }
+                            fullText += delta.content;
+                            contentDiv.innerHTML = renderMarkdown(fullText);
+                            scrollToBottom();
+                        }
+                    } catch {
+                        // Skip
+                    }
+                }
+            }
+
+            // Replace thinking indicator with collapsible block
+            if (thinkingEl) thinkingEl.remove();
+            if (thinkingText) {
+                assistantDiv.insertBefore(buildThinkingBlock(thinkingText), contentDiv);
+            }
+
+            if (!fullText) {
+                contentDiv.innerHTML = '<em>(empty response)</em>';
+            }
+
+            const thinkingTime = (thinkingStartTime != null && thinkingEndTime != null)
+                ? (thinkingEndTime - thinkingStartTime) / 1000
+                : null;
+
+            return { text: fullText, thinking: thinkingText || null, thinkingTime };
+        }
+
+        // ---- Raw mode ----
+
+        function setRawMode(enabled) {
+            rawMode = enabled;
+            const chatInput = document.getElementById('chat-input');
+            const chatBtn = document.getElementById('mode-chat');
+            const rawBtn = document.getElementById('mode-raw');
+            const endpointSelect = document.getElementById('endpoint-select');
+
+            chatBtn.classList.toggle('active', !enabled);
+            rawBtn.classList.toggle('active', enabled);
+            endpointSelect.classList.toggle('visible', enabled);
+
+            if (enabled) {
+                chatInput.classList.add('raw-mode');
+                chatInput.placeholder = 'Raw JSON payload (Ctrl+Enter to send)\n{\n  "model": "...",\n  "messages": [...],\n  "stream": true\n}';
+            } else {
+                chatInput.classList.remove('raw-mode');
+                chatInput.placeholder = 'Type a message... (Enter to send, Shift+Enter for newline)';
+            }
+            autoResize(chatInput);
+            chatInput.focus();
+        }
+
+        function resolveEndpoint(payload) {
+            const sel = document.getElementById('endpoint-select').value;
+            if (sel !== 'auto') return sel;
+            const model = payload.model || document.getElementById('model-select').value;
+            if (model && supportsResponses(model)) return '/v1/responses';
+            return '/v1/chat/completions';
+        }
+
+        function syntaxHighlightJson(json) {
+            if (typeof json !== 'string') {
+                json = JSON.stringify(json, null, 2);
+            }
+            return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+                let cls = 'json-number';
+                if (/^"/.test(match)) {
+                    if (/:$/.test(match)) {
+                        cls = 'json-key';
+                    } else {
+                        cls = 'json-string';
+                    }
+                } else if (/true|false/.test(match)) {
+                    cls = 'json-boolean';
+                } else if (/null/.test(match)) {
+                    cls = 'json-null';
+                }
+                return '<span class="' + cls + '">' + match + '</span>';
+            });
+        }
+
+        async function sendRawMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text || isStreaming) return;
+
+            let payload;
+            try {
+                payload = JSON.parse(text);
+            } catch (e) {
+                appendMessageEl('error', 'Invalid JSON: ' + e.message);
+                scrollToBottom();
+                return;
+            }
+
+            // Inject model from selector if not specified in payload
+            if (!payload.model) {
+                const model = document.getElementById('model-select').value;
+                if (model) payload.model = model;
+            }
+
+            const endpoint = resolveEndpoint(payload);
+            const isStream = !!payload.stream;
+
+            let session = getActiveSession();
+            if (!session) {
+                newSession();
+                session = getActiveSession();
+            }
+
+            // Save raw request to session
+            session.messages.push({ role: 'raw-request', content: text, endpoint });
+            if (session.messages.length === 1) {
+                session.title = '[Raw] ' + endpoint;
+                renderSessionList();
+            }
+            saveSessions();
+
+            // Show request message
+            const container = document.getElementById('messages-container');
+            const emptyEl = container.querySelector('.empty-state');
+            if (emptyEl) emptyEl.remove();
+
+            const reqDiv = document.createElement('div');
+            reqDiv.className = 'message raw-request';
+            reqDiv.innerHTML = `<span class="raw-label">${escapeHtml(endpoint)}</span>\n` + syntaxHighlightJson(payload);
+            container.appendChild(reqDiv);
+
+            input.value = '';
+            autoResize(input);
+            scrollToBottom();
+
+            // Create response placeholder
+            const resDiv = document.createElement('div');
+            resDiv.className = 'message raw-response';
+            resDiv.innerHTML = '<span class="raw-label">Response</span>\n<span class="typing-indicator">Waiting</span>';
+            container.appendChild(resDiv);
+            scrollToBottom();
+
+            isStreaming = true;
+            document.getElementById('send-btn').disabled = true;
+            abortController = new AbortController();
+            const startTime = performance.now();
+
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: abortController.signal,
+                });
+
+                if (!isStream) {
+                    // Non-streaming: read full response
+                    const contentType = res.headers.get('content-type') || '';
+                    let responseText;
+                    if (contentType.includes('json')) {
+                        const jsonData = await res.json();
+                        responseText = JSON.stringify(jsonData, null, 2);
+                        resDiv.innerHTML = `<span class="raw-label">Response ${res.status} (${formatDuration((performance.now() - startTime) / 1000)})</span>\n` + syntaxHighlightJson(jsonData);
+                    } else {
+                        responseText = await res.text();
+                        resDiv.innerHTML = `<span class="raw-label">Response ${res.status} (${formatDuration((performance.now() - startTime) / 1000)})</span>\n` + escapeHtml(responseText);
+                    }
+                    session.messages.push({ role: 'raw-response', content: responseText, statusCode: res.status });
+                    saveSessions();
+                } else {
+                    // Streaming: show SSE events incrementally
+                    const reader = res.body.getReader();
+                    const decoder = new TextDecoder();
+                    let accumulated = '';
+                    let eventCount = 0;
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        const chunk = decoder.decode(value, { stream: true });
+                        accumulated += chunk;
+                        eventCount++;
+
+                        // Render accumulated SSE, with some color highlighting
+                        let display = accumulated;
+                        // Highlight event: and data: prefixes
+                        display = escapeHtml(display);
+                        display = display.replace(/^(event: .+)$/gm, '<span class="json-key">$1</span>');
+                        display = display.replace(/^(data: )(\[DONE\])$/gm, '<span class="json-null">$1$2</span>');
+
+                        const elapsed = formatDuration((performance.now() - startTime) / 1000);
+                        resDiv.innerHTML = `<span class="raw-label">Response ${res.status} | streaming | ${eventCount} chunks | ${elapsed}</span>\n` + display;
+
+                        // Auto-scroll, but throttle to avoid jank
+                        if (eventCount % 3 === 0 || eventCount < 5) {
+                            resDiv.scrollTop = resDiv.scrollHeight;
+                            scrollToBottom();
+                        }
+                    }
+
+                    const totalTime = formatDuration((performance.now() - startTime) / 1000);
+                    let display = escapeHtml(accumulated);
+                    display = display.replace(/^(event: .+)$/gm, '<span class="json-key">$1</span>');
+                    display = display.replace(/^(data: )(\[DONE\])$/gm, '<span class="json-null">$1$2</span>');
+                    resDiv.innerHTML = `<span class="raw-label">Response ${res.status} | ${eventCount} chunks | ${totalTime}</span>\n` + display;
+                    resDiv.scrollTop = resDiv.scrollHeight;
+
+                    session.messages.push({ role: 'raw-response', content: accumulated, statusCode: res.status });
+                    saveSessions();
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                resDiv.innerHTML = `<span class="raw-label">Error</span>\n` + escapeHtml(err.message);
+                resDiv.style.borderColor = '#ef9a9a';
+            } finally {
+                isStreaming = false;
+                document.getElementById('send-btn').disabled = false;
+                abortController = null;
+            }
+            scrollToBottom();
+        }
+
+        // ---- Input handling ----
+
+        function autoResize(el) {
+            el.style.height = 'auto';
+            el.style.height = Math.min(el.scrollHeight, 150) + 'px';
+        }
+
+        const chatInput = document.getElementById('chat-input');
+        chatInput.addEventListener('input', () => autoResize(chatInput));
+        chatInput.addEventListener('keydown', (e) => {
+            if (rawMode) {
+                // In raw mode: Ctrl+Enter to send (Enter is for editing JSON)
+                if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+                // Allow Tab to insert spaces in raw mode
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    const start = chatInput.selectionStart;
+                    const end = chatInput.selectionEnd;
+                    chatInput.value = chatInput.value.substring(0, start) + '  ' + chatInput.value.substring(end);
+                    chatInput.selectionStart = chatInput.selectionEnd = start + 2;
+                }
+            } else {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            }
+        });
+
+        // ---- Init ----
+
+        loadSessions();
+        renderSessionList();
+        renderMessages();
+        loadModels();
+    </script>
+</body>
+</html>

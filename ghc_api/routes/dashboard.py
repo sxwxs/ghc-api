@@ -72,6 +72,12 @@ def requests_page():
     return render_template("requests.html")
 
 
+@dashboard_bp.route("/chat", methods=["GET"])
+def chat_page():
+    """Serve the chat page"""
+    return render_template("chat.html")
+
+
 @dashboard_bp.route("/code-agent-manager", methods=["GET"])
 def code_agent_manager_page():
     """Serve the code agent manager page"""
