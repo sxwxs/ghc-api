@@ -1,6 +1,6 @@
 """GitHub Copilot API Proxy - ghc-api package"""
 
-__version__ = "1.0.13"
+__version__ = "1.0.14"
 
 from .app import create_app, initialize_app
 from .main import main
