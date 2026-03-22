@@ -628,6 +628,10 @@
             return new Intl.NumberFormat().format(num);
         }
 
+        function formatRequestDate(timestamp) {
+            return new Date(Number(timestamp || 0) * 1000);
+        }
+
         function getStateLabel(state) {
             const labels = {
                 'pending': 'Pending',
@@ -726,7 +730,7 @@
                     }
 
                     row.innerHTML = `
-                        <td>${new Date(item.timestamp).toLocaleString()}</td>
+                        <td>${formatRequestDate(item.timestamp).toLocaleString()}</td>
                         <td><span class="model-badge">${modelDisplay}</span></td>
                         <td><span class="endpoint-badge">${item.endpoint}</span></td>
                         <td><span class="state-badge ${state}">${getStateLabel(state)}</span></td>
@@ -758,7 +762,7 @@
                     </div>
                     <div class="overview-item">
                         <label>Timestamp</label>
-                        <div class="value">${new Date(data.timestamp).toLocaleString()}</div>
+                        <div class="value">${formatRequestDate(data.timestamp).toLocaleString()}</div>
                     </div>
                     <div class="overview-item">
                         <label>Model</label>

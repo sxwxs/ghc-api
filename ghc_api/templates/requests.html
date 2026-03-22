@@ -941,6 +941,10 @@
             return new Intl.NumberFormat().format(num);
         }
 
+        function formatRequestDate(timestamp) {
+            return new Date(Number(timestamp || 0) * 1000);
+        }
+
         function getStateLabel(state) {
             const labels = {
                 'pending': 'Pending',
@@ -1468,8 +1472,9 @@
                         const state = item.state || 'completed';
                         const isSelected = item.id === selectedRequestId;
                         const duration = item.duration !== null ? `${item.duration}s` : '-';
-                        const timestamp = new Date(item.timestamp).toLocaleTimeString();
-                        const date = new Date(item.timestamp).toLocaleDateString();
+                        const requestDate = formatRequestDate(item.timestamp);
+                        const timestamp = requestDate.toLocaleTimeString();
+                        const date = requestDate.toLocaleDateString();
 
                         // Show translated model if different from original
                         let modelDisplay = item.model;
@@ -1668,7 +1673,7 @@
                 </div>
                 <div class="overview-item">
                     <label>Timestamp</label>
-                    <div class="value">${new Date(data.timestamp).toLocaleString()}</div>
+                    <div class="value">${formatRequestDate(data.timestamp).toLocaleString()}</div>
                 </div>
                 <div class="overview-item">
                     <label>Model</label>

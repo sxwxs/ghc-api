@@ -5,6 +5,7 @@ Thread-safe cache for storing API requests and responses
 import json
 import os
 import threading
+import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime
@@ -31,6 +32,31 @@ class RequestCache:
         self.model_stats: Dict[str, Dict] = {}
         self.endpoint_stats: Dict[str, Dict] = {}
 
+    @staticmethod
+    def _current_timestamp() -> int:
+        return int(time.time())
+
+    @classmethod
+    def _normalize_import_timestamp(cls, value: Any) -> int:
+        """Normalize imported timestamps to Unix seconds."""
+        if isinstance(value, (int, float)):
+            return int(value)
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return cls._current_timestamp()
+
+            try:
+                return int(float(stripped))
+            except ValueError:
+                try:
+                    return int(datetime.fromisoformat(stripped.replace("Z", "+00:00")).timestamp())
+                except ValueError:
+                    return cls._current_timestamp()
+
+        return cls._current_timestamp()
+
     def start_request(self, request_id: str, data: Dict) -> None:
         """Start tracking a new request (before sending to upstream)"""
         with self.lock:
@@ -39,7 +65,7 @@ class RequestCache:
 
             self.cache[request_id] = {
                 "id": request_id,
-                "timestamp": datetime.now().isoformat(),
+                "timestamp": self._current_timestamp(),
                 "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
@@ -86,7 +112,7 @@ class RequestCache:
 
                 self.cache[request_id] = {
                     "id": request_id,
-                    "timestamp": datetime.now().isoformat(),
+                    "timestamp": self._current_timestamp(),
                     "request_headers": data.get("request_headers"),
                     "original_request_body": data.get("original_request_body"),
                     "request_body": data.get("request_body"),
@@ -258,7 +284,7 @@ class RequestCache:
 
             self.cache[request_id] = {
                 "id": request_id,
-                "timestamp": data.get("timestamp", datetime.now().isoformat()),
+                "timestamp": self._normalize_import_timestamp(data.get("timestamp")),
                 "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
