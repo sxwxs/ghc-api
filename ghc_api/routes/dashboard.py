@@ -265,10 +265,10 @@ def api_requests():
     items_summary = []
     for item in items:
         summary = dict(item)
-        summary["original_request_body"] = None  # Remove for list view
-        summary["request_body"] = None  # Remove for list view
-        summary["response_body"] = None  # Remove for list view
-        summary["request_headers"] = None  # Remove for list view
+        summary.pop("original_request_body", None)
+        summary.pop("request_body", None)
+        summary.pop("response_body", None)
+        summary.pop("request_headers", None)
         items_summary.append(summary)
 
     return jsonify({
@@ -330,10 +330,10 @@ def api_fulltext_search():
     items_summary = []
     for item in items:
         summary = dict(item)
-        summary["original_request_body"] = None
-        summary["request_body"] = None
-        summary["response_body"] = None
-        summary["request_headers"] = None
+        summary.pop("original_request_body", None)
+        summary.pop("request_body", None)
+        summary.pop("response_body", None)
+        summary.pop("request_headers", None)
         items_summary.append(summary)
 
     return jsonify({
