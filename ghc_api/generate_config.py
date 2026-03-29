@@ -124,6 +124,20 @@ save_request_to_file: false
 # Local fallback files such as ~/.ghc-api/token_usage.jl are still used where supported.
 disable_onedrive_access: true
 
+# Web Search Proxy Settings
+# -------------------------
+# When enabled, if the Copilot backend rejects a request containing the web_search tool
+# (e.g. Anthropic's web_search_20250305), the proxy will:
+# 1. Call the external search proxy to perform the search
+# 2. Remove the web_search tool from the request
+# 3. Inject the search results into the system prompt
+# 4. Retry the request
+#
+# enable_web_search_proxy: Whether to enable the web search proxy fallback
+# web_search_proxy_endpoint: The URL of the search proxy service
+enable_web_search_proxy: false
+web_search_proxy_endpoint: "http://127.0.0.1:5002"
+
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,
         api_version=DEFAULT_API_VERSION,

@@ -684,7 +684,7 @@
                     row.innerHTML = `
                         <td><span class="model-badge">${model}</span></td>
                         <td>${formatNumber(data.request_count)}</td>
-                        <td>${formatNumber(data.input_tokens)}</td>
+                        <td>${formatNumber(data.input_tokens + (data.cache_creation_input_tokens || 0) + (data.cache_read_input_tokens || 0))}</td>
                         <td>${formatNumber(data.cache_creation_input_tokens || 0)}</td>
                         <td>${formatNumber(data.cache_read_input_tokens || 0)}</td>
                         <td>${formatNumber(data.output_tokens)}</td>
@@ -808,7 +808,7 @@
                     </div>
                     <div class="overview-item">
                         <label>Input Tokens</label>
-                        <div class="value">${formatNumber(data.input_tokens)}</div>
+                        <div class="value">${formatNumber(data.input_tokens + (data.cache_creation_input_tokens || 0) + (data.cache_read_input_tokens || 0))}</div>
                     </div>
                     ${data.cache_creation_input_tokens ? `<div class="overview-item">
                         <label>Cache Create Tokens</label>

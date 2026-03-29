@@ -42,6 +42,10 @@ class State:
         self.save_request_to_file: bool = False
         self.disable_onedrive_access: bool = True
 
+        # Web search proxy settings
+        self.enable_web_search_proxy: bool = False
+        self.web_search_proxy_endpoint: str = ""
+
         # Background worker guards
         self.token_usage_reporter_started: bool = False
 

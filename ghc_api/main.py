@@ -88,6 +88,12 @@ def main():
         if 'disable_onedrive_access' in config:
             state.disable_onedrive_access = bool(config['disable_onedrive_access'])
 
+        # Load web search proxy settings
+        if 'enable_web_search_proxy' in config:
+            state.enable_web_search_proxy = bool(config['enable_web_search_proxy'])
+        if 'web_search_proxy_endpoint' in config:
+            state.web_search_proxy_endpoint = config['web_search_proxy_endpoint']
+
         # Load model mappings from config
         if 'model_mappings' in config:
             model_mappings.load_from_config(config)

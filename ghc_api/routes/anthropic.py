@@ -28,6 +28,7 @@ from ..translator import (
 )
 from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup, log_connection_retry
 from ..state import state
+from ..web_search import has_web_search_tool, is_web_search_unsupported_error, apply_web_search_fallback
 
 anthropic_bp = Blueprint('anthropic', __name__)
 
@@ -497,6 +498,14 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 "duration": duration,
             })
 
+            # Handle web search unsupported error with proxy fallback
+            if (state.enable_web_search_proxy and
+                    has_web_search_tool(current_payload) and
+                    is_web_search_unsupported_error(response.status_code, response.text)):
+                print(f"[Direct Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
+                current_payload = apply_web_search_fallback(current_payload, state.web_search_proxy_endpoint)
+                continue
+
             # Handle orphaned tool_result error with retry
             if is_orphaned_tool_result_error(response.status_code, response.text):
                 orphaned_ids = extract_orphaned_tool_use_ids(response.text)
@@ -774,6 +783,15 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
             return jsonify(anthropic_response)
         else:
             log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code)
+
+            # Handle web search unsupported error with proxy fallback
+            if (state.enable_web_search_proxy and
+                    has_web_search_tool(current_payload) and
+                    is_web_search_unsupported_error(response.status_code, response.text)):
+                print(f"[Translated API] Web search unsupported, applying search proxy fallback for request {request_id}")
+                current_payload = apply_web_search_fallback(current_payload, state.web_search_proxy_endpoint)
+                continue
+
             if is_orphaned_tool_result_error(response.status_code, response.text):
                 orphaned_ids = extract_orphaned_tool_use_ids(response.text)
                 if orphaned_ids:
@@ -845,6 +863,23 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                 timeout=1200,
             )
             status_code = response.status_code
+
+            # Handle web search unsupported error before streaming begins
+            if (not response.ok and
+                    state.enable_web_search_proxy and
+                    has_web_search_tool(anthropic_payload) and
+                    is_web_search_unsupported_error(response.status_code, response.text)):
+                print(f"[Stream Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
+                modified_payload = apply_web_search_fallback(anthropic_payload, state.web_search_proxy_endpoint)
+                new_openai_payload = translate_anthropic_to_openai(modified_payload)
+                response = requests.post(
+                    f"{get_copilot_base_url()}/chat/completions",
+                    headers=headers,
+                    json=new_openai_payload,
+                    stream=True,
+                    timeout=1200,
+                )
+                status_code = response.status_code
 
             for line in response.iter_lines():
                 if not line:

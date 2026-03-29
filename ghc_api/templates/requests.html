@@ -1494,7 +1494,7 @@
                                 </div>
                                 <div class="request-item-stats">
                                     <span>Duration: ${duration}</span>
-                                    <span>In: ${formatNumber(item.input_tokens)}${item.cache_creation_input_tokens ? ` / Cache+: ${formatNumber(item.cache_creation_input_tokens)}` : ''}${item.cache_read_input_tokens ? ` / Cache: ${formatNumber(item.cache_read_input_tokens)}` : ''} / Out: ${formatNumber(item.output_tokens)}</span>
+                                    <span>In: ${formatNumber(item.input_tokens + (item.cache_creation_input_tokens || 0) + (item.cache_read_input_tokens || 0))}${item.cache_creation_input_tokens ? ` / Cache+: ${formatNumber(item.cache_creation_input_tokens)}` : ''}${item.cache_read_input_tokens ? ` / Cache: ${formatNumber(item.cache_read_input_tokens)}` : ''} / Out: ${formatNumber(item.output_tokens)}</span>
                                 </div>
                             </div>
                         `;
@@ -1711,7 +1711,7 @@
                 </div>
                 <div class="overview-item">
                     <label>Input Tokens</label>
-                    <div class="value">${formatNumber(data.input_tokens)}</div>
+                    <div class="value">${formatNumber(data.input_tokens + (data.cache_creation_input_tokens || 0) + (data.cache_read_input_tokens || 0))}</div>
                 </div>
                 ${data.cache_creation_input_tokens ? `<div class="overview-item">
                     <label>Cache Create Tokens</label>
