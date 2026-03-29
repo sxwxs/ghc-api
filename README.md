@@ -50,7 +50,7 @@ By default, the server will start on `http://localhost:8313`.
 - `-p PORT` or `--port PORT`: Specify the port to listen on (default: 8313)
 - `-a ADDRESS` or `--address ADDRESS`: Specify the address to listen on (default: localhost)
 - `-c` or `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.8`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.15`)
 - `--help`: Show help message
 
 ### Configuration
