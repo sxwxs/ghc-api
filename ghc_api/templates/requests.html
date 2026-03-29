@@ -1494,7 +1494,7 @@
                                 </div>
                                 <div class="request-item-stats">
                                     <span>Duration: ${duration}</span>
-                                    <span>In: ${formatNumber(item.input_tokens)} / Out: ${formatNumber(item.output_tokens)}</span>
+                                    <span>In: ${formatNumber(item.input_tokens)}${item.cache_creation_input_tokens ? ` / Cache+: ${formatNumber(item.cache_creation_input_tokens)}` : ''}${item.cache_read_input_tokens ? ` / Cache: ${formatNumber(item.cache_read_input_tokens)}` : ''} / Out: ${formatNumber(item.output_tokens)}</span>
                                 </div>
                             </div>
                         `;
@@ -1713,6 +1713,14 @@
                     <label>Input Tokens</label>
                     <div class="value">${formatNumber(data.input_tokens)}</div>
                 </div>
+                ${data.cache_creation_input_tokens ? `<div class="overview-item">
+                    <label>Cache Create Tokens</label>
+                    <div class="value">${formatNumber(data.cache_creation_input_tokens)}</div>
+                </div>` : ''}
+                ${data.cache_read_input_tokens ? `<div class="overview-item">
+                    <label>Cache Read Tokens</label>
+                    <div class="value">${formatNumber(data.cache_read_input_tokens)}</div>
+                </div>` : ''}
                 <div class="overview-item">
                     <label>Output Tokens</label>
                     <div class="value">${formatNumber(data.output_tokens)}</div>

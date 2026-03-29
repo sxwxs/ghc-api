@@ -78,6 +78,8 @@ class RequestCache:
                 "response_size": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
                 "duration": 0,
                 "state": self.STATE_PENDING,
             }
@@ -103,6 +105,8 @@ class RequestCache:
                 entry["response_size"] = data.get("response_size", 0)
                 entry["input_tokens"] = data.get("input_tokens", 0)
                 entry["output_tokens"] = data.get("output_tokens", 0)
+                entry["cache_creation_input_tokens"] = data.get("cache_creation_input_tokens", 0)
+                entry["cache_read_input_tokens"] = data.get("cache_read_input_tokens", 0)
                 entry["duration"] = data.get("duration", 0)
                 entry["state"] = self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR
             else:
@@ -125,6 +129,8 @@ class RequestCache:
                     "response_size": data.get("response_size", 0),
                     "input_tokens": data.get("input_tokens", 0),
                     "output_tokens": data.get("output_tokens", 0),
+                    "cache_creation_input_tokens": data.get("cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": data.get("cache_read_input_tokens", 0),
                     "duration": data.get("duration", 0),
                     "state": self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR,
                 }
@@ -140,12 +146,16 @@ class RequestCache:
                     "request_count": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
                     "bytes_sent": 0,
                     "bytes_received": 0,
                 }
             self.model_stats[model]["request_count"] += 1
             self.model_stats[model]["input_tokens"] += data.get("input_tokens", 0)
             self.model_stats[model]["output_tokens"] += data.get("output_tokens", 0)
+            self.model_stats[model]["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
+            self.model_stats[model]["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
             self.model_stats[model]["bytes_sent"] += data.get("request_size", 0)
             self.model_stats[model]["bytes_received"] += data.get("response_size", 0)
 
@@ -234,6 +244,8 @@ class RequestCache:
                     "request_count": int(stats.get("request_count", 0)),
                     "input_tokens": int(stats.get("input_tokens", 0)),
                     "output_tokens": int(stats.get("output_tokens", 0)),
+                    "cache_creation_input_tokens": int(stats.get("cache_creation_input_tokens", 0)),
+                    "cache_read_input_tokens": int(stats.get("cache_read_input_tokens", 0)),
                     "bytes_sent": int(stats.get("bytes_sent", 0)),
                     "bytes_received": int(stats.get("bytes_received", 0)),
                 }
@@ -297,6 +309,8 @@ class RequestCache:
                 "response_size": data.get("response_size", 0),
                 "input_tokens": data.get("input_tokens", 0),
                 "output_tokens": data.get("output_tokens", 0),
+                "cache_creation_input_tokens": data.get("cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": data.get("cache_read_input_tokens", 0),
                 "duration": data.get("duration", 0),
                 "state": data.get("state", "completed"),
             }
@@ -312,12 +326,16 @@ class RequestCache:
                     "request_count": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
                     "bytes_sent": 0,
                     "bytes_received": 0,
                 }
             self.model_stats[model]["request_count"] += 1
             self.model_stats[model]["input_tokens"] += data.get("input_tokens", 0)
             self.model_stats[model]["output_tokens"] += data.get("output_tokens", 0)
+            self.model_stats[model]["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
+            self.model_stats[model]["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
             self.model_stats[model]["bytes_sent"] += data.get("request_size", 0)
             self.model_stats[model]["bytes_received"] += data.get("response_size", 0)
 

@@ -163,6 +163,7 @@ def chat_completions():
 
             # Cache the request/response
             usage = result.get("usage", {})
+            cached_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "request_body": payload,
@@ -175,6 +176,7 @@ def chat_completions():
                 "response_size": response_size,
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
+                "cache_read_input_tokens": cached_tokens,
                 "duration": duration,
             })
 
@@ -206,6 +208,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         response_chunks = []
         total_output_tokens = 0
         total_input_tokens = 0
+        total_cache_read_input_tokens = 0
         error_occurred = False
         status_code = 200
         first_chunk_received = False
@@ -247,6 +250,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                         if chunk.get("usage"):
                             total_output_tokens = chunk["usage"].get("completion_tokens", 0)
                             total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
+                            total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
 
                         yield f"data: {data}\n\n"
                     except json.JSONDecodeError:
@@ -293,6 +297,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             "response_size": sum(len(json.dumps(c)) for c in response_chunks),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
+            "cache_read_input_tokens": total_cache_read_input_tokens,
             "duration": duration,
         })
 
@@ -447,6 +452,7 @@ def responses():
                 "response_size": response_size,
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
+                "cache_creation_input_tokens": usage.get("input_tokens_details", {}).get("cached_tokens", 0),
                 "duration": duration,
             })
 
@@ -495,6 +501,7 @@ def stream_responses(response: requests.Response, request_id: str,
     def generate() -> Generator[str, None, None]:
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation_input_tokens = 0
         error_occurred = False
         status_code = response.status_code
         first_chunk_received = False
@@ -539,6 +546,7 @@ def stream_responses(response: requests.Response, request_id: str,
                             usage = resp.get("usage", {})
                             total_input_tokens = usage.get("input_tokens", 0)
                             total_output_tokens = usage.get("output_tokens", 0)
+                            total_cache_creation_input_tokens = usage.get("input_tokens_details", {}).get("cached_tokens", 0)
                         elif event_type == "response.output_text.delta":
                             accumulated_text.append(event.get("delta", ""))
 
@@ -589,6 +597,7 @@ def stream_responses(response: requests.Response, request_id: str,
             "response_size": len(json.dumps(cached_response)),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
+            "cache_creation_input_tokens": total_cache_creation_input_tokens,
             "duration": duration,
         })
 

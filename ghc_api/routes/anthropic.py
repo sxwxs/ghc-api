@@ -462,6 +462,8 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 "response_size": len(json.dumps(anthropic_response)),
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
+                "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+                "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
                 "duration": duration,
             })
 
@@ -549,6 +551,8 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
     def generate() -> Generator[str, None, None]:
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation_input_tokens = 0
+        total_cache_read_input_tokens = 0
         error_occurred = False
         status_code = response.status_code
         first_chunk_received = False
@@ -593,6 +597,8 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
                             accumulated_model = msg.get("model", original_model)
                             usage = msg.get("usage", {})
                             total_input_tokens = usage.get("input_tokens", 0)
+                            total_cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
+                            total_cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
                         elif event_type == "message_delta":
                             usage = event.get("usage", {})
                             total_output_tokens = usage.get("output_tokens", 0)
@@ -643,6 +649,8 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
             "usage": {
                 "input_tokens": total_input_tokens,
                 "output_tokens": total_output_tokens,
+                **({"cache_creation_input_tokens": total_cache_creation_input_tokens} if total_cache_creation_input_tokens else {}),
+                **({"cache_read_input_tokens": total_cache_read_input_tokens} if total_cache_read_input_tokens else {}),
             },
         }
 
@@ -660,6 +668,8 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
             "response_size": len(json.dumps(anthropic_response)),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
+            "cache_creation_input_tokens": total_cache_creation_input_tokens,
+            "cache_read_input_tokens": total_cache_read_input_tokens,
             "duration": duration,
         })
 
@@ -743,6 +753,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
 
             # Cache the request/response
             usage = openai_response.get("usage", {})
+            cached_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "original_request_body": original_request_body,
@@ -756,6 +767,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
                 "response_size": len(json.dumps(anthropic_response)),
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
+                "cache_read_input_tokens": cached_tokens,
                 "duration": duration,
             })
 
@@ -816,6 +828,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         response_chunks = []
         total_output_tokens = 0
         total_input_tokens = 0
+        total_cache_read_input_tokens = 0
         error_occurred = False
         status_code = 200
         first_chunk_received = False
@@ -855,6 +868,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                         if chunk.get("usage"):
                             total_output_tokens = chunk["usage"].get("completion_tokens", 0)
                             total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
+                            total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
 
                         # Translate to Anthropic events
                         events = translate_chunk_to_anthropic_events(chunk, stream_state)
@@ -909,6 +923,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             "response_size": sum(len(json.dumps(c)) for c in response_chunks),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
+            "cache_read_input_tokens": total_cache_read_input_tokens,
             "duration": duration,
         })
 

@@ -518,6 +518,8 @@
                         <th>Model</th>
                         <th>Requests</th>
                         <th>Input Tokens</th>
+                        <th>Cache Create</th>
+                        <th>Cache Read</th>
                         <th>Output Tokens</th>
                         <th>Data Sent</th>
                         <th>Data Received</th>
@@ -683,6 +685,8 @@
                         <td><span class="model-badge">${model}</span></td>
                         <td>${formatNumber(data.request_count)}</td>
                         <td>${formatNumber(data.input_tokens)}</td>
+                        <td>${formatNumber(data.cache_creation_input_tokens || 0)}</td>
+                        <td>${formatNumber(data.cache_read_input_tokens || 0)}</td>
                         <td>${formatNumber(data.output_tokens)}</td>
                         <td>${formatBytes(data.bytes_sent)}</td>
                         <td>${formatBytes(data.bytes_received)}</td>
@@ -806,6 +810,14 @@
                         <label>Input Tokens</label>
                         <div class="value">${formatNumber(data.input_tokens)}</div>
                     </div>
+                    ${data.cache_creation_input_tokens ? `<div class="overview-item">
+                        <label>Cache Create Tokens</label>
+                        <div class="value">${formatNumber(data.cache_creation_input_tokens)}</div>
+                    </div>` : ''}
+                    ${data.cache_read_input_tokens ? `<div class="overview-item">
+                        <label>Cache Read Tokens</label>
+                        <div class="value">${formatNumber(data.cache_read_input_tokens)}</div>
+                    </div>` : ''}
                     <div class="overview-item">
                         <label>Output Tokens</label>
                         <div class="value">${formatNumber(data.output_tokens)}</div>
