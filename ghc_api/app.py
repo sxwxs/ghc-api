@@ -5,6 +5,7 @@ Flask application factory and initialization
 from flask import Flask, jsonify
 
 from .routes.anthropic import anthropic_bp
+from .routes.agent import agent_bp
 from .routes.dashboard import dashboard_bp
 from .routes.openai import openai_bp
 
@@ -17,6 +18,7 @@ def create_app() -> Flask:
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(openai_bp)
     app.register_blueprint(anthropic_bp)
+    app.register_blueprint(agent_bp)
 
     # Error handlers
     @app.errorhandler(404)

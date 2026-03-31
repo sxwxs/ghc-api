@@ -1,0 +1,1777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Copilot API Proxy - Code Agent</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .navbar {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .navbar h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+        }
+
+        .navbar-actions {
+            display: flex;
+            gap: 0.75rem;
+            align-items: center;
+        }
+
+        .navbar-actions a, .navbar-actions button {
+            color: white;
+            text-decoration: none;
+            padding: 0.4rem 0.75rem;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.2);
+            transition: background 0.2s;
+            border: none;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+
+        .navbar-actions a:hover, .navbar-actions button:hover {
+            background: rgba(255,255,255,0.3);
+        }
+
+        .main-container {
+            display: flex;
+            height: calc(100vh - 52px);
+        }
+
+        /* Left panel - Detail/interaction view */
+        .detail-panel {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            background: white;
+            border-right: 1px solid #e0e0e0;
+        }
+
+        /* Right panel - Session list */
+        .list-panel {
+            width: 420px;
+            min-width: 320px;
+            max-width: 560px;
+            display: flex;
+            flex-direction: column;
+            background: #fafafa;
+            resize: horizontal;
+            overflow: hidden;
+        }
+
+        /* ---- Create Session Form ---- */
+        .create-form {
+            padding: 1rem;
+            border-bottom: 1px solid #e0e0e0;
+            background: #f8f9ff;
+        }
+
+        .create-form h3 {
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+            color: #444;
+        }
+
+        .form-row {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+            align-items: center;
+        }
+
+        .form-row label {
+            font-size: 0.8rem;
+            min-width: 90px;
+            color: #555;
+        }
+
+        .form-row select,
+        .form-row input[type="text"] {
+            flex: 1;
+            padding: 0.35rem 0.5rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 0.85rem;
+        }
+
+        .form-row input[type="checkbox"] {
+            margin-right: 0.25rem;
+        }
+
+        .checkbox-label {
+            font-size: 0.8rem;
+            color: #555;
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+
+        .btn-create {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 0.4rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+            transition: background 0.2s;
+        }
+
+        .btn-create:hover { background: #5568d0; }
+        .btn-create:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        /* ---- Conversation View ---- */
+        .conversation-area {
+            flex: 1;
+            overflow-y: auto;
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .conversation-placeholder {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: #999;
+            font-size: 0.95rem;
+        }
+
+        .message-block {
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            max-width: 100%;
+            word-wrap: break-word;
+        }
+
+        .message-block.user {
+            background: #e8edff;
+            border-left: 3px solid #667eea;
+        }
+
+        .message-block.agent {
+            background: #f5f5f5;
+            border-left: 3px solid #4caf50;
+        }
+
+        .message-role {
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-bottom: 0.35rem;
+            color: #666;
+        }
+
+        .message-text {
+            font-size: 0.875rem;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .message-text code {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 0.15rem 0.35rem;
+            border-radius: 3px;
+            font-size: 0.8rem;
+        }
+
+        .message-text pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 0.75rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 0.5rem 0;
+            font-size: 0.8rem;
+        }
+
+        .tool-call-block {
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin: 0.35rem 0;
+            font-size: 0.8rem;
+        }
+
+        .tool-call-header {
+            font-weight: 600;
+            color: #f57f17;
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+
+        .tool-call-content {
+            margin-top: 0.25rem;
+            color: #555;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .plan-block {
+            background: #e8f5e9;
+            border: 1px solid #a5d6a7;
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin: 0.35rem 0;
+            font-size: 0.8rem;
+        }
+
+        .plan-item {
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.15rem 0;
+        }
+
+        .plan-status-completed { color: #2e7d32; }
+        .plan-status-inProgress { color: #1565c0; }
+        .plan-status-pending { color: #999; }
+
+        .streaming-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+            margin-left: 0.35rem;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
+        }
+
+        /* ---- Verbose / Thought blocks ---- */
+        .thought-block {
+            background: #f3e5f5;
+            border: 1px solid #ce93d8;
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin: 0.35rem 0;
+            font-size: 0.8rem;
+            font-style: italic;
+            color: #6a1b9a;
+        }
+
+        .thought-block-header {
+            font-weight: 600;
+            font-style: normal;
+            font-size: 0.7rem;
+            color: #8e24aa;
+            margin-bottom: 0.2rem;
+        }
+
+        .usage-block {
+            background: #e3f2fd;
+            border: 1px solid #90caf9;
+            border-radius: 6px;
+            padding: 0.4rem 0.75rem;
+            margin: 0.35rem 0;
+            font-size: 0.75rem;
+            color: #1565c0;
+        }
+
+        .tool-detail-block {
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            margin: 0.35rem 0;
+            font-size: 0.8rem;
+        }
+
+        .tool-detail-header {
+            font-weight: 600;
+            color: #f57f17;
+            display: flex;
+            align-items: center;
+            gap: 0.35rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .tool-detail-status {
+            font-size: 0.7rem;
+            padding: 0.1rem 0.35rem;
+            border-radius: 8px;
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .tool-detail-status.completed {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .tool-detail-input, .tool-detail-output {
+            margin-top: 0.35rem;
+        }
+
+        .tool-detail-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: #888;
+            text-transform: uppercase;
+        }
+
+        .tool-detail-pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            margin-top: 0.15rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .verbose-hidden { display: none !important; }
+
+        /* ---- Prompt Input ---- */
+        .prompt-area {
+            padding: 0.75rem 1rem;
+            border-top: 1px solid #e0e0e0;
+            background: #fafafa;
+            display: flex;
+            gap: 0.5rem;
+            align-items: flex-end;
+        }
+
+        .prompt-area textarea {
+            flex: 1;
+            resize: vertical;
+            min-height: 40px;
+            max-height: 200px;
+            padding: 0.5rem;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-family: inherit;
+            font-size: 0.875rem;
+            line-height: 1.4;
+        }
+
+        .prompt-area textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
+        }
+
+        .prompt-buttons {
+            display: flex;
+            gap: 0.35rem;
+            flex-direction: column;
+        }
+
+        .btn-send {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 0.45rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+
+        .btn-send:hover { background: #5568d0; }
+        .btn-send:disabled { opacity: 0.6; cursor: not-allowed; }
+
+        .btn-cancel {
+            background: #ef5350;
+            color: white;
+            border: none;
+            padding: 0.35rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            display: none;
+        }
+
+        .btn-cancel:hover { background: #d32f2f; }
+
+        .btn-terminate {
+            background: #ff9800;
+            color: white;
+            border: none;
+            padding: 0.35rem 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .btn-terminate:hover { background: #f57c00; }
+
+        /* ---- Session List ---- */
+        .list-controls {
+            padding: 0.75rem;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .list-controls-row {
+            display: flex;
+            gap: 0.5rem;
+            align-items: center;
+        }
+
+        .list-controls label {
+            font-size: 0.8rem;
+            color: #555;
+        }
+
+        .list-controls select {
+            padding: 0.3rem 0.5rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            flex: 1;
+        }
+
+        .session-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .session-item {
+            padding: 0.65rem 0.75rem;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+            background: white;
+            transition: background 0.15s;
+        }
+
+        .session-item:hover {
+            background: #f0f2ff;
+        }
+
+        .session-item.selected {
+            background: #e8edff;
+            border-left: 3px solid #667eea;
+            padding-left: calc(0.75rem - 3px);
+        }
+
+        .session-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.25rem;
+        }
+
+        .session-agent-badge {
+            font-size: 0.75rem;
+            font-weight: 600;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            background: #e3e8ff;
+            color: #667eea;
+        }
+
+        .session-agent-badge.codex {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .session-agent-badge.copilot-cli {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .session-status {
+            font-size: 0.7rem;
+            padding: 0.1rem 0.4rem;
+            border-radius: 8px;
+        }
+
+        .session-status.active {
+            background: #e8f5e9;
+            color: #2e7d32;
+            animation: pulse 1.5s infinite;
+        }
+
+        .session-status.disconnected {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .session-status.terminated {
+            background: #f5f5f5;
+            color: #999;
+        }
+
+        .session-status.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        .session-item-details {
+            font-size: 0.75rem;
+            color: #888;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .session-id-text {
+            font-family: monospace;
+            font-size: 0.7rem;
+            color: #aaa;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 160px;
+        }
+
+        .session-workdir {
+            font-size: 0.7rem;
+            color: #888;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .session-item-actions {
+            display: flex;
+            gap: 0.25rem;
+            margin-top: 0.25rem;
+        }
+
+        .btn-open-folder {
+            font-size: 0.65rem;
+            color: #667eea;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 0;
+            text-decoration: underline;
+        }
+
+        /* Pagination */
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.25rem;
+            padding: 0.75rem;
+            border-top: 1px solid #e0e0e0;
+            background: white;
+            flex-wrap: wrap;
+        }
+
+        .pagination button {
+            padding: 0.3rem 0.55rem;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            transition: all 0.15s;
+        }
+
+        .pagination button:hover:not(:disabled) {
+            background: #f0f2ff;
+            border-color: #667eea;
+        }
+
+        .pagination button.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .pagination button:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        .pagination .pagination-info {
+            font-size: 0.75rem;
+            color: #999;
+            padding: 0 0.25rem;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 2rem 1rem;
+            color: #999;
+            font-size: 0.85rem;
+        }
+
+        .error-toast {
+            position: fixed;
+            bottom: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #c62828;
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: none;
+            font-size: 0.85rem;
+        }
+
+        .error-toast.show {
+            display: block;
+            animation: fadeIn 0.3s;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+            to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
+
+        /* Responsive */
+        @media (max-width: 900px) {
+            .main-container {
+                flex-direction: column-reverse;
+            }
+
+            .list-panel {
+                width: 100%;
+                max-width: none;
+                height: 40%;
+                resize: none;
+            }
+
+            .detail-panel {
+                height: 60%;
+                border-right: none;
+                border-top: 1px solid #e0e0e0;
+            }
+        }
+
+        /* Recent dirs dropdown */
+        .workdir-wrapper {
+            flex: 1;
+            position: relative;
+        }
+
+        .workdir-wrapper input {
+            width: 100%;
+        }
+
+        .workdir-dropdown {
+            display: none;
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: white;
+            border: 1px solid #ccc;
+            border-top: none;
+            border-radius: 0 0 4px 4px;
+            max-height: 200px;
+            overflow-y: auto;
+            z-index: 50;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+
+        .workdir-dropdown.show {
+            display: block;
+        }
+
+        .workdir-option {
+            padding: 0.35rem 0.5rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .workdir-option:hover {
+            background: #f0f2ff;
+        }
+
+        .btn-refresh {
+            background: rgba(255,255,255,0.2);
+            border: none;
+            color: white;
+            padding: 0.3rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.8rem;
+        }
+
+        .btn-refresh:hover {
+            background: rgba(255,255,255,0.3);
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <h1>Code Agent</h1>
+        <div class="navbar-actions">
+            <a href="/">Dashboard</a>
+            <a href="/requests">Request Browser</a>
+            <a href="/chat">Chat</a>
+            <a href="/code-agent-manager">Agent Manager</a>
+        </div>
+    </nav>
+
+    <div class="main-container">
+        <!-- Left panel: create form + conversation + prompt input -->
+        <div class="detail-panel">
+            <div class="create-form">
+                <h3>Create New Session</h3>
+                <div class="form-row">
+                    <label>Agent</label>
+                    <select id="agent-kind">
+                        <option value="claude-code">Claude Code</option>
+                        <option value="codex">Codex</option>
+                        <option value="copilot-cli">Copilot CLI</option>
+                    </select>
+                </div>
+                <div class="form-row">
+                    <label>Work Dir</label>
+                    <div class="workdir-wrapper">
+                        <input type="text" id="working-dir" placeholder="C:\src\myproject" />
+                        <div class="workdir-dropdown" id="workdir-dropdown"></div>
+                    </div>
+                </div>
+                <div class="form-row">
+                    <label></label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="bypass-permissions" checked />
+                        Bypass permissions (auto-approve agent actions)
+                    </label>
+                </div>
+                <div class="form-row">
+                    <label></label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="show-verbose" checked onchange="toggleVerbose()" />
+                        Show verbose info (thoughts, tool details, usage)
+                    </label>
+                </div>
+                <div class="form-row">
+                    <label></label>
+                    <button class="btn-create" id="btn-create" onclick="createSession()">Create Session</button>
+                </div>
+            </div>
+
+            <div class="conversation-area" id="conversation-area">
+                <div class="conversation-placeholder" id="conversation-placeholder">
+                    Select a session or create a new one to start interacting with a code agent.
+                </div>
+            </div>
+
+            <div class="prompt-area" id="prompt-area" style="display:none;">
+                <textarea id="prompt-input" placeholder="Type your prompt..." rows="2"></textarea>
+                <div class="prompt-buttons">
+                    <button class="btn-send" id="btn-send" onclick="sendPrompt()">Send</button>
+                    <button class="btn-cancel" id="btn-cancel" onclick="cancelPrompt()">Cancel</button>
+                    <button class="btn-terminate" id="btn-terminate" onclick="terminateSession()">End</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right panel: session list -->
+        <div class="list-panel">
+            <div class="list-controls">
+                <div class="list-controls-row">
+                    <label>Machine:</label>
+                    <select id="machine-select" onchange="onMachineChange()">
+                        <option value="">Loading...</option>
+                    </select>
+                    <button class="btn-refresh" style="background: #667eea; color: white; font-size: 0.75rem;" onclick="loadSessions()">Refresh</button>
+                </div>
+                <div class="list-controls-row">
+                    <label>Per page:</label>
+                    <select id="per-page" onchange="onPerPageChange()">
+                        <option value="20">20</option>
+                        <option value="50" selected>50</option>
+                        <option value="100">100</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="session-list" id="session-list">
+                <div class="empty-state">Loading sessions...</div>
+            </div>
+
+            <div class="pagination" id="pagination"></div>
+        </div>
+    </div>
+
+    <div class="error-toast" id="error-toast"></div>
+
+    <script>
+        // ---- State ----
+        let currentPage = 1;
+        let perPage = 50;
+        let totalPages = 1;
+        let selectedSessionId = null;
+        let currentMachine = null;
+        let isStreaming = false;
+        let streamingSessionId = null;  // which session is currently streaming
+        let abortController = null;
+        let recentWorkdirs = [];
+
+        // ---- Init ----
+        async function init() {
+            await Promise.all([
+                loadMachines(),
+                loadWorkdirs(),
+            ]);
+            await loadSessions();
+        }
+
+        // ---- Machines ----
+        async function loadMachines() {
+            try {
+                const resp = await fetch('/api/agent/machines');
+                const data = await resp.json();
+                const select = document.getElementById('machine-select');
+                select.innerHTML = '';
+                (data.machines || []).forEach((m, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m + (i === 0 ? ' (current)' : '');
+                    select.appendChild(opt);
+                });
+                currentMachine = select.value || null;
+            } catch (e) {
+                console.error('Failed to load machines:', e);
+            }
+        }
+
+        function onMachineChange() {
+            const select = document.getElementById('machine-select');
+            currentMachine = select.value;
+            currentPage = 1;
+            loadSessions();
+        }
+
+        // ---- Workdirs ----
+        async function loadWorkdirs() {
+            try {
+                const resp = await fetch('/api/agent/workdirs');
+                const data = await resp.json();
+                recentWorkdirs = data.dirs || [];
+                renderWorkdirDropdown();
+            } catch (e) {
+                console.error('Failed to load workdirs:', e);
+            }
+        }
+
+        function renderWorkdirDropdown() {
+            const dropdown = document.getElementById('workdir-dropdown');
+            dropdown.innerHTML = '';
+            recentWorkdirs.forEach(dir => {
+                const div = document.createElement('div');
+                div.className = 'workdir-option';
+                div.textContent = dir;
+                div.onclick = () => {
+                    document.getElementById('working-dir').value = dir;
+                    dropdown.classList.remove('show');
+                };
+                dropdown.appendChild(div);
+            });
+        }
+
+        document.getElementById('working-dir').addEventListener('focus', () => {
+            if (recentWorkdirs.length > 0) {
+                document.getElementById('workdir-dropdown').classList.add('show');
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.workdir-wrapper')) {
+                document.getElementById('workdir-dropdown').classList.remove('show');
+            }
+        });
+
+        // ---- Sessions ----
+        async function loadSessions() {
+            const params = new URLSearchParams({ page: currentPage, per_page: perPage });
+            if (currentMachine) params.set('machine', currentMachine);
+
+            try {
+                const resp = await fetch('/api/agent/sessions?' + params.toString());
+                const data = await resp.json();
+                totalPages = data.total_pages || 1;
+                renderSessionList(data.items || []);
+                renderPagination(data.total || 0);
+            } catch (e) {
+                console.error('Failed to load sessions:', e);
+                document.getElementById('session-list').innerHTML =
+                    '<div class="empty-state">Failed to load sessions.</div>';
+            }
+        }
+
+        function renderSessionList(items) {
+            const list = document.getElementById('session-list');
+
+            if (items.length === 0) {
+                list.innerHTML = '<div class="empty-state">No sessions found.</div>';
+                return;
+            }
+
+            list.innerHTML = '';
+            items.forEach(item => {
+                const el = document.createElement('div');
+                el.className = 'session-item' + (item.session_id === selectedSessionId ? ' selected' : '');
+                el.onclick = () => selectSession(item.session_id);
+
+                const agentClass = item.agent_kind || '';
+                const statusClass = item.status || 'unknown';
+                const timeStr = item.updated_at ? formatTime(item.updated_at) : '';
+                const shortId = (item.session_id || '').substring(0, 16);
+                const workdir = item.working_directory || '';
+                const lastDir = workdir.split(/[/\\]/).filter(Boolean).pop() || workdir;
+
+                el.innerHTML = `
+                    <div class="session-item-header">
+                        <span class="session-agent-badge ${agentClass}">${item.agent_kind || 'unknown'}</span>
+                        <span class="session-status ${statusClass}">${statusClass}</span>
+                    </div>
+                    <div class="session-workdir" title="${escapeHtml(workdir)}">${escapeHtml(lastDir)}</div>
+                    <div class="session-item-details">
+                        <span class="session-id-text" title="${escapeHtml(item.session_id || '')}">${escapeHtml(shortId)}</span>
+                        <span>${timeStr}</span>
+                    </div>
+                `;
+
+                list.appendChild(el);
+            });
+        }
+
+        function renderPagination(total) {
+            const container = document.getElementById('pagination');
+            container.innerHTML = '';
+
+            if (totalPages <= 1) {
+                container.innerHTML = `<span class="pagination-info">${total} session${total !== 1 ? 's' : ''}</span>`;
+                return;
+            }
+
+            // Prev
+            const prevBtn = document.createElement('button');
+            prevBtn.textContent = '<';
+            prevBtn.disabled = currentPage <= 1;
+            prevBtn.onclick = () => { currentPage--; loadSessions(); };
+            container.appendChild(prevBtn);
+
+            // Page numbers (windowed)
+            const maxButtons = 5;
+            let startPage = Math.max(1, currentPage - Math.floor(maxButtons / 2));
+            let endPage = Math.min(totalPages, startPage + maxButtons - 1);
+            if (endPage - startPage < maxButtons - 1) {
+                startPage = Math.max(1, endPage - maxButtons + 1);
+            }
+
+            if (startPage > 1) {
+                container.appendChild(createPageButton(1));
+                if (startPage > 2) {
+                    const dots = document.createElement('span');
+                    dots.className = 'pagination-info';
+                    dots.textContent = '...';
+                    container.appendChild(dots);
+                }
+            }
+
+            for (let p = startPage; p <= endPage; p++) {
+                container.appendChild(createPageButton(p));
+            }
+
+            if (endPage < totalPages) {
+                if (endPage < totalPages - 1) {
+                    const dots = document.createElement('span');
+                    dots.className = 'pagination-info';
+                    dots.textContent = '...';
+                    container.appendChild(dots);
+                }
+                container.appendChild(createPageButton(totalPages));
+            }
+
+            // Next
+            const nextBtn = document.createElement('button');
+            nextBtn.textContent = '>';
+            nextBtn.disabled = currentPage >= totalPages;
+            nextBtn.onclick = () => { currentPage++; loadSessions(); };
+            container.appendChild(nextBtn);
+        }
+
+        function createPageButton(page) {
+            const btn = document.createElement('button');
+            btn.textContent = page;
+            btn.className = page === currentPage ? 'active' : '';
+            btn.onclick = () => { currentPage = page; loadSessions(); };
+            return btn;
+        }
+
+        function onPerPageChange() {
+            perPage = parseInt(document.getElementById('per-page').value);
+            currentPage = 1;
+            loadSessions();
+        }
+
+        // ---- Select Session ----
+        async function selectSession(sessionId) {
+            selectedSessionId = sessionId;
+
+            // Highlight in list
+            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('selected'));
+            const items = document.querySelectorAll('.session-item');
+            items.forEach(el => {
+                const sid = el.querySelector('.session-id-text')?.title;
+                if (sid === sessionId) el.classList.add('selected');
+            });
+
+            // Load full session detail
+            const params = new URLSearchParams();
+            if (currentMachine) params.set('machine', currentMachine);
+
+            try {
+                const resp = await fetch(`/api/agent/sessions/${sessionId}?${params.toString()}`);
+                if (!resp.ok) throw new Error('Session not found');
+                const data = await resp.json();
+                renderConversation(data);
+                showPromptArea(data.status === 'active');
+                // Update prompt UI based on whether THIS session is streaming
+                updatePromptUI();
+            } catch (e) {
+                showError('Failed to load session: ' + e.message);
+            }
+        }
+
+        function renderConversation(session) {
+            const area = document.getElementById('conversation-area');
+            area.innerHTML = '';
+
+            // Session info header
+            const infoDiv = document.createElement('div');
+            infoDiv.style.cssText = 'font-size:0.8rem;color:#888;padding-bottom:0.5rem;border-bottom:1px solid #eee;margin-bottom:0.5rem;';
+            infoDiv.innerHTML = `
+                <strong>${escapeHtml(session.agent_kind)}</strong> session
+                | Dir: <code>${escapeHtml(session.working_directory || '')}</code>
+                | Status: <span class="session-status ${session.status}">${session.status}</span>
+                | Created: ${formatTime(session.created_at)}
+            `;
+            area.appendChild(infoDiv);
+
+            // Messages
+            const messages = session.messages || [];
+            if (messages.length === 0) {
+                const placeholder = document.createElement('div');
+                placeholder.className = 'conversation-placeholder';
+                placeholder.textContent = 'No messages yet. Send a prompt to get started.';
+                area.appendChild(placeholder);
+            } else {
+                messages.forEach(msg => {
+                    if (msg.role === 'user') {
+                        area.appendChild(renderUserMessage(msg));
+                    } else if (msg.role === 'agent') {
+                        area.appendChild(renderAgentMessage(msg));
+                    }
+                });
+            }
+
+            // Auto-scroll
+            area.scrollTop = area.scrollHeight;
+        }
+
+        function renderUserMessage(msg) {
+            const div = document.createElement('div');
+            div.className = 'message-block user';
+            const content = msg.content || [];
+            const text = content.map(c => c.text || '').join('');
+            div.innerHTML = `
+                <div class="message-role">You</div>
+                <div class="message-text">${formatMessageText(text)}</div>
+            `;
+            return div;
+        }
+
+        function renderAgentMessage(msg) {
+            const div = document.createElement('div');
+            div.className = 'message-block agent';
+
+            let html = '<div class="message-role">Agent</div>';
+            const updates = msg.updates || [];
+
+            let textParts = [];
+            let thoughtParts = [];
+            let toolCalls = {};
+            const verbose = document.getElementById('show-verbose')?.checked !== false;
+
+            updates.forEach(update => {
+                const kind = update.kind || update.sessionUpdate || '';
+                if (kind === 'agentMessageChunk' || kind === 'agent_message_chunk') {
+                    const content = update.content || {};
+                    if (content.type === 'text' && content.text) {
+                        textParts.push(content.text);
+                    }
+                } else if (kind === 'agent_thought_chunk' || kind === 'agentThoughtChunk') {
+                    const content = update.content || {};
+                    if (content.type === 'text' && content.text) {
+                        thoughtParts.push(content.text);
+                    }
+                } else if (kind === 'tool_call' || kind === 'toolCallStart' || kind === 'tool_call_start') {
+                    if (textParts.length > 0) {
+                        html += `<div class="message-text">${formatMessageText(textParts.join(''))}</div>`;
+                        textParts = [];
+                    }
+                    if (thoughtParts.length > 0 && verbose) {
+                        html += `<div class="thought-block"><div class="thought-block-header">Thinking</div><div class="thought-text">${escapeHtml(thoughtParts.join(''))}</div></div>`;
+                        thoughtParts = [];
+                    }
+                    const tcId = update.toolCallId || update.tool_call_id;
+                    toolCalls[tcId] = {
+                        name: update._meta?.claudeCode?.toolName || update.toolName || update.tool_name || update.title || 'tool',
+                        kind: update.toolKind || update.tool_kind || '',
+                        content: [],
+                        rawInput: null,
+                        rawOutput: null,
+                        toolResponse: null,
+                    };
+                } else if (kind === 'tool_call_update' || kind === 'toolCallUpdate') {
+                    const tcId = update.toolCallId || update.tool_call_id;
+                    let tc = toolCalls[tcId];
+                    if (!tc) {
+                        tc = { name: update._meta?.claudeCode?.toolName || update.title || 'tool', kind: '', content: [], rawInput: null, rawOutput: null, toolResponse: null };
+                        toolCalls[tcId] = tc;
+                    }
+                    if (update.title) tc.name = update.title;
+                    if (update.rawInput && Object.keys(update.rawInput).length > 0) tc.rawInput = update.rawInput;
+                    if (update.rawOutput) tc.rawOutput = update.rawOutput;
+                    if (update._meta?.claudeCode?.toolResponse) tc.toolResponse = update._meta.claudeCode.toolResponse;
+                    if (update.content && Array.isArray(update.content)) {
+                        update.content.forEach(item => {
+                            const c = item.content || item;
+                            if (c.type === 'text' && c.text) tc.content.push(c.text);
+                        });
+                    }
+                    if (update.status === 'completed') {
+                        html += renderToolCallVerbose(tc, verbose);
+                        delete toolCalls[tcId];
+                    }
+                } else if (kind === 'toolCallEnd' || kind === 'tool_call_end') {
+                    const tcId = update.toolCallId || update.tool_call_id;
+                    const tc = toolCalls[tcId];
+                    if (tc) {
+                        html += renderToolCallVerbose(tc, verbose);
+                        delete toolCalls[tcId];
+                    }
+                } else if (kind === 'usage_update' || kind === 'usageUpdate') {
+                    if (verbose) {
+                        const used = update.used || 0;
+                        const size = update.size || 0;
+                        const cost = update.cost;
+                        let text = `Tokens: ${used.toLocaleString()} / ${size.toLocaleString()}`;
+                        if (cost) text += ` | Cost: $${cost.amount?.toFixed(4) || '?'} ${cost.currency || ''}`;
+                        html += `<div class="usage-block">${escapeHtml(text)}</div>`;
+                    }
+                } else if (kind === 'planUpdate' || kind === 'plan_update') {
+                    if (textParts.length > 0) {
+                        html += `<div class="message-text">${formatMessageText(textParts.join(''))}</div>`;
+                        textParts = [];
+                    }
+                    html += renderPlanUpdate(update);
+                }
+            });
+
+            // Remaining thought
+            if (thoughtParts.length > 0 && verbose) {
+                html += `<div class="thought-block"><div class="thought-block-header">Thinking</div><div class="thought-text">${escapeHtml(thoughtParts.join(''))}</div></div>`;
+            }
+
+            // Remaining text
+            if (textParts.length > 0) {
+                html += `<div class="message-text">${formatMessageText(textParts.join(''))}</div>`;
+            }
+
+            // Any remaining tool calls (not ended)
+            Object.values(toolCalls).forEach(tc => {
+                html += renderToolCall(tc);
+            });
+
+            if (msg.stop_reason && msg.stop_reason !== 'endTurn') {
+                html += `<div style="font-size:0.75rem;color:#999;margin-top:0.35rem;">Stop: ${escapeHtml(msg.stop_reason)}</div>`;
+            }
+
+            div.innerHTML = html;
+            return div;
+        }
+
+        function renderToolCall(tc) {
+            const content = tc.content.join('');
+            return `
+                <div class="tool-call-block">
+                    <div class="tool-call-header">${escapeHtml(tc.name)} ${tc.kind ? '(' + escapeHtml(tc.kind) + ')' : ''}</div>
+                    ${content ? '<div class="tool-call-content">' + escapeHtml(content) + '</div>' : ''}
+                </div>
+            `;
+        }
+
+        function renderToolCallVerbose(tc, verbose) {
+            const content = tc.content.join('');
+            let html = `<div class="tool-detail-block">`;
+            html += `<div class="tool-detail-header">${escapeHtml(tc.name)} ${tc.kind ? '<span style="font-weight:normal;color:#888;">(' + escapeHtml(tc.kind) + ')</span>' : ''} <span class="tool-detail-status completed">completed</span></div>`;
+            html += `<div class="tool-detail-body">`;
+            if (verbose && tc.rawInput && Object.keys(tc.rawInput).length > 0) {
+                html += `<div class="tool-detail-input"><div class="tool-detail-label">Input</div><pre class="tool-detail-pre">${escapeHtml(JSON.stringify(tc.rawInput, null, 2))}</pre></div>`;
+            }
+            if (content) {
+                html += `<div class="tool-content-text message-text" style="margin-top:0.35rem;">${formatMessageText(content)}</div>`;
+            }
+            if (verbose && tc.rawOutput) {
+                html += `<div class="tool-detail-output"><div class="tool-detail-label">Output</div><pre class="tool-detail-pre">${escapeHtml(tc.rawOutput)}</pre></div>`;
+            }
+            if (verbose && tc.toolResponse) {
+                const tr = tc.toolResponse;
+                if (tr.stdout) html += `<div><div class="tool-detail-label">stdout</div><pre class="tool-detail-pre">${escapeHtml(tr.stdout)}</pre></div>`;
+                if (tr.stderr) html += `<div><div class="tool-detail-label">stderr</div><pre class="tool-detail-pre" style="border-left:2px solid #ef5350;">${escapeHtml(tr.stderr)}</pre></div>`;
+            }
+            html += `</div></div>`;
+            return html;
+        }
+
+        function renderPlanUpdate(update) {
+            const items = update.planItems || [];
+            if (items.length === 0) return '';
+            let html = '<div class="plan-block">';
+            items.forEach(item => {
+                const statusClass = 'plan-status-' + (item.status || 'pending');
+                const icon = item.status === 'completed' ? '&#10003;' : item.status === 'inProgress' ? '&#9654;' : '&#9675;';
+                html += `<div class="plan-item"><span class="${statusClass}">${icon}</span> ${escapeHtml(item.title || '')}</div>`;
+            });
+            html += '</div>';
+            return html;
+        }
+
+        // ---- Create Session ----
+        async function createSession() {
+            const btn = document.getElementById('btn-create');
+            const agentKind = document.getElementById('agent-kind').value;
+            const workDir = document.getElementById('working-dir').value.trim();
+            const bypass = document.getElementById('bypass-permissions').checked;
+
+            if (!workDir) {
+                showError('Working directory is required');
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = 'Creating...';
+
+            try {
+                const resp = await fetch('/api/agent/sessions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        agent_kind: agentKind,
+                        working_directory: workDir,
+                        bypass_permissions: bypass,
+                    }),
+                });
+
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.error || 'Failed to create session');
+
+                // Ensure machine dropdown is set to the session's machine (local)
+                const sessionMachine = data.machine;
+                if (sessionMachine) {
+                    const machineSelect = document.getElementById('machine-select');
+                    if (machineSelect.value !== sessionMachine) {
+                        machineSelect.value = sessionMachine;
+                        currentMachine = sessionMachine;
+                    }
+                }
+
+                // Refresh lists and select new session
+                await loadWorkdirs();
+                await loadSessions();
+                selectSession(data.session_id);
+            } catch (e) {
+                showError(e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Create Session';
+            }
+        }
+
+        // ---- Send Prompt ----
+        async function sendPrompt() {
+            const textarea = document.getElementById('prompt-input');
+            const text = textarea.value.trim();
+            if (!text || !selectedSessionId) return;
+            // Don't send if THIS session is already streaming
+            if (isStreaming && streamingSessionId === selectedSessionId) return;
+
+            const promptSessionId = selectedSessionId;
+            textarea.value = '';
+            isStreaming = true;
+            streamingSessionId = promptSessionId;
+            updatePromptUI();
+
+            // Add user message to conversation
+            const area = document.getElementById('conversation-area');
+            // Remove placeholder if present
+            const ph = area.querySelector('.conversation-placeholder');
+            if (ph) ph.remove();
+
+            const userDiv = document.createElement('div');
+            userDiv.className = 'message-block user';
+            userDiv.innerHTML = `
+                <div class="message-role">You</div>
+                <div class="message-text">${formatMessageText(text)}</div>
+            `;
+            area.appendChild(userDiv);
+
+            // Create streaming agent message
+            const streamDivId = 'streaming-agent-' + promptSessionId;
+            const agentDiv = document.createElement('div');
+            agentDiv.className = 'message-block agent';
+            agentDiv.id = streamDivId;
+            agentDiv.innerHTML = '<div class="message-role">Agent <span class="streaming-indicator"></span></div><div class="message-text"></div>';
+            area.appendChild(agentDiv);
+            area.scrollTop = area.scrollHeight;
+
+            try {
+                abortController = new AbortController();
+                const resp = await fetch(`/api/agent/sessions/${promptSessionId}/prompt`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text }),
+                    signal: abortController.signal,
+                });
+
+                if (!resp.ok) {
+                    const errData = await resp.json();
+                    throw new Error(errData.error || 'Prompt failed');
+                }
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('event: ')) {
+                            var eventType = line.substring(7).trim();
+                        } else if (line.startsWith('data: ')) {
+                            const dataStr = line.substring(6);
+                            try {
+                                const data = JSON.parse(dataStr);
+                                // Look up the agent div dynamically — it may have been
+                                // removed if user switched sessions, in which case skip rendering
+                                const liveDiv = document.getElementById(streamDivId);
+                                if (liveDiv) {
+                                    const liveArea = document.getElementById('conversation-area');
+                                    handleStreamEvent(eventType, data, liveDiv, liveArea);
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }
+            } catch (e) {
+                if (e.name !== 'AbortError') {
+                    showError('Stream error: ' + e.message);
+                }
+            } finally {
+                isStreaming = false;
+                streamingSessionId = null;
+                abortController = null;
+                updatePromptUI();
+                // Remove streaming indicators from the agent div if still in DOM
+                const finalDiv = document.getElementById(streamDivId);
+                if (finalDiv) {
+                    finalDiv.querySelectorAll('.streaming-indicator').forEach(el => el.remove());
+                }
+                area.scrollTop = area.scrollHeight;
+            }
+        }
+
+        function handleStreamEvent(eventType, data, agentDiv, area) {
+            const verbose = document.getElementById('show-verbose')?.checked !== false;
+
+            if (eventType === 'update') {
+                const kind = data.kind || data.sessionUpdate || '';
+
+                if (kind === 'agentMessageChunk' || kind === 'agent_message_chunk') {
+                    const content = data.content || {};
+                    if (content.type === 'text' && content.text) {
+                        let textEl = agentDiv.querySelector('.message-text:last-of-type');
+                        if (!textEl || textEl.closest('.tool-call-block') || textEl.closest('.tool-detail-block') || textEl.closest('.thought-block')) {
+                            textEl = document.createElement('div');
+                            textEl.className = 'message-text';
+                            agentDiv.appendChild(textEl);
+                        }
+                        if (!textEl._rawText) textEl._rawText = '';
+                        textEl._rawText += content.text;
+                        textEl.innerHTML = formatMessageText(textEl._rawText);
+                    }
+
+                } else if (kind === 'agent_thought_chunk' || kind === 'agentThoughtChunk') {
+                    // Thinking/reasoning chunks — verbose only
+                    const content = data.content || {};
+                    if (content.type === 'text' && content.text) {
+                        let thoughtEl = agentDiv.querySelector('.thought-block:last-of-type');
+                        if (!thoughtEl || thoughtEl.nextElementSibling) {
+                            thoughtEl = document.createElement('div');
+                            thoughtEl.className = 'thought-block' + (verbose ? '' : ' verbose-hidden');
+                            thoughtEl.innerHTML = '<div class="thought-block-header">Thinking</div><div class="thought-text"></div>';
+                            agentDiv.appendChild(thoughtEl);
+                        }
+                        if (!verbose) thoughtEl.classList.add('verbose-hidden');
+                        const textDiv = thoughtEl.querySelector('.thought-text');
+                        if (!textDiv._rawText) textDiv._rawText = '';
+                        textDiv._rawText += content.text;
+                        textDiv.textContent = textDiv._rawText;
+                    }
+
+                } else if (kind === 'tool_call' || kind === 'toolCallStart' || kind === 'tool_call_start') {
+                    // Tool call start — show title and kind
+                    const tcId = data.toolCallId || data.tool_call_id || 'unknown';
+                    const toolName = data._meta?.claudeCode?.toolName || data.toolName || data.tool_name || data.title || 'tool';
+                    const toolKind = data.kind !== kind ? data.kind : (data.toolKind || data.tool_kind || '');
+                    const toolDiv = document.createElement('div');
+                    toolDiv.className = 'tool-detail-block' + (verbose ? '' : ' tool-call-block');
+                    toolDiv.id = 'tc-' + tcId;
+                    toolDiv.innerHTML = `
+                        <div class="tool-detail-header">
+                            ${escapeHtml(toolName)}
+                            ${toolKind ? '<span style="font-weight:normal;color:#888;">(' + escapeHtml(toolKind) + ')</span>' : ''}
+                            <span class="tool-detail-status">${escapeHtml(data.status || 'running')}</span>
+                            <span class="streaming-indicator"></span>
+                        </div>
+                        <div class="tool-detail-body"></div>
+                    `;
+                    agentDiv.appendChild(toolDiv);
+
+                } else if (kind === 'tool_call_update' || kind === 'toolCallUpdate') {
+                    const tcId = data.toolCallId || data.tool_call_id || 'unknown';
+                    let toolDiv = document.getElementById('tc-' + tcId);
+                    if (!toolDiv) {
+                        // Create if we missed the start event
+                        const toolName = data._meta?.claudeCode?.toolName || data.title || 'tool';
+                        toolDiv = document.createElement('div');
+                        toolDiv.className = 'tool-detail-block';
+                        toolDiv.id = 'tc-' + tcId;
+                        toolDiv.innerHTML = `
+                            <div class="tool-detail-header">${escapeHtml(toolName)} <span class="streaming-indicator"></span></div>
+                            <div class="tool-detail-body"></div>
+                        `;
+                        agentDiv.appendChild(toolDiv);
+                    }
+
+                    const bodyEl = toolDiv.querySelector('.tool-detail-body');
+
+                    // Update status
+                    if (data.status) {
+                        const statusEl = toolDiv.querySelector('.tool-detail-status');
+                        if (statusEl) {
+                            statusEl.textContent = data.status;
+                            if (data.status === 'completed') statusEl.classList.add('completed');
+                        }
+                        if (data.status === 'completed') {
+                            const ind = toolDiv.querySelector('.streaming-indicator');
+                            if (ind) ind.remove();
+                        }
+                    }
+
+                    // Update title
+                    if (data.title) {
+                        const headerEl = toolDiv.querySelector('.tool-detail-header');
+                        if (headerEl) {
+                            const first = headerEl.childNodes[0];
+                            if (first && first.nodeType === 3) first.textContent = data.title + ' ';
+                        }
+                    }
+
+                    // Show rawInput (verbose)
+                    if (verbose && data.rawInput && Object.keys(data.rawInput).length > 0) {
+                        let inputEl = bodyEl.querySelector('.tool-detail-input');
+                        if (!inputEl) {
+                            inputEl = document.createElement('div');
+                            inputEl.className = 'tool-detail-input';
+                            inputEl.innerHTML = '<div class="tool-detail-label">Input</div><pre class="tool-detail-pre"></pre>';
+                            bodyEl.appendChild(inputEl);
+                        }
+                        inputEl.querySelector('pre').textContent = JSON.stringify(data.rawInput, null, 2);
+                    }
+
+                    // Show rawOutput (verbose)
+                    if (verbose && data.rawOutput) {
+                        let outputEl = bodyEl.querySelector('.tool-detail-output');
+                        if (!outputEl) {
+                            outputEl = document.createElement('div');
+                            outputEl.className = 'tool-detail-output';
+                            outputEl.innerHTML = '<div class="tool-detail-label">Output</div><pre class="tool-detail-pre"></pre>';
+                            bodyEl.appendChild(outputEl);
+                        }
+                        outputEl.querySelector('pre').textContent = data.rawOutput;
+                    }
+
+                    // Show content array items
+                    if (data.content && Array.isArray(data.content) && data.content.length > 0) {
+                        data.content.forEach(item => {
+                            const c = item.content || item;
+                            if (c.type === 'text' && c.text) {
+                                let contentTextEl = bodyEl.querySelector('.tool-content-text');
+                                if (!contentTextEl) {
+                                    contentTextEl = document.createElement('div');
+                                    contentTextEl.className = 'tool-content-text message-text';
+                                    contentTextEl.style.cssText = 'margin-top:0.35rem;';
+                                    bodyEl.appendChild(contentTextEl);
+                                }
+                                contentTextEl.innerHTML = formatMessageText(c.text);
+                            }
+                        });
+                    }
+
+                    // Show tool response (verbose) — e.g. stdout/stderr from _meta
+                    if (verbose && data._meta?.claudeCode?.toolResponse) {
+                        const tr = data._meta.claudeCode.toolResponse;
+                        let respEl = bodyEl.querySelector('.tool-detail-response');
+                        if (!respEl) {
+                            respEl = document.createElement('div');
+                            respEl.className = 'tool-detail-response';
+                            bodyEl.appendChild(respEl);
+                        }
+                        let respHtml = '';
+                        if (tr.stdout) respHtml += `<div class="tool-detail-label">stdout</div><pre class="tool-detail-pre">${escapeHtml(tr.stdout)}</pre>`;
+                        if (tr.stderr) respHtml += `<div class="tool-detail-label">stderr</div><pre class="tool-detail-pre" style="border-left:2px solid #ef5350;">${escapeHtml(tr.stderr)}</pre>`;
+                        respEl.innerHTML = respHtml;
+                    }
+
+                } else if (kind === 'toolCallEnd' || kind === 'tool_call_end') {
+                    const tcId = data.toolCallId || data.tool_call_id || 'unknown';
+                    const toolDiv = document.getElementById('tc-' + tcId);
+                    if (toolDiv) {
+                        const indicator = toolDiv.querySelector('.streaming-indicator');
+                        if (indicator) indicator.remove();
+                        const statusEl = toolDiv.querySelector('.tool-detail-status');
+                        if (statusEl) { statusEl.textContent = 'completed'; statusEl.classList.add('completed'); }
+                    }
+
+                } else if (kind === 'usage_update' || kind === 'usageUpdate') {
+                    if (verbose) {
+                        let usageEl = agentDiv.querySelector('.usage-block');
+                        if (!usageEl) {
+                            usageEl = document.createElement('div');
+                            usageEl.className = 'usage-block';
+                            agentDiv.appendChild(usageEl);
+                        }
+                        const used = data.used || 0;
+                        const size = data.size || 0;
+                        const cost = data.cost;
+                        let text = `Tokens: ${used.toLocaleString()} / ${size.toLocaleString()}`;
+                        if (cost) text += ` | Cost: $${cost.amount?.toFixed(4) || '?'} ${cost.currency || ''}`;
+                        usageEl.textContent = text;
+                    }
+
+                } else if (kind === 'planUpdate' || kind === 'plan_update') {
+                    let planDiv = agentDiv.querySelector('.plan-block');
+                    if (!planDiv) {
+                        planDiv = document.createElement('div');
+                        planDiv.className = 'plan-block';
+                        agentDiv.appendChild(planDiv);
+                    }
+                    const items = data.planItems || [];
+                    planDiv.innerHTML = items.map(item => {
+                        const statusClass = 'plan-status-' + (item.status || 'pending');
+                        const icon = item.status === 'completed' ? '&#10003;' : item.status === 'inProgress' ? '&#9654;' : '&#9675;';
+                        return `<div class="plan-item"><span class="${statusClass}">${icon}</span> ${escapeHtml(item.title || '')}</div>`;
+                    }).join('');
+                }
+                area.scrollTop = area.scrollHeight;
+            } else if (eventType === 'done') {
+                if (data.stop_reason && data.stop_reason !== 'endTurn') {
+                    const stopDiv = document.createElement('div');
+                    stopDiv.style.cssText = 'font-size:0.75rem;color:#999;margin-top:0.35rem;';
+                    stopDiv.textContent = 'Stop: ' + data.stop_reason;
+                    agentDiv.appendChild(stopDiv);
+                }
+            } else if (eventType === 'error') {
+                showError(data.message || 'Unknown error from agent');
+            }
+        }
+
+        // ---- Cancel ----
+        async function cancelPrompt() {
+            if (!selectedSessionId) return;
+
+            // Abort the SSE fetch
+            if (abortController) {
+                abortController.abort();
+            }
+
+            try {
+                await fetch(`/api/agent/sessions/${selectedSessionId}/cancel`, {
+                    method: 'POST',
+                });
+            } catch (e) {
+                console.error('Cancel failed:', e);
+            }
+        }
+
+        // ---- Terminate ----
+        async function terminateSession() {
+            if (!selectedSessionId) return;
+            if (!confirm('Terminate this session? The agent process will be killed.')) return;
+
+            try {
+                await fetch(`/api/agent/sessions/${selectedSessionId}`, {
+                    method: 'DELETE',
+                });
+                showPromptArea(false);
+                loadSessions();
+            } catch (e) {
+                showError('Failed to terminate: ' + e.message);
+            }
+        }
+
+        // ---- UI Helpers ----
+        function showPromptArea(active) {
+            const area = document.getElementById('prompt-area');
+            area.style.display = active ? 'flex' : 'none';
+        }
+
+        function toggleVerbose() {
+            const verbose = document.getElementById('show-verbose').checked;
+            document.querySelectorAll('.thought-block').forEach(el => {
+                el.classList.toggle('verbose-hidden', !verbose);
+            });
+            document.querySelectorAll('.usage-block').forEach(el => {
+                el.classList.toggle('verbose-hidden', !verbose);
+            });
+            document.querySelectorAll('.tool-detail-input, .tool-detail-output, .tool-detail-response').forEach(el => {
+                el.classList.toggle('verbose-hidden', !verbose);
+            });
+        }
+
+        function updatePromptUI() {
+            const sendBtn = document.getElementById('btn-send');
+            const cancelBtn = document.getElementById('btn-cancel');
+            const textarea = document.getElementById('prompt-input');
+
+            // Only disable if THIS session is the one currently streaming
+            const thisSessionStreaming = isStreaming && streamingSessionId === selectedSessionId;
+            sendBtn.disabled = thisSessionStreaming;
+            cancelBtn.style.display = thisSessionStreaming ? 'block' : 'none';
+            textarea.disabled = thisSessionStreaming;
+        }
+
+        function showError(msg) {
+            const toast = document.getElementById('error-toast');
+            toast.textContent = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 5000);
+        }
+
+        function formatTime(isoStr) {
+            if (!isoStr) return '';
+            try {
+                const d = new Date(isoStr);
+                const now = new Date();
+                const isToday = d.toDateString() === now.toDateString();
+                if (isToday) {
+                    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                }
+                return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' ' +
+                       d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            } catch {
+                return isoStr;
+            }
+        }
+
+        function formatMessageText(text) {
+            if (!text) return '';
+
+            // Extract fenced code blocks to protect them from normalization
+            const codeBlocks = [];
+            let processed = text.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
+                codeBlocks.push({ lang, code });
+                return '\x00CB' + (codeBlocks.length - 1) + '\x00';
+            });
+
+            // Normalize single newlines to spaces (markdown-style paragraph joining)
+            // This fixes streaming artifacts where each token has a trailing \n.
+            // Preserve: double+ newlines (paragraph breaks),
+            //           newlines before list markers (- * #), blockquotes (>), numbers
+            processed = processed.replace(/\n{2,}/g, '\x00PARA\x00');
+            processed = processed.replace(/\n(?!\s*[-*>#\d|])/g, ' ');
+            processed = processed.replace(/\x00PARA\x00/g, '\n\n');
+
+            // Collapse multiple spaces (cleanup from newline collapsing)
+            processed = processed.replace(/ {2,}/g, ' ');
+
+            let html = escapeHtml(processed);
+
+            // Restore code blocks as <pre><code>
+            html = html.replace(/\x00CB(\d+)\x00/g, (m, i) => {
+                const cb = codeBlocks[parseInt(i)];
+                return '<pre><code>' + escapeHtml(cb.code) + '</code></pre>';
+            });
+
+            // Inline code: `...`
+            html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+            // Bold: **...**
+            html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+            return html;
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                      .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+        }
+
+        // ---- Keyboard shortcuts ----
+        document.getElementById('prompt-input')?.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendPrompt();
+            }
+            if (e.key === 'Escape') {
+                cancelPrompt();
+            }
+        });
+
+        // ---- Start ----
+        init();
+    </script>
+</body>
+</html>
