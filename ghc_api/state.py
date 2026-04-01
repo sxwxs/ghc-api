@@ -46,6 +46,9 @@ class State:
         self.enable_web_search_proxy: bool = False
         self.web_search_proxy_endpoint: str = ""
 
+        # Session persistence settings
+        self.session_flush_interval: int = 5  # seconds between buffered writes
+
         # Background worker guards
         self.token_usage_reporter_started: bool = False
 

@@ -124,6 +124,12 @@ save_request_to_file: false
 # Local fallback files such as ~/.ghc-api/token_usage.jl are still used where supported.
 disable_onedrive_access: true
 
+# Session File Flush Interval
+# ---------------------------
+# How often (in seconds) buffered session updates are flushed to disk.
+# Lower values mean less data loss on crash but more disk I/O.
+session_flush_interval: 5
+
 # Web Search Proxy Settings
 # -------------------------
 # When enabled, if the Copilot backend rejects a request containing the web_search tool

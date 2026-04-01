@@ -17,6 +17,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Optional Request File Logging**: Save completed requests to daily JSON Lines files
 - **Content Filtering**: Remove or add content from system prompts and tool results
 - **Code Agent Manager UI**: Install Codex/Claude/Copilot CLI and manage config sync from dashboard
+- **Code Agent Interaction**: Web UI to create and interact with Claude Code, Codex, and Copilot CLI agents via the Agent Client Protocol (ACP)
 - **Config Sync**: Sync Claude Code, Codex, and ghc-api config files with OneDrive
 - **Safe Backups**: Auto backup overwritten config files as `*.YYYYMMDD_HHMMSS.bak`
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
@@ -169,6 +170,25 @@ When `save_request_to_file: true`, ghc-api appends each completed request to:
 
 The saved `.jl` line format is the same as dashboard export (`/api/requests/export`) and can be imported by dashboard import (`/api/requests/import`).
 
+### Code Agent Interaction
+
+The Code Agent page (`/agent`) provides a web interface for interacting with AI coding agents via the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/). Supported agents:
+
+| Agent | Package | Install |
+|-------|---------|---------|
+| Claude Code | `@agentclientprotocol/claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` |
+| Codex | `codex-acp` | Download from [GitHub releases](https://github.com/zed-industries/codex-acp/releases) |
+| Copilot CLI | `@github/copilot` | `npm install -g @github/copilot` |
+
+Agent binaries are resolved in order: environment variable override (`CLAUDE_ACP_BINARY`, `CODEX_ACP_BINARY`, `COPILOT_CLI_BINARY`), then PATH lookup, then npm global packages.
+
+Session data is stored in:
+
+- OneDrive mode: `.ghc-api/agents/{hostname}_{os}/sessions/`
+- Fallback: `~/.ghc-api/sessions/` (or `%APPDATA%/ghc-api/sessions/` on Windows)
+
+Recent working directories are persisted to `workdirs.json` in the same location. Sessions from other machines are browsable via the machine selector dropdown when OneDrive is enabled.
+
 ## API Endpoints
 
 ### OpenAI Compatible
@@ -202,6 +222,18 @@ The saved `.jl` line format is the same as dashboard export (`/api/requests/expo
 - `POST /api/config-manager/sync-from-onedrive` - Copy OneDrive config to local machine with backups
 - `GET /api/config-manager/token-usage?range=all|day|week|month` - Cross-machine token usage overview
 - `GET /api/config-manager/config-hashes` - Config hash overview for shared OneDrive and each machine (with create time)
+
+### Code Agent (ACP)
+
+- `GET /agent` - Code agent interaction page
+- `POST /api/agent/sessions` - Create a new agent session
+- `GET /api/agent/sessions` - List sessions (paginated, filterable by machine)
+- `GET /api/agent/sessions/<id>` - Get session detail with message history
+- `POST /api/agent/sessions/<id>/prompt` - Send a prompt (returns SSE stream)
+- `POST /api/agent/sessions/<id>/cancel` - Cancel the current prompt
+- `DELETE /api/agent/sessions/<id>` - Terminate a session
+- `GET /api/agent/machines` - List available machine names
+- `GET /api/agent/workdirs` - List recent working directories
 
 ## Example Usage
 
@@ -270,6 +302,12 @@ Access the web dashboard at `http://localhost:8313/` to:
   - See config mismatch alerts
   - View token usage overview by machine/model with time-range and machine filters
   - View config hash overview by machine and shared OneDrive hash with create times
+- Use Code Agent page (`/agent`) to:
+  - Create interactive sessions with Claude Code, Codex, or Copilot CLI
+  - Send prompts and receive real-time streaming responses (text, tool calls, thinking)
+  - Toggle verbose mode for detailed tool inputs/outputs, stdout/stderr, and token usage
+  - Browse sessions across machines via OneDrive
+  - Resume viewing past session history
 
 ## Architecture
 
@@ -281,7 +319,8 @@ Access the web dashboard at `http://localhost:8313/` to:
   - `translator.py` - OpenAI/Anthropic format translation
   - `streaming.py` - Streaming response handling
   - `token_manager.py` - GitHub token management
-  - `routes/` - API endpoint handlers (openai, anthropic, dashboard)
+  - `routes/` - API endpoint handlers (openai, anthropic, dashboard, agent)
+  - `acp/` - Agent Client Protocol implementation (JSON-RPC 2.0 over subprocess stdio)
 - **Thread-Safe Caching**: Uses threading locks for concurrent access
 - **Memory-Based Storage**: No external database dependencies
 - **RESTful API Design**: Follows REST conventions

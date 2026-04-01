@@ -1,9 +1,22 @@
-"""Session management: in-memory active sessions + disk persistence."""
+"""Session management: in-memory active sessions + disk persistence.
 
+Session files use an append-only JSON Lines format (.jl.b64gz):
+  - Line 1: gzip-compressed, base64-encoded JSON metadata (header)
+  - Lines 2+: gzip-compressed, base64-encoded JSON update objects
+
+Updates are buffered in memory and flushed to disk periodically
+(controlled by state.session_flush_interval). Same-type non-message
+updates are merged (only the latest is kept) before flushing.
+"""
+
+import atexit
+import base64
+import gzip
 import json
 import logging
 import os
 import queue
+import signal
 import socket
 import threading
 import time
@@ -16,6 +29,22 @@ from .types import AgentKind, SessionState
 from .connection import AgentConnection, resolve_agent_binary, _SENTINEL
 
 logger = logging.getLogger(__name__)
+
+_SESSION_EXT = ".jl.b64gz"
+
+
+def _encode_update(obj):
+    """Encode a dict as gzip-compressed, base64-encoded JSON string."""
+    raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+    compressed = gzip.compress(raw)
+    return base64.b64encode(compressed).decode("ascii")
+
+
+def _decode_update(line):
+    """Decode a base64+gzip line back to a dict."""
+    compressed = base64.b64decode(line.encode("ascii"))
+    raw = gzip.decompress(compressed)
+    return json.loads(raw)
 
 
 def _local_machine_name() -> str:
@@ -49,6 +78,33 @@ def _get_workdirs_path() -> Path:
     return Path(get_config_dir()) / "workdirs.json"
 
 
+def _merge_updates(updates):
+    """Merge a list of buffered updates: keep all messages in order,
+    keep only the latest of each non-message type."""
+    messages = []
+    latest_by_type = {}  # type -> update
+
+    for u in updates:
+        if u.get("type") == "message":
+            messages.append(u)
+        else:
+            latest_by_type[u.get("type")] = u
+
+    return messages + list(latest_by_type.values())
+
+
+def _apply_updates_to_session(data, updates):
+    """Apply a list of decoded updates to a session metadata dict in place."""
+    for u in updates:
+        utype = u.get("type")
+        if utype == "message":
+            data.setdefault("messages", []).append(u["data"])
+        elif utype == "status":
+            data["status"] = u["status"]
+        if "updated_at" in u:
+            data["updated_at"] = u["updated_at"]
+
+
 class SessionManager:
     """Manages ACP agent sessions (in-memory + persistent)."""
 
@@ -58,6 +114,93 @@ class SessionManager:
         self._lock = threading.Lock()
         self._sessions = {}  # type: Dict[str, AgentConnection]
         self._session_locks = {}  # type: Dict[str, threading.Lock]
+
+        # Buffered writes
+        self._buffers = {}  # type: Dict[str, List[Dict]]
+        self._buffer_lock = threading.Lock()
+        self._flush_thread = None  # type: Optional[threading.Thread]
+        self._stop_event = threading.Event()
+        self._flush_started = False
+
+    # --- Flush loop lifecycle ---
+
+    def _start_flush_loop(self):
+        """Start the periodic flush thread (called lazily on first session create)."""
+        if self._flush_started:
+            return
+        self._flush_started = True
+        self._flush_thread = threading.Thread(
+            target=self._flush_loop, name="session-flush", daemon=True
+        )
+        self._flush_thread.start()
+        atexit.register(self._shutdown_flush)
+        logger.info("Session flush loop started.")
+
+    def _flush_loop(self):
+        from ..state import state
+        interval = state.session_flush_interval
+        while not self._stop_event.wait(interval):
+            try:
+                self._flush_all_buffers()
+            except Exception:
+                logger.warning("Session flush error", exc_info=True)
+
+    def _shutdown_flush(self):
+        """Stop flush thread and do a final flush."""
+        self._stop_event.set()
+        if self._flush_thread and self._flush_thread.is_alive():
+            self._flush_thread.join(timeout=2)
+        try:
+            self._flush_all_buffers()
+        except Exception:
+            logger.warning("Final session flush error", exc_info=True)
+
+    # --- Buffer management ---
+
+    def _buffer_update(self, session_id, update):
+        """Add an update to the in-memory buffer for a session."""
+        with self._buffer_lock:
+            self._buffers.setdefault(session_id, []).append(update)
+
+    def _flush_all_buffers(self):
+        """Snapshot all buffers, then flush each to disk."""
+        with self._buffer_lock:
+            snapshot = dict(self._buffers)
+            self._buffers.clear()
+
+        for session_id, updates in snapshot.items():
+            if updates:
+                self._flush_session(session_id, updates)
+
+    def _flush_session(self, session_id, updates):
+        """Merge and write buffered updates to the session file."""
+        merged = _merge_updates(updates)
+        if not merged:
+            return
+
+        lock = self._get_file_lock(session_id)
+        with lock:
+            root = _get_sessions_root()
+            path = root / f"{session_id}{_SESSION_EXT}"
+            if not path.exists():
+                return
+            try:
+                lines = []
+                for u in merged:
+                    lines.append(_encode_update(u) + "\n")
+                with path.open("a", encoding="utf-8") as f:
+                    f.writelines(lines)
+            except Exception:
+                logger.warning("Failed to flush session %s", session_id, exc_info=True)
+
+    def _flush_session_id(self, session_id):
+        """Flush a single session's buffer immediately."""
+        with self._buffer_lock:
+            updates = self._buffers.pop(session_id, [])
+        if updates:
+            self._flush_session(session_id, updates)
+
+    # --- Public API ---
 
     def create_session(
         self,
@@ -89,7 +232,7 @@ class SessionManager:
             self._sessions[session_id] = conn
             self._session_locks[session_id] = threading.Lock()
 
-        # Persist metadata
+        # Persist metadata header
         metadata = {
             "session_id": session_id,
             "agent_kind": agent_kind_str,
@@ -101,12 +244,15 @@ class SessionManager:
             "agent_info": session_state.agent_info or {},
             "modes": session_state.modes or {},
             "models": session_state.models or {},
-            "messages": [],
         }
-        self._save_session(session_id, metadata)
+        self._write_session_header(session_id, metadata)
         self._add_recent_workdir(working_directory)
+        self._start_flush_loop()
 
-        return metadata
+        # Return with empty messages for API response compatibility
+        result = dict(metadata)
+        result["messages"] = []
+        return result
 
     def list_sessions(
         self,
@@ -119,14 +265,16 @@ class SessionManager:
         items = []
 
         if sessions_root.exists():
-            for f in sorted(sessions_root.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
+            # Collect both old .json and new .jl.b64gz files
+            files = list(sessions_root.glob("*.json")) + list(sessions_root.glob("*" + _SESSION_EXT))
+            for f in sorted(files, key=lambda p: p.stat().st_mtime, reverse=True):
                 try:
-                    data = json.loads(f.read_text(encoding="utf-8"))
-                    # Return summary only (no messages)
-                    summary = {k: v for k, v in data.items() if k != "messages"}
-                    summary["message_count"] = len(data.get("messages", []))
+                    summary, message_count = self._read_session_summary(f)
+                    if summary is None:
+                        continue
+                    summary["message_count"] = message_count
                     # Check if session is alive in memory
-                    sid = data.get("session_id", "")
+                    sid = summary.get("session_id", "")
                     with self._lock:
                         conn = self._sessions.get(sid)
                     if conn and conn.is_alive:
@@ -151,17 +299,11 @@ class SessionManager:
 
     def get_session_detail(self, session_id: str, machine: Optional[str] = None) -> Optional[Dict]:
         """Get full session detail including messages."""
-        # Try the requested machine path first
-        path = _get_sessions_root(machine) / f"{session_id}.json"
-        if not path.exists() and machine:
-            # Fall back to local machine path (session may have been created locally)
-            local_path = _get_sessions_root() / f"{session_id}.json"
-            if local_path.exists():
-                path = local_path
-        if not path.exists():
+        path = self._resolve_session_path(session_id, machine)
+        if not path:
             return None
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = self._read_session_file(path, session_id)
             # Update status if we have a live connection
             with self._lock:
                 conn = self._sessions.get(session_id)
@@ -251,6 +393,7 @@ class SessionManager:
                 logger.warning("Failed to close session %s", session_id, exc_info=True)
 
         self._update_session_status(session_id, "terminated")
+        self._flush_session_id(session_id)
 
     def append_agent_response(self, session_id: str, updates: List[Dict], stop_reason: str):
         """Persist agent response updates to the session file."""
@@ -290,45 +433,140 @@ class SessionManager:
                 self._session_locks[session_id] = threading.Lock()
             return self._session_locks[session_id]
 
-    def _save_session(self, session_id: str, data: Dict):
-        """Write session data directly to disk (caller must hold file lock)."""
+    def _write_session_header(self, session_id: str, metadata: Dict):
+        """Write the session header (line 1) to a new .jl.b64gz file."""
         root = _get_sessions_root()
         root.mkdir(parents=True, exist_ok=True)
-        target = root / f"{session_id}.json"
-        target.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        target = root / f"{session_id}{_SESSION_EXT}"
+        header = {k: v for k, v in metadata.items() if k != "messages"}
+        target.write_text(_encode_update(header) + "\n", encoding="utf-8")
 
     def _append_message(self, session_id: str, message: Dict):
-        """Append a message to the session file."""
-        lock = self._get_file_lock(session_id)
-        with lock:
-            root = _get_sessions_root()
-            path = root / f"{session_id}.json"
-            if not path.exists():
-                return
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                data.setdefault("messages", []).append(message)
-                data["updated_at"] = datetime.now().isoformat()
-                self._save_session(session_id, data)
-            except Exception:
-                logger.warning("Failed to append message to session %s", session_id, exc_info=True)
+        """Buffer a message update for later flush."""
+        update = {
+            "type": "message",
+            "data": message,
+            "updated_at": datetime.now().isoformat(),
+        }
+        self._buffer_update(session_id, update)
 
     def _update_session_status(self, session_id: str, status: str, updated_at: Optional[str] = None):
-        """Update just the status field of a session file."""
-        lock = self._get_file_lock(session_id)
-        with lock:
-            root = _get_sessions_root()
-            path = root / f"{session_id}.json"
-            if not path.exists():
-                return
-            try:
+        """Buffer a status update for later flush."""
+        update = {
+            "type": "status",
+            "status": status,
+            "updated_at": updated_at or datetime.now().isoformat(),
+        }
+        self._buffer_update(session_id, update)
+
+    def _resolve_session_path(self, session_id: str, machine: Optional[str] = None) -> Optional[Path]:
+        """Find the session file path, trying new format first, then old."""
+        root = _get_sessions_root(machine)
+        # Try new format first
+        new_path = root / f"{session_id}{_SESSION_EXT}"
+        if new_path.exists():
+            return new_path
+        # Try old format
+        old_path = root / f"{session_id}.json"
+        if old_path.exists():
+            return old_path
+        # Fall back to local machine path if a remote machine was requested
+        if machine:
+            local_root = _get_sessions_root()
+            for ext in (_SESSION_EXT, ".json"):
+                p = local_root / f"{session_id}{ext}"
+                if p.exists():
+                    return p
+        return None
+
+    def _read_session_file(self, path: Path, session_id: Optional[str] = None) -> Dict:
+        """Read a session file (either .json or .jl.b64gz) and return full session dict."""
+        lock = self._get_file_lock(session_id) if session_id else threading.Lock()
+
+        if str(path).endswith(".json"):
+            with lock:
                 data = json.loads(path.read_text(encoding="utf-8"))
-                data["status"] = status
-                if updated_at:
-                    data["updated_at"] = updated_at
-                self._save_session(session_id, data)
+            return data
+
+        # .jl.b64gz format — all lines are encoded
+        with lock:
+            lines = path.read_text(encoding="utf-8").splitlines()
+
+        if not lines:
+            return {}
+
+        # Line 1: encoded header
+        data = _decode_update(lines[0].strip())
+        data.setdefault("messages", [])
+
+        # Lines 2+: encoded updates
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                update = _decode_update(line)
+                _apply_updates_to_session(data, [update])
             except Exception:
-                logger.warning("Failed to update session status %s", session_id, exc_info=True)
+                logger.debug("Failed to decode session update line", exc_info=True)
+
+        # Merge any unflushed buffered updates
+        if session_id:
+            with self._buffer_lock:
+                pending = list(self._buffers.get(session_id, []))
+            _apply_updates_to_session(data, pending)
+
+        return data
+
+    def _read_session_summary(self, path: Path) -> Tuple[Optional[Dict], int]:
+        """Read session summary for list_sessions. Returns (summary_dict, message_count).
+        For .jl.b64gz, reads only what's needed (header + line count).
+        For .json, reads the full file."""
+        if str(path).endswith(".json"):
+            data = json.loads(path.read_text(encoding="utf-8"))
+            summary = {k: v for k, v in data.items() if k != "messages"}
+            return summary, len(data.get("messages", []))
+
+        # .jl.b64gz: all lines are encoded, header is line 1
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        if not lines:
+            return None, 0
+
+        header = _decode_update(lines[0].strip())
+
+        # Count message-type updates (decode each line to check type)
+        # Also apply status updates to get current status
+        message_count = 0
+        for line in lines[1:]:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                update = _decode_update(line)
+                if update.get("type") == "message":
+                    message_count += 1
+                elif update.get("type") == "status":
+                    header["status"] = update["status"]
+                if "updated_at" in update:
+                    header["updated_at"] = update["updated_at"]
+            except Exception:
+                pass
+
+        # Also count buffered updates
+        sid = header.get("session_id", "")
+        if sid:
+            with self._buffer_lock:
+                pending = list(self._buffers.get(sid, []))
+            for u in pending:
+                if u.get("type") == "message":
+                    message_count += 1
+                elif u.get("type") == "status":
+                    header["status"] = u["status"]
+                if "updated_at" in u:
+                    header["updated_at"] = u["updated_at"]
+
+        return header, message_count
 
     def _add_recent_workdir(self, directory: str):
         """Add a working directory to the recents list."""

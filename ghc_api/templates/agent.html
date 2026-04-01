@@ -837,6 +837,7 @@
         let streamingSessionId = null;  // which session is currently streaming
         let abortController = null;
         let recentWorkdirs = [];
+        let promptCounter = 0;
 
         // ---- Init ----
         async function init() {
@@ -1119,7 +1120,7 @@
             div.className = 'message-block agent';
 
             let html = '<div class="message-role">Agent</div>';
-            const updates = msg.updates || [];
+            const updates = Array.isArray(msg.updates) ? msg.updates : (msg.updates ? [msg.updates] : []);
 
             let textParts = [];
             let thoughtParts = [];
@@ -1130,13 +1131,15 @@
                 const kind = update.kind || update.sessionUpdate || '';
                 if (kind === 'agentMessageChunk' || kind === 'agent_message_chunk') {
                     const content = update.content || {};
-                    if (content.type === 'text' && content.text) {
-                        textParts.push(content.text);
+                    const text = extractTextContent(content);
+                    if (text) {
+                        textParts.push(text);
                     }
                 } else if (kind === 'agent_thought_chunk' || kind === 'agentThoughtChunk') {
                     const content = update.content || {};
-                    if (content.type === 'text' && content.text) {
-                        thoughtParts.push(content.text);
+                    const text = extractTextContent(content);
+                    if (text) {
+                        thoughtParts.push(text);
                     }
                 } else if (kind === 'tool_call' || kind === 'toolCallStart' || kind === 'tool_call_start') {
                     if (textParts.length > 0) {
@@ -1170,7 +1173,8 @@
                     if (update.content && Array.isArray(update.content)) {
                         update.content.forEach(item => {
                             const c = item.content || item;
-                            if (c.type === 'text' && c.text) tc.content.push(c.text);
+                            const text = extractTextContent(c);
+                            if (text) tc.content.push(text);
                         });
                     }
                     if (update.status === 'completed') {
@@ -1271,6 +1275,46 @@
             return html;
         }
 
+        function toDisplayString(value) {
+            if (value === null || value === undefined) return '';
+            if (typeof value === 'string') return value;
+            if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+                return String(value);
+            }
+            if (Array.isArray(value)) {
+                return value.map(toDisplayString).filter(Boolean).join('');
+            }
+            if (typeof value === 'object') {
+                try {
+                    return JSON.stringify(value, null, 2);
+                } catch {
+                    return String(value);
+                }
+            }
+            return String(value);
+        }
+
+        function extractTextContent(content) {
+            if (content === null || content === undefined) return '';
+            if (typeof content === 'string') return content;
+            if (Array.isArray(content)) {
+                return content.map(extractTextContent).filter(Boolean).join('');
+            }
+            if (typeof content !== 'object') {
+                return String(content);
+            }
+            if (content.type === 'text' && content.text !== undefined) {
+                return toDisplayString(content.text);
+            }
+            if (content.text !== undefined) {
+                return toDisplayString(content.text);
+            }
+            if (content.content !== undefined) {
+                return extractTextContent(content.content);
+            }
+            return toDisplayString(content);
+        }
+
         // ---- Create Session ----
         async function createSession() {
             const btn = document.getElementById('btn-create');
@@ -1351,7 +1395,7 @@
             area.appendChild(userDiv);
 
             // Create streaming agent message
-            const streamDivId = 'streaming-agent-' + promptSessionId;
+            const streamDivId = 'streaming-agent-' + promptSessionId + '-' + (++promptCounter);
             const agentDiv = document.createElement('div');
             agentDiv.className = 'message-block agent';
             agentDiv.id = streamDivId;
@@ -1430,8 +1474,15 @@
                 if (kind === 'agentMessageChunk' || kind === 'agent_message_chunk') {
                     const content = data.content || {};
                     if (content.type === 'text' && content.text) {
-                        let textEl = agentDiv.querySelector('.message-text:last-of-type');
-                        if (!textEl || textEl.closest('.tool-call-block') || textEl.closest('.tool-detail-block') || textEl.closest('.thought-block')) {
+                        // Find the last direct-child .message-text, skipping over thought/usage blocks.
+                        // Only create a new text block after tool-call blocks (not after thoughts).
+                        let textEl = null;
+                        for (let i = agentDiv.children.length - 1; i >= 0; i--) {
+                            const child = agentDiv.children[i];
+                            if (child.classList.contains('message-text')) { textEl = child; break; }
+                            if (child.classList.contains('tool-call-block') || child.classList.contains('tool-detail-block')) break;
+                        }
+                        if (!textEl) {
                             textEl = document.createElement('div');
                             textEl.className = 'message-text';
                             agentDiv.appendChild(textEl);
@@ -1717,6 +1768,7 @@
 
         function formatMessageText(text) {
             if (!text) return '';
+            text = toDisplayString(text);
 
             // Extract fenced code blocks to protect them from normalization
             const codeBlocks = [];
@@ -1755,6 +1807,7 @@
 
         function escapeHtml(str) {
             if (!str) return '';
+            str = toDisplayString(str);
             return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                       .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
         }
@@ -1775,3 +1828,4 @@
     </script>
 </body>
 </html>
+
