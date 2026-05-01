@@ -373,9 +373,10 @@ def responses():
             i = 0
             while i < len(tools):
                 # '{"error":{"message":"rejected tool(s): web_search","code":"invalid_request_body"}}\n'
-                if tools[i]['type'] == 'web_search':
+                if tools[i]['type'] in ('web_search', 'image_generation'):
+                    removed_type = tools[i]['type']
                     tools.pop(i)
-                    print(f"Removed unsupported tool 'web_search' from payload for request {request_id}")
+                    print(f"Removed unsupported tool '{removed_type}' from payload for request {request_id}")
                 else:
                     i += 1
 
