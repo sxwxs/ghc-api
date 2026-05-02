@@ -154,6 +154,15 @@ def supports_responses_api(model_id: str) -> bool:
 
     Returns True if the model's supported_endpoints includes "/v1/responses".
     """
+    return _model_supports_endpoint(model_id, {"/responses", "/v1/responses", "responses"})
+
+
+def supports_chat_completions_api(model_id: str) -> bool:
+    """Check if a model supports the OpenAI Chat Completions API."""
+    return _model_supports_endpoint(model_id, {"/chat/completions", "/v1/chat/completions", "chat/completions"})
+
+
+def _model_supports_endpoint(model_id: str, accepted_endpoints: set) -> bool:
     if not state.models or not state.models.get("data"):
         return False
 
@@ -162,4 +171,10 @@ def supports_responses_api(model_id: str) -> bool:
         return False
 
     supported_endpoints = model.get("supported_endpoints", [])
-    return "/responses" in supported_endpoints
+    return any(_normalize_endpoint(endpoint) in accepted_endpoints for endpoint in supported_endpoints)
+
+
+def _normalize_endpoint(endpoint: str) -> str:
+    if not isinstance(endpoint, str):
+        return ""
+    return endpoint.strip().lower()
