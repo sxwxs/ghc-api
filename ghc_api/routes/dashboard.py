@@ -37,6 +37,7 @@ def _runtime_config() -> Dict[str, Any]:
         "system_prompt_add": state.system_prompt_add,
         "max_connection_retries": state.max_connection_retries,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
+        "enable_gpt_chat_completions_responses_compat": state.enable_gpt_chat_completions_responses_compat,
         "save_request_to_file": state.save_request_to_file,
         "disable_onedrive_access": state.disable_onedrive_access,
         "model_mappings": {
@@ -107,6 +108,7 @@ def api_runtime_config_update():
         "system_prompt_add",
         "max_connection_retries",
         "auto_remove_encrypted_content_on_parse_error",
+        "enable_gpt_chat_completions_responses_compat",
         "save_request_to_file",
         "disable_onedrive_access",
         "model_mappings",
@@ -157,6 +159,12 @@ def api_runtime_config_update():
             if not isinstance(flag, bool):
                 raise ValueError("'auto_remove_encrypted_content_on_parse_error' must be a boolean")
             state.auto_remove_encrypted_content_on_parse_error = flag
+
+        if "enable_gpt_chat_completions_responses_compat" in payload:
+            flag = payload["enable_gpt_chat_completions_responses_compat"]
+            if not isinstance(flag, bool):
+                raise ValueError("'enable_gpt_chat_completions_responses_compat' must be a boolean")
+            state.enable_gpt_chat_completions_responses_compat = flag
 
         if "save_request_to_file" in payload:
             save_req = payload["save_request_to_file"]

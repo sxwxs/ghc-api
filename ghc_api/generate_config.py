@@ -117,6 +117,11 @@ max_connection_retries: 3
 # all items containing "encrypted_content" in request.input are removed and retried once.
 auto_remove_encrypted_content_on_parse_error: false
 
+# If true, /v1/chat/completions requests for GPT-series models that only support
+# /v1/responses are translated to the Responses API and translated back to Chat
+# Completions format for legacy agents. Disabled by default.
+enable_gpt_chat_completions_responses_compat: false
+
 # If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
 save_request_to_file: false
 

@@ -83,6 +83,8 @@ def main():
             state.max_connection_retries = config['max_connection_retries']
         if 'auto_remove_encrypted_content_on_parse_error' in config:
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
+        if 'enable_gpt_chat_completions_responses_compat' in config:
+            state.enable_gpt_chat_completions_responses_compat = bool(config['enable_gpt_chat_completions_responses_compat'])
         if 'save_request_to_file' in config:
             state.save_request_to_file = bool(config['save_request_to_file'])
         if 'disable_onedrive_access' in config:
