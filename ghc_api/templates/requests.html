@@ -197,6 +197,105 @@
             margin: 0;
         }
 
+        .json-tree-display {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 0.75rem;
+            border-radius: 8px;
+            overflow: auto;
+            font-family: Consolas, 'Courier New', monospace;
+            font-size: 0.75rem;
+            line-height: 1.5;
+        }
+
+        .json-tree-toolbar {
+            display: flex;
+            gap: 0.5rem;
+            padding-bottom: 0.625rem;
+            margin-bottom: 0.625rem;
+            border-bottom: 1px solid #333;
+        }
+
+        .json-tree-toolbar button {
+            border: 1px solid #4a4a4a;
+            background: #2d2d2d;
+            color: #d4d4d4;
+            border-radius: 4px;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.6875rem;
+            cursor: pointer;
+        }
+
+        .json-tree-toolbar button:hover {
+            background: #3a3a3a;
+        }
+
+        .json-tree {
+            min-width: 0;
+        }
+
+        .json-node {
+            margin: 0;
+        }
+
+        .json-node-summary {
+            display: block;
+            list-style: none;
+            cursor: pointer;
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding-left: calc(var(--json-depth, 0) * 1.25rem);
+        }
+
+        .json-node-summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .json-tree-line,
+        .json-tree-close {
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding-left: calc(var(--json-depth, 0) * 1.25rem);
+        }
+
+        .json-tree-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 0.9rem;
+            margin-right: 0.25rem;
+            color: #858585;
+            transition: transform 0.15s ease;
+            transform: rotate(-90deg);
+        }
+
+        details[open] > .json-node-summary .json-tree-toggle {
+            transform: rotate(0deg);
+        }
+
+        details[open] > .json-node-summary .json-tree-preview,
+        details[open] > .json-node-summary .json-tree-summary-comma {
+            display: none;
+        }
+
+        .json-tree-spacer {
+            display: inline-block;
+            width: 1.15rem;
+        }
+
+        .json-tree-children {
+            margin: 0;
+            padding: 0;
+        }
+
+        .json-punctuation {
+            color: #d4d4d4;
+        }
+
+        .json-tree-preview {
+            color: #858585;
+        }
+
         .json-key { color: #9cdcfe; }
         .json-string { color: #ce9178; }
         .json-number { color: #b5cea8; }
@@ -822,30 +921,30 @@
                 <div class="checkbox-group">
                     <label>
                         <input type="checkbox" id="show-original-request">
-                        Original Request
+                    Original Request
                     </label>
                     <label class="sub-checkbox">
-                        <input type="checkbox" id="parse-original-request" checked>
+                        <input type="checkbox" id="parse-original-request">
                         Parsed
                     </label>
                 </div>
                 <div class="checkbox-group">
                     <label>
                         <input type="checkbox" id="show-request" checked>
-                        Request
+                    Request
                     </label>
                     <label class="sub-checkbox">
-                        <input type="checkbox" id="parse-request" checked>
+                        <input type="checkbox" id="parse-request">
                         Parsed
                     </label>
                 </div>
                 <div class="checkbox-group">
                     <label>
                         <input type="checkbox" id="show-response" checked>
-                        Response
+                    Response
                     </label>
                     <label class="sub-checkbox">
-                        <input type="checkbox" id="parse-response" checked>
+                        <input type="checkbox" id="parse-response">
                         Parsed
                     </label>
                 </div>
@@ -987,6 +1086,90 @@
                 }
                 return '<span class="' + cls + '">' + match + '</span>';
             });
+        }
+
+        function isJsonContainer(value) {
+            return value !== null && typeof value === 'object';
+        }
+
+        function renderJsonDisplay(value) {
+            const parsed = tryParseJsonString(value);
+            if (!isJsonContainer(parsed)) {
+                return `<pre class="json-display">${syntaxHighlight(parsed)}</pre>`;
+            }
+            return `<div class="json-tree-display">
+                <div class="json-tree-toolbar">
+                    <button type="button" onclick="return toggleJsonTree(this, true)">Expand all</button>
+                    <button type="button" onclick="return toggleJsonTree(this, false)">Collapse all</button>
+                </div>
+                <div class="json-tree">${renderJsonNode(parsed)}</div>
+            </div>`;
+        }
+
+        function toggleJsonTree(button, shouldExpand) {
+            const container = button.closest('.json-tree-display');
+            if (!container) {
+                return false;
+            }
+            container.querySelectorAll('details.json-node').forEach((node) => {
+                node.open = shouldExpand;
+            });
+            return false;
+        }
+
+        function renderJsonNode(value, key = null, trailingComma = false, depth = 0) {
+            if (!isJsonContainer(value)) {
+                return renderJsonPrimitiveLine(value, key, trailingComma, depth);
+            }
+
+            const isArray = Array.isArray(value);
+            const entries = isArray ? value.map((item) => [null, item]) : Object.entries(value);
+            const opener = isArray ? '[' : '{';
+            const closer = isArray ? ']' : '}';
+            const keyHtml = renderJsonKeyPrefix(key);
+            const commaHtml = trailingComma ? '<span class="json-punctuation">,</span>' : '';
+
+            if (entries.length === 0) {
+                return `<div class="json-tree-line" style="--json-depth: ${depth}"><span class="json-tree-spacer"></span>${keyHtml}<span class="json-punctuation">${opener}${closer}</span>${commaHtml}</div>`;
+            }
+
+            const itemLabel = isArray
+                ? (entries.length === 1 ? 'item' : 'items')
+                : (entries.length === 1 ? 'key' : 'keys');
+            const childrenHtml = entries
+                .map(([childKey, childValue], index) => renderJsonNode(childValue, childKey, index < entries.length - 1, depth + 1))
+                .join('');
+            const openAttr = depth === 0 ? ' open' : '';
+
+            return `<details class="json-node"${openAttr}><summary class="json-node-summary" style="--json-depth: ${depth}"><span class="json-tree-toggle" aria-hidden="true">▾</span>${keyHtml}<span class="json-punctuation">${opener}</span><span class="json-tree-preview"> ${entries.length} ${itemLabel} ${closer}</span><span class="json-tree-summary-comma">${commaHtml}</span></summary><div class="json-tree-children">${childrenHtml}</div><div class="json-tree-close" style="--json-depth: ${depth}"><span class="json-tree-spacer"></span><span class="json-punctuation">${closer}</span>${commaHtml}</div></details>`;
+        }
+
+        function renderJsonKeyPrefix(key) {
+            if (key === null || key === undefined) {
+                return '';
+            }
+            return `<span class="json-key">${escapeHtml(JSON.stringify(String(key)))}</span><span class="json-punctuation">: </span>`;
+        }
+
+        function renderJsonPrimitiveLine(value, key, trailingComma, depth) {
+            const commaHtml = trailingComma ? '<span class="json-punctuation">,</span>' : '';
+            return `<div class="json-tree-line" style="--json-depth: ${depth}"><span class="json-tree-spacer"></span>${renderJsonKeyPrefix(key)}${renderJsonPrimitive(value)}${commaHtml}</div>`;
+        }
+
+        function renderJsonPrimitive(value) {
+            if (value === null) {
+                return '<span class="json-null">null</span>';
+            }
+            if (typeof value === 'string') {
+                return `<span class="json-string">${escapeHtml(JSON.stringify(value))}</span>`;
+            }
+            if (typeof value === 'number') {
+                return `<span class="json-number">${escapeHtml(String(value))}</span>`;
+            }
+            if (typeof value === 'boolean') {
+                return `<span class="json-boolean">${value}</span>`;
+            }
+            return `<span class="json-null">${escapeHtml(String(value))}</span>`;
         }
 
         function safeStringify(value) {
@@ -1405,7 +1588,7 @@
             // Update request headers content
             const requestHeadersContent = document.getElementById('request-headers-content');
             if (data.request_headers) {
-                requestHeadersContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.request_headers)}</pre>`;
+                requestHeadersContent.innerHTML = renderJsonDisplay(data.request_headers);
             } else {
                 requestHeadersContent.innerHTML = '<div class="message-box">No request headers captured</div>';
             }
@@ -1416,7 +1599,7 @@
                 if (parseOriginalRequest) {
                     originalRequestContent.innerHTML = renderParsedRequest(data.original_request_body);
                 } else {
-                    originalRequestContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.original_request_body)}</pre>`;
+                    originalRequestContent.innerHTML = renderJsonDisplay(data.original_request_body);
                 }
             } else {
                 originalRequestContent.innerHTML = '<div class="message-box">No original request body (same as request)</div>';
@@ -1427,7 +1610,7 @@
             if (parseRequest) {
                 requestContent.innerHTML = renderParsedRequest(data.request_body);
             } else {
-                requestContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.request_body)}</pre>`;
+                requestContent.innerHTML = renderJsonDisplay(data.request_body);
             }
 
             // Update response content
@@ -1435,7 +1618,7 @@
             if (parseResponse) {
                 responseContent.innerHTML = renderParsedResponse(data.response_body);
             } else {
-                responseContent.innerHTML = `<pre class="json-display">${syntaxHighlight(data.response_body)}</pre>`;
+                responseContent.innerHTML = renderJsonDisplay(data.response_body);
             }
         }
 
