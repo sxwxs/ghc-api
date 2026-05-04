@@ -22,6 +22,33 @@ from ..utils import log_error_request, log_connection_retry, is_encrypted_conten
 openai_bp = Blueprint('openai', __name__)
 
 
+def _is_gpt_model(model_id: str) -> bool:
+    return isinstance(model_id, str) and model_id.lower().startswith("gpt-")
+
+
+def _filter_responses_web_search_tools(payload: Dict, model_id: str, request_id: str) -> None:
+    """Remove unsupported Responses tools before forwarding to Copilot."""
+    is_gpt_model = _is_gpt_model(model_id)
+
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return
+
+    filtered_tools = []
+    removed_counts = {}
+    for tool in tools:
+        tool_type = tool.get("type") if isinstance(tool, dict) else None
+        if tool_type == "image_generation" or (tool_type == "web_search" and not is_gpt_model):
+            removed_counts[tool_type] = removed_counts.get(tool_type, 0) + 1
+            continue
+        filtered_tools.append(tool)
+
+    if removed_counts:
+        payload["tools"] = filtered_tools
+        removed_tools = ", ".join(f"{count} '{tool_type}'" for tool_type, count in sorted(removed_counts.items()))
+        print(f"Removed unsupported tool(s) {removed_tools} from payload for request {request_id}")
+
+
 @openai_bp.route("/v1/models", methods=["GET"])
 @openai_bp.route("/models", methods=["GET"])
 def list_models():
@@ -394,17 +421,7 @@ def responses():
 
         headers = get_copilot_headers(enable_vision)
 
-        if 'tools' in payload:
-            tools = payload['tools']
-            i = 0
-            while i < len(tools):
-                # '{"error":{"message":"rejected tool(s): web_search","code":"invalid_request_body"}}\n'
-                if tools[i]['type'] in ('web_search', 'image_generation'):
-                    removed_type = tools[i]['type']
-                    tools.pop(i)
-                    print(f"Removed unsupported tool '{removed_type}' from payload for request {request_id}")
-                else:
-                    i += 1
+        _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
