@@ -294,14 +294,17 @@ def chat_payload_to_responses_payload(payload: Dict) -> Dict:
         "store",
         "stream",
         "temperature",
-        "tool_choice",
-        "tools",
         "top_p",
         "truncation",
     ]
     for field in passthrough_fields:
         if field in payload:
             responses_payload[field] = payload[field]
+
+    if "tools" in payload:
+        responses_payload["tools"] = chat_tools_to_responses_tools(payload.get("tools"))
+    if "tool_choice" in payload:
+        responses_payload["tool_choice"] = chat_tool_choice_to_responses_tool_choice(payload.get("tool_choice"))
 
     if "max_completion_tokens" in payload:
         responses_payload["max_output_tokens"] = payload["max_completion_tokens"]
@@ -312,6 +315,49 @@ def chat_payload_to_responses_payload(payload: Dict) -> Dict:
         responses_payload["stop"] = payload["stop"]
 
     return {key: value for key, value in responses_payload.items() if value is not None}
+
+
+def chat_tools_to_responses_tools(tools):
+    if not isinstance(tools, list):
+        return tools
+
+    converted = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            converted.append(tool)
+            continue
+
+        if tool.get("type") == "function" and isinstance(tool.get("function"), dict):
+            function = tool["function"]
+            converted_tool = {
+                "type": "function",
+                "name": function.get("name"),
+            }
+            if "description" in function:
+                converted_tool["description"] = function["description"]
+            if "parameters" in function:
+                converted_tool["parameters"] = function["parameters"]
+            if "strict" in function:
+                converted_tool["strict"] = function["strict"]
+            converted.append({key: value for key, value in converted_tool.items() if value is not None})
+            continue
+
+        converted.append(tool)
+
+    return converted
+
+
+def chat_tool_choice_to_responses_tool_choice(tool_choice):
+    if not isinstance(tool_choice, dict):
+        return tool_choice
+
+    if tool_choice.get("type") == "function" and isinstance(tool_choice.get("function"), dict):
+        return {
+            "type": "function",
+            "name": tool_choice["function"].get("name"),
+        }
+
+    return tool_choice
 
 
 def chat_messages_to_responses_input(messages: list) -> list:

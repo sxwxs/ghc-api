@@ -19,6 +19,16 @@ class FakeResponse:
         return self._payload
 
 
+class FakeStreamResponse(FakeResponse):
+    def __init__(self, lines, status_code=200):
+        super().__init__(None, status_code)
+        self._lines = lines
+
+    def iter_lines(self):
+        for line in self._lines:
+            yield line
+
+
 class OpenAIChatResponsesCompatTests(unittest.TestCase):
     def setUp(self):
         self.app = Flask(__name__)
@@ -49,6 +59,41 @@ class OpenAIChatResponsesCompatTests(unittest.TestCase):
         self.assertFalse(supports_chat_completions_api("gpt-5.5"))
         self.assertTrue(supports_responses_api("gpt-5.4"))
         self.assertTrue(supports_chat_completions_api("gpt-5.4"))
+
+    def test_chat_tools_are_converted_to_responses_tool_shape(self):
+        payload = openai_routes.chat_payload_to_responses_payload({
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tool_choice": {"type": "function", "function": {"name": "calculator"}},
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "calculator",
+                    "description": "Evaluate arithmetic",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "expression": {"type": "string"},
+                        },
+                        "required": ["expression"],
+                    },
+                },
+            }],
+        })
+
+        self.assertEqual(payload["tools"], [{
+            "type": "function",
+            "name": "calculator",
+            "description": "Evaluate arithmetic",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                },
+                "required": ["expression"],
+            },
+        }])
+        self.assertEqual(payload["tool_choice"], {"type": "function", "name": "calculator"})
 
     @mock.patch.object(openai_routes.requests, "post")
     def test_default_disabled_keeps_chat_completions_upstream(self, post):
@@ -125,6 +170,33 @@ class OpenAIChatResponsesCompatTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(post.call_args.args[0].endswith("/chat/completions"))
+
+    @mock.patch.object(openai_routes.requests, "post")
+    def test_streaming_gpt_responses_only_model_uses_responses_compat(self, post):
+        state.enable_gpt_chat_completions_responses_compat = True
+        post.return_value = FakeStreamResponse([
+            b'event: response.created',
+            b'data: {"type":"response.created","response":{"id":"resp-stream","created_at":1711111111,"model":"gpt-5.5"}}',
+            b'event: response.output_text.delta',
+            b'data: {"type":"response.output_text.delta","delta":"hello"}',
+            b'event: response.completed',
+            b'data: {"type":"response.completed","response":{"id":"resp-stream","created_at":1711111111,"model":"gpt-5.5","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+            b'data: [DONE]',
+        ])
+
+        response = self.client.post("/v1/chat/completions", json={
+            "model": "gpt-5.5",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(post.call_args.args[0].endswith("/v1/responses"))
+        self.assertTrue(post.call_args.kwargs["json"]["stream"])
+        body = response.get_data(as_text=True)
+        self.assertIn('"object": "chat.completion.chunk"', body)
+        self.assertIn('"content": "hello"', body)
+        self.assertIn("data: [DONE]", body)
 
 
 if __name__ == "__main__":
