@@ -41,6 +41,11 @@ COPILOT_SUPPORTED_FIELDS = {
     "tools", "tool_choice", "thinking", "service_tier",
 }
 
+OUTPUT_CONFIG_SUPPORTED_MODELS = {
+    "claude-opus-4.6-1m",
+    "claude-opus-4.7-1m-internal",
+}
+
 
 def _remove_scope_from_ephemeral_cache_control(block: Dict) -> None:
     """Remove 'scope' key from a block's cache_control if type is 'ephemeral'."""
@@ -77,9 +82,10 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     """Filter payload to only include fields supported by Copilot's Anthropic API."""
     filtered = {}
     unsupported_fields = []
+    supports_output_config = payload.get("model") in OUTPUT_CONFIG_SUPPORTED_MODELS
 
     for key, value in payload.items():
-        if key in COPILOT_SUPPORTED_FIELDS:
+        if key in COPILOT_SUPPORTED_FIELDS or (key == "output_config" and supports_output_config):
             filtered[key] = copy.deepcopy(value)
         else:
             unsupported_fields.append(key)
