@@ -39,6 +39,7 @@ class State:
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
         self.auto_remove_encrypted_content_on_parse_error: bool = False
+        self.enable_gpt_chat_completions_responses_compat: bool = False
         self.save_request_to_file: bool = False
         self.disable_onedrive_access: bool = True
 
