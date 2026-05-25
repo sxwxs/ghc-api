@@ -97,6 +97,7 @@ tool_result_suffix_remove: [] # Strings to remove from end of tool results
 
 # Optional request persistence
 save_request_to_file: false # If true, save completed requests to requests/YYYY-MM-DD.jl
+enable_gpt_chat_completions_responses_compat: false # If true, compat shim for legacy chat-completions clients using GPT responses-only models
 
 # Optional OneDrive access gate
 disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared reads
