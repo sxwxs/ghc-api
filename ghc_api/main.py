@@ -90,6 +90,15 @@ def main():
         if 'session_flush_interval' in config:
             state.session_flush_interval = int(config['session_flush_interval'])
 
+        # Load request cache memory limits
+        if 'cache_max_entries' in config:
+            state.cache_max_entries = int(config['cache_max_entries'])
+        if 'cache_max_request_size' in config:
+            state.cache_max_request_size = int(config['cache_max_request_size'])
+        from .cache import cache as _request_cache
+        _request_cache.max_entries = state.cache_max_entries
+        _request_cache.max_request_size = state.cache_max_request_size
+
         # Load web search proxy settings
         if 'enable_web_search_proxy' in config:
             state.enable_web_search_proxy = bool(config['enable_web_search_proxy'])

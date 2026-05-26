@@ -49,6 +49,10 @@ class State:
         # Session persistence settings
         self.session_flush_interval: int = 5  # seconds between buffered writes
 
+        # Request cache memory limits
+        self.cache_max_entries: int = 1000  # Max number of requests kept in memory
+        self.cache_max_request_size: int = 1024 * 1024  # Max bytes per cached entry body (0 disables limit)
+
         # Background worker guards
         self.token_usage_reporter_started: bool = False
 

@@ -130,6 +130,22 @@ disable_onedrive_access: true
 # Lower values mean less data loss on crash but more disk I/O.
 session_flush_interval: 5
 
+# Request Cache Memory Limits
+# ---------------------------
+# Recent requests are kept in memory for the dashboard / inspection UI.
+# These settings cap how much memory that cache may use.
+#
+# cache_max_entries: Maximum number of recent requests to keep in memory.
+#                    Older entries are evicted FIFO once this limit is reached.
+# cache_max_request_size: Maximum size in bytes for a single cached entry's
+#                         request or response body. If a body exceeds this
+#                         limit it is replaced with a small placeholder so the
+#                         metadata is preserved without holding the full
+#                         payload in memory. Set to 0 to disable the per-entry
+#                         size limit.
+cache_max_entries: 1000
+cache_max_request_size: 1048576
+
 # Web Search Proxy Settings
 # -------------------------
 # When enabled, if the Copilot backend rejects a request containing the web_search tool
