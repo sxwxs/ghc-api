@@ -82,10 +82,9 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     """Filter payload to only include fields supported by Copilot's Anthropic API."""
     filtered = {}
     unsupported_fields = []
-    supports_output_config = payload.get("model") in OUTPUT_CONFIG_SUPPORTED_MODELS
 
     for key, value in payload.items():
-        if key in COPILOT_SUPPORTED_FIELDS or (key == "output_config" and supports_output_config):
+        if key in COPILOT_SUPPORTED_FIELDS or (key == "output_config" and _supports_output_config(payload)):
             filtered[key] = copy.deepcopy(value)
         else:
             unsupported_fields.append(key)
@@ -97,6 +96,61 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     _remove_scope_from_cache_control_in_payload(filtered)
 
     return filtered
+
+
+def _anthropic_thinking_model_config(model: str) -> Dict:
+    config = state.anthropic_thinking or {}
+    models = config.get("models", {})
+    if not isinstance(models, dict):
+        return {}
+    model_config = models.get(model, {})
+    return model_config if isinstance(model_config, dict) else {}
+
+
+def _supports_output_config(payload: Dict) -> bool:
+    model = payload.get("model", "")
+    return model in OUTPUT_CONFIG_SUPPORTED_MODELS or bool(_anthropic_thinking_model_config(model))
+
+
+def normalize_thinking_for_copilot(payload: Dict) -> Dict:
+    """Normalize Claude Code thinking payloads using config-driven model rules."""
+    model_config = _anthropic_thinking_model_config(payload.get("model", ""))
+    if not model_config:
+        return payload
+
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict):
+        return payload
+
+    target_thinking_type = model_config.get("type")
+    if not isinstance(target_thinking_type, str):
+        return payload
+
+    normalized = payload
+    if thinking.get("type") == "enabled":
+        print(f"[DirectAnthropic] Normalized thinking.type enabled -> {target_thinking_type} for {payload.get('model')}")
+        normalized = {**normalized, "thinking": {"type": target_thinking_type}}
+
+    output_config = payload.get("output_config")
+    if not isinstance(output_config, dict):
+        output_config = {}
+
+    requested_effort = output_config.get("effort")
+    effort_mappings = model_config.get("effort_mappings", {})
+    if not isinstance(effort_mappings, dict):
+        effort_mappings = {}
+
+    target_effort = requested_effort
+    if isinstance(requested_effort, str) and requested_effort in effort_mappings:
+        target_effort = effort_mappings[requested_effort]
+        print(f"[DirectAnthropic] Mapped {payload.get('model')} effort {requested_effort!r} -> {target_effort!r}")
+    elif not requested_effort:
+        target_effort = model_config.get("default_effort")
+
+    if isinstance(target_effort, str):
+        normalized = {**normalized, "output_config": {**output_config, "effort": target_effort}}
+
+    return normalized
 
 
 def adjust_max_tokens_for_thinking(payload: Dict) -> Dict:
@@ -412,7 +466,8 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
 
     for attempt in range(max_retries + 1):
         # Filter and adjust payload for Copilot
-        filtered_payload = filter_payload_for_copilot(current_payload)
+        normalized_payload = normalize_thinking_for_copilot(current_payload)
+        filtered_payload = filter_payload_for_copilot(normalized_payload)
         filtered_payload = adjust_max_tokens_for_thinking(filtered_payload)
         filtered_request_size = len(json.dumps(filtered_payload))
 

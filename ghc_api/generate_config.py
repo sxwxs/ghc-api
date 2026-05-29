@@ -56,9 +56,11 @@ model_mappings:
   # Exact match mappings (full model name -> target model name)
   exact:
     # Example:
-    opus: claude-opus-4.6
+    opus: claude-opus-4.8
     sonnet: claude-sonnet-4.5
     haiku: claude-haiku-4.5
+    claude-opus-4-8: claude-opus-4.8
+    claude-opus-4-7: claude-opus-4.7
     claude-opus-4-6: claude-opus-4.6
     claude-opus-4-5: claude-opus-4.5
     claude-haiku-4-5: claude-haiku-4.5
@@ -67,13 +69,37 @@ model_mappings:
   # Prefix match mappings (model name prefix -> target model name)
   # If a model name starts with the key, it will be replaced with the value
   prefix:
+    claude-opus-4.8-: claude-opus-4.8
+    claude-opus-4-8-: claude-opus-4.8
+    claude-opus-4.7-: claude-opus-4.7
+    claude-opus-4-7-: claude-opus-4.7
+    claude-opus-4.6-: claude-opus-4.6
+    claude-opus-4-6-: claude-opus-4.6
+    claude-opus-4.5-: claude-opus-4.5
+    claude-opus-4-5-: claude-opus-4.5
     claude-sonnet-4-: claude-sonnet-4
     claude-haiku-4.5-: claude-haiku-4.5
-    claude-opus-4.5-: claude-opus-4.5
     claude-haiku-4-5-: claude-haiku-4.5
-    claude-opus-4-5-: claude-opus-4.5
-    claude-opus-4-6-: claude-opus-4.6
-    claude-opus-4.6-: claude-opus-4.6
+
+
+# Anthropic Thinking Compatibility
+# --------------------------------
+# Some Copilot Anthropic models use model-specific thinking fields.
+# Configure those translations here instead of hard-coding model limits.
+anthropic_thinking:
+  models:
+    claude-opus-4.8:
+      type: adaptive
+      default_effort: medium
+      # Current Copilot model metadata for claude-opus-4.8 advertises only
+      # reasoning_effort: [medium]. Remove or change these mappings when
+      # Copilot enables more effort values for this model.
+      effort_mappings:
+        low: medium
+        high: medium
+        xhigh: medium
+        max: medium
+        ultracode: medium
 
 
 # Content Filtering

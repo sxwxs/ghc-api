@@ -82,13 +82,29 @@ copilot_version: "0.26.7"
 model_mappings:
   # Exact match mappings
   exact:
-    opus: claude-opus-4.5
+    opus: claude-opus-4.8
     sonnet: claude-sonnet-4.5
     haiku: claude-haiku-4.5
+    claude-opus-4-8: claude-opus-4.8
   # Prefix match mappings
   prefix:
+    claude-opus-4.8-: claude-opus-4.8
+    claude-opus-4-8-: claude-opus-4.8
     claude-sonnet-4-: claude-sonnet-4
     claude-opus-4.5-: claude-opus-4.5
+
+# Anthropic Thinking Compatibility
+anthropic_thinking:
+  models:
+    claude-opus-4.8:
+      type: adaptive
+      default_effort: medium
+      effort_mappings:
+        low: medium
+        high: medium
+        xhigh: medium
+        max: medium
+        ultracode: medium
 
 # Content Filtering
 system_prompt_remove: []    # Strings to remove from system prompts

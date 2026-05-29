@@ -12,7 +12,7 @@ import yaml
 
 from . import __version__
 from .app import create_app, initialize_app
-from .config import DEBUG, model_mappings, DEFAULT_MODEL_MAPPINGS
+from .config import DEBUG, model_mappings, DEFAULT_MODEL_MAPPINGS, DEFAULT_ANTHROPIC_THINKING
 from .config_sync import print_sync_diff_status
 from .generate_config import generate_config_file
 from .state import state
@@ -77,6 +77,7 @@ def main():
             state.tool_result_suffix_remove = config['tool_result_suffix_remove'] or []
         if 'system_prompt_add' in config:
             state.system_prompt_add = config['system_prompt_add'] or []
+        state.anthropic_thinking = config.get('anthropic_thinking') or DEFAULT_ANTHROPIC_THINKING
 
         # Load retry settings
         if 'max_connection_retries' in config:
@@ -109,6 +110,7 @@ def main():
         print(f"Error loading config file: {e}")
         # Use default mappings on error
         model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
+        state.anthropic_thinking = DEFAULT_ANTHROPIC_THINKING
 
     # Command line args override config file
     if args.address is not None:

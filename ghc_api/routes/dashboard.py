@@ -39,6 +39,7 @@ def _runtime_config() -> Dict[str, Any]:
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
         "save_request_to_file": state.save_request_to_file,
         "disable_onedrive_access": state.disable_onedrive_access,
+        "anthropic_thinking": state.anthropic_thinking,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
@@ -109,6 +110,7 @@ def api_runtime_config_update():
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
         "disable_onedrive_access",
+        "anthropic_thinking",
         "model_mappings",
     }
     unknown_keys = sorted(set(payload.keys()) - allowed_keys)
@@ -169,6 +171,11 @@ def api_runtime_config_update():
             if not isinstance(disable_onedrive, bool):
                 raise ValueError("'disable_onedrive_access' must be a boolean")
             state.disable_onedrive_access = disable_onedrive
+
+        if "anthropic_thinking" in payload:
+            if not isinstance(payload["anthropic_thinking"], dict):
+                raise ValueError("'anthropic_thinking' must be an object")
+            state.anthropic_thinking = payload["anthropic_thinking"]
 
         if "model_mappings" in payload:
             mappings = payload["model_mappings"]

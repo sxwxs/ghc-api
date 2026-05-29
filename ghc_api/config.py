@@ -24,17 +24,46 @@ DEFAULT_VSCODE_VERSION = "1.93.0"
 DEFAULT_MODEL_MAPPINGS = {
     "exact": {
         # Add exact model name mappings here
-        'opus': 'claude-opus-4.5',
+        'opus': 'claude-opus-4.8',
         'sonnet': 'claude-sonnet-4.5',
-        'haiku': 'claude-haiku-4.5'
+        'haiku': 'claude-haiku-4.5',
+        'claude-opus-4-8': 'claude-opus-4.8',
+        'claude-opus-4-7': 'claude-opus-4.7',
+        'claude-opus-4-6': 'claude-opus-4.6',
+        'claude-opus-4-5': 'claude-opus-4.5',
+        'claude-haiku-4-5': 'claude-haiku-4.5'
     },
     "prefix": {
         # Prefix-based mappings: if model name starts with the key, replace with value
+        "claude-opus-4.8-": "claude-opus-4.8",
+        "claude-opus-4-8-": "claude-opus-4.8",
+        "claude-opus-4.7-": "claude-opus-4.7",
+        "claude-opus-4-7-": "claude-opus-4.7",
+        "claude-opus-4.6-": "claude-opus-4.6",
+        "claude-opus-4-6-": "claude-opus-4.6",
+        "claude-opus-4.5-": "claude-opus-4.5",
+        "claude-opus-4-5-": "claude-opus-4.5",
         "claude-sonnet-4-": "claude-sonnet-4",
         "claude-opus-4-": "claude-opus-4",
-        "claude-opus-4.5-": "claude-opus-4.5",
         "claude-haiku-4.5-": "claude-haiku-4.5",
+        "claude-haiku-4-5-": "claude-haiku-4.5",
     }
+}
+
+DEFAULT_ANTHROPIC_THINKING = {
+    "models": {
+        "claude-opus-4.8": {
+            "type": "adaptive",
+            "default_effort": "medium",
+            "effort_mappings": {
+                "low": "medium",
+                "high": "medium",
+                "xhigh": "medium",
+                "max": "medium",
+                "ultracode": "medium",
+            },
+        },
+    },
 }
 
 # GitHub OAuth App for Device Flow (using GitHub CLI's client ID as it's public)
