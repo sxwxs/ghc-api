@@ -2,6 +2,7 @@
 OpenAI-compatible API routes
 """
 
+import copy
 import json
 import time
 import uuid
@@ -19,6 +20,33 @@ from ..translator import translate_model_name
 from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error
 
 openai_bp = Blueprint('openai', __name__)
+
+
+def _is_gpt_model(model_id: str) -> bool:
+    return isinstance(model_id, str) and model_id.lower().startswith("gpt-")
+
+
+def _filter_responses_web_search_tools(payload: Dict, model_id: str, request_id: str) -> None:
+    """Remove unsupported Responses tools before forwarding to Copilot."""
+    is_gpt_model = _is_gpt_model(model_id)
+
+    tools = payload.get("tools")
+    if not isinstance(tools, list):
+        return
+
+    filtered_tools = []
+    removed_counts = {}
+    for tool in tools:
+        tool_type = tool.get("type") if isinstance(tool, dict) else None
+        if tool_type == "image_generation" or (tool_type == "web_search" and not is_gpt_model):
+            removed_counts[tool_type] = removed_counts.get(tool_type, 0) + 1
+            continue
+        filtered_tools.append(tool)
+
+    if removed_counts:
+        payload["tools"] = filtered_tools
+        removed_tools = ", ".join(f"{count} '{tool_type}'" for tool_type, count in sorted(removed_counts.items()))
+        print(f"Removed unsupported tool(s) {removed_tools} from payload for request {request_id}")
 
 
 @openai_bp.route("/v1/models", methods=["GET"])
@@ -66,6 +94,7 @@ def chat_completions():
         start_time = time.time()
         ensure_copilot_token()
         payload = request.get_json()
+        original_request_body = copy.deepcopy(payload)
         request_id = str(uuid.uuid4())
 
         # Capture incoming request headers
@@ -103,7 +132,7 @@ def chat_completions():
 
         if payload.get("stream"):
             return stream_chat_completions(payload, headers, request_id, request_body, request_size, start_time,
-                                           original_model, translated_model, request_headers)
+                                           original_model, translated_model, original_request_body, request_headers)
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
@@ -153,6 +182,7 @@ def chat_completions():
                         timeout=1200,
                     )
                     payload = retry_payload
+                    request_size = len(json.dumps(payload))
 
         duration = round(time.time() - start_time, 2)
         response_body = response.text
@@ -166,6 +196,7 @@ def chat_completions():
             cached_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
                 "model": original_model,
@@ -183,6 +214,25 @@ def chat_completions():
             return jsonify(result)
         else:
             log_error_request("/v1/chat/completions", payload, response.text, response.status_code)
+            try:
+                result = response.json()
+            except:
+                result = response.text
+            cache.add_request(request_id, {
+                "request_headers": request_headers,
+                "original_request_body": original_request_body,
+                "request_body": payload,
+                "response_body": result,
+                "model": original_model,
+                "translated_model": translated_model if translated_model != original_model else None,
+                "endpoint": "/v1/chat/completions",
+                "status_code": response.status_code,
+                "request_size": request_size,
+                "response_size": response_size,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "duration": duration,
+            })
             return Response(response.text, status=response.status_code, mimetype="application/json")
 
     except Exception as e:
@@ -192,11 +242,13 @@ def chat_completions():
 def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                             request_body: str, request_size: int, start_time: float,
                             original_model: str, translated_model: str,
+                            original_request_body: Dict = None,
                             request_headers: Dict = None) -> Response:
     """Handle streaming chat completions"""
     # Start tracking request immediately
     cache.start_request(request_id, {
         "request_headers": request_headers,
+        "original_request_body": original_request_body,
         "request_body": payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
@@ -328,6 +380,7 @@ def responses():
             raw = raw.replace(b'\r', b'')
             payload = json.loads(raw.decode('utf8'))
             print("after remove \\r \\n the json can be parsed")
+        original_request_body = copy.deepcopy(payload)
         request_id = str(uuid.uuid4())
 
         # Capture incoming request headers
@@ -368,25 +421,14 @@ def responses():
 
         headers = get_copilot_headers(enable_vision)
 
-        if 'tools' in payload:
-            tools = payload['tools']
-            i = 0
-            while i < len(tools):
-                # '{"error":{"message":"rejected tool(s): web_search","code":"invalid_request_body"}}\n'
-                if tools[i]['type'] in ('web_search', 'image_generation'):
-                    removed_type = tools[i]['type']
-                    tools.pop(i)
-                    print(f"Removed unsupported tool '{removed_type}' from payload for request {request_id}")
-                else:
-                    i += 1
-
-        request_size = len(json.dumps(payload))
+        _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
         last_connection_error = None
         use_streaming = payload.get("stream", False)
         for conn_attempt in range(connection_retries + 1):
+            request_size = len(json.dumps(payload))
             try:
                 response = requests.post(
                     f"{get_copilot_base_url()}/v1/responses",
@@ -398,7 +440,7 @@ def responses():
                 if use_streaming:
                     if response.ok:
                         return stream_responses(response, request_id, request_size, start_time,
-                                        original_model, translated_model, payload, request_headers)
+                                        original_model, translated_model, payload, original_request_body, request_headers)
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
                     log_error_request("/v1/responses", payload, response.text, response.status_code)
@@ -443,6 +485,7 @@ def responses():
             usage = result.get("usage", {})
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
                 "model": original_model,
@@ -467,6 +510,7 @@ def responses():
                 result = response.text
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
                 "model": original_model,
@@ -488,10 +532,12 @@ def responses():
 def stream_responses(response: requests.Response, request_id: str,
                      request_size: int, start_time: float,
                      original_model: str, translated_model: str, payload: dict,
+                     original_request_body: Dict = None,
                      request_headers: Dict = None) -> Response:
     """Handle streaming Responses API (passthrough SSE events)"""
     cache.start_request(request_id, {
         "request_headers": request_headers,
+        "original_request_body": original_request_body,
         "request_body": payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,

@@ -2,6 +2,7 @@
 Anthropic-compatible API routes
 """
 
+import copy
 import json
 import time
 import uuid
@@ -40,6 +41,11 @@ COPILOT_SUPPORTED_FIELDS = {
     "tools", "tool_choice", "thinking", "service_tier",
 }
 
+OUTPUT_CONFIG_SUPPORTED_MODELS = {
+    "claude-opus-4.6-1m",
+    "claude-opus-4.7-1m-internal",
+}
+
 
 def _remove_scope_from_ephemeral_cache_control(block: Dict) -> None:
     """Remove 'scope' key from a block's cache_control if type is 'ephemeral'."""
@@ -76,10 +82,11 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     """Filter payload to only include fields supported by Copilot's Anthropic API."""
     filtered = {}
     unsupported_fields = []
+    supports_output_config = payload.get("model") in OUTPUT_CONFIG_SUPPORTED_MODELS
 
     for key, value in payload.items():
-        if key in COPILOT_SUPPORTED_FIELDS:
-            filtered[key] = value
+        if key in COPILOT_SUPPORTED_FIELDS or (key == "output_config" and supports_output_config):
+            filtered[key] = copy.deepcopy(value)
         else:
             unsupported_fields.append(key)
 
@@ -351,7 +358,7 @@ def anthropic_messages():
     request_headers = dict(request.headers)
 
     # Store original request before any modifications
-    original_request_body = anthropic_payload
+    original_request_body = copy.deepcopy(anthropic_payload)
 
     original_model = anthropic_payload.get("model", "unknown")
 
@@ -382,7 +389,6 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                                      original_model: str, translated_model: str, original_request_body: Dict = None,
                                      request_headers: Dict = None) -> Response:
     """Handle request using direct Anthropic API (no translation needed)."""
-    request_size = len(json.dumps(anthropic_payload))
 
     # Check for vision content
     enable_vision = any(
@@ -408,6 +414,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
         # Filter and adjust payload for Copilot
         filtered_payload = filter_payload_for_copilot(current_payload)
         filtered_payload = adjust_max_tokens_for_thinking(filtered_payload)
+        filtered_request_size = len(json.dumps(filtered_payload))
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
@@ -424,7 +431,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 )
                 if use_streaming and response.ok:
                     return stream_direct_anthropic(response, filtered_payload, headers, request_id,
-                            current_payload, request_size, start_time,
+                            filtered_request_size, start_time,
                             original_model, translated_model, original_request_body, request_headers)
                 last_connection_error = None
                 break
@@ -453,13 +460,13 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "original_request_body": original_request_body,
-                "request_body": current_payload,
+                "request_body": filtered_payload,
                 "response_body": anthropic_response,
                 "model": original_model,
                 "translated_model": translated_model if translated_model != original_model else None,
                 "endpoint": "/v1/messages",
                 "status_code": response.status_code,
-                "request_size": request_size,
+                "request_size": filtered_request_size,
                 "response_size": len(json.dumps(anthropic_response)),
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
@@ -485,13 +492,13 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "original_request_body": original_request_body,
-                "request_body": current_payload,
+                "request_body": filtered_payload,
                 "response_body": anthropic_response,
                 "model": original_model,
                 "translated_model": translated_model if translated_model != original_model else None,
                 "endpoint": "/v1/messages",
                 "status_code": response.status_code,
-                "request_size": request_size,
+                "request_size": filtered_request_size,
                 "response_size": len(json.dumps(anthropic_response)),
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
@@ -542,7 +549,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
 
 
 def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict, headers: Dict, request_id: str,
-                            anthropic_payload: Dict, request_size: int, start_time: float,
+                            request_size: int, start_time: float,
                             original_model: str, translated_model: str, original_request_body: Dict = None,
                             request_headers: Dict = None) -> Response:
     """Handle streaming direct Anthropic response (passthrough SSE events)."""
@@ -550,7 +557,7 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
     cache.start_request(request_id, {
         "request_headers": request_headers,
         "original_request_body": original_request_body,
-        "request_body": anthropic_payload,
+        "request_body": filtered_payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
@@ -667,7 +674,7 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
             anthropic_response = {"error": {"type": "api_error", "message": "Stream interrupted"}}
 
         cache.complete_request(request_id, {
-            "request_body": anthropic_payload,
+            "request_body": filtered_payload,
             "response_body": anthropic_response,
             "model": original_model,
             "translated_model": translated_model if translated_model != original_model else None,
@@ -704,8 +711,6 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
         for msg in anthropic_payload.get("messages", [])
     )
 
-    request_size = len(json.dumps(anthropic_payload))
-
     max_retries = 3
     current_payload = anthropic_payload
     cleanup_log_entry = None
@@ -713,6 +718,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
     for attempt in range(max_retries + 1):
         # Translate to OpenAI format
         openai_payload = translate_anthropic_to_openai(current_payload)
+        openai_request_size = len(json.dumps(openai_payload))
         is_agent_call = any(
             msg.get("role") in ("assistant", "tool")
             for msg in openai_payload.get("messages", [])
@@ -723,7 +729,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
 
         if anthropic_payload.get("stream"):
             return stream_anthropic_messages(openai_payload, headers, request_id,
-                                            anthropic_payload, request_size, start_time,
+                                            current_payload, openai_request_size, start_time,
                                             original_model, translated_model, original_request_body, request_headers)
 
         # Non-streaming request
@@ -766,13 +772,13 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "original_request_body": original_request_body,
-                "request_body": current_payload,
+                "request_body": openai_payload,
                 "response_body": anthropic_response,
                 "model": original_model,
                 "translated_model": translated_model if translated_model != original_model else None,
                 "endpoint": "/v1/messages",
                 "status_code": response.status_code,
-                "request_size": request_size,
+                "request_size": openai_request_size,
                 "response_size": len(json.dumps(anthropic_response)),
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
@@ -834,7 +840,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
     cache.start_request(request_id, {
         "request_headers": request_headers,
         "original_request_body": original_request_body,
-        "request_body": anthropic_payload,
+        "request_body": openai_payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
@@ -850,6 +856,8 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         error_occurred = False
         status_code = 200
         first_chunk_received = False
+        final_openai_payload = openai_payload
+        final_request_size = request_size
 
         try:
             # Update state to sending
@@ -872,6 +880,14 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                 print(f"[Stream Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
                 modified_payload = apply_web_search_fallback(anthropic_payload, state.web_search_proxy_endpoint)
                 new_openai_payload = translate_anthropic_to_openai(modified_payload)
+                final_openai_payload = new_openai_payload
+                final_request_size = len(json.dumps(new_openai_payload))
+                cache.update_request_state(
+                    request_id,
+                    cache.STATE_SENDING,
+                    request_body=new_openai_payload,
+                    request_size=final_request_size,
+                )
                 response = requests.post(
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
@@ -948,13 +964,13 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
 
         # Complete the request in cache
         cache.complete_request(request_id, {
-            "request_body": anthropic_payload,
+            "request_body": final_openai_payload,
             "response_body": anthropic_response,
             "model": original_model,
             "translated_model": translated_model if translated_model != original_model else None,
             "endpoint": "/v1/messages",
             "status_code": status_code,
-            "request_size": request_size,
+            "request_size": final_request_size,
             "response_size": sum(len(json.dumps(c)) for c in response_chunks),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,

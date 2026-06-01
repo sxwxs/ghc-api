@@ -151,8 +151,15 @@ class RequestCache:
             if request_id in self.cache:
                 # Update existing entry
                 entry = self.cache[request_id]
+                if "request_headers" in data:
+                    entry["request_headers"] = data.get("request_headers")
+                if "original_request_body" in data:
+                    entry["original_request_body"] = data.get("original_request_body")
+                if "request_body" in data:
+                    entry["request_body"] = data.get("request_body")
                 entry["response_body"] = data.get("response_body")
                 entry["status_code"] = data.get("status_code", 200)
+                entry["request_size"] = data.get("request_size", entry.get("request_size", 0))
                 entry["response_size"] = data.get("response_size", 0)
                 entry["input_tokens"] = data.get("input_tokens", 0)
                 entry["output_tokens"] = data.get("output_tokens", 0)
