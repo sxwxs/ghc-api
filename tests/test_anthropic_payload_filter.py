@@ -34,6 +34,8 @@ class AnthropicPayloadFilterTest(unittest.TestCase):
         self.assertEqual(filtered["output_config"], {"effort": "xhigh"})
 
     def test_filters_output_config_for_other_models(self):
+        # Gating now lives in apply_effort_policy; the field-level filter forwards
+        # output_config whenever it is still present in the payload.
         payload = {
             "model": "claude-opus-4.7",
             "messages": [{"role": "user", "content": "hello"}],
@@ -44,7 +46,7 @@ class AnthropicPayloadFilterTest(unittest.TestCase):
 
         filtered = filter_payload_for_copilot(payload)
 
-        self.assertNotIn("output_config", filtered)
+        self.assertEqual(filtered["output_config"], {"effort": "medium"})
 
 
 if __name__ == "__main__":

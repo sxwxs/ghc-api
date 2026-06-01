@@ -34,17 +34,56 @@ from ..web_search import has_web_search_tool, is_web_search_unsupported_error, a
 anthropic_bp = Blueprint('anthropic', __name__)
 
 
-# Fields supported by Copilot's Anthropic API endpoint
+# Fields supported by Copilot's Anthropic API endpoint.
+# output_config is gated upstream by apply_effort_policy, so it only reaches the
+# filter when the target model supports the requested effort value.
 COPILOT_SUPPORTED_FIELDS = {
     "model", "messages", "max_tokens", "system", "metadata",
     "stop_sequences", "stream", "temperature", "top_p", "top_k",
-    "tools", "tool_choice", "thinking", "service_tier",
+    "tools", "tool_choice", "thinking", "service_tier", "output_config",
 }
 
-OUTPUT_CONFIG_SUPPORTED_MODELS = {
-    "claude-opus-4.6-1m",
-    "claude-opus-4.7-1m-internal",
+# Per-model supported reasoning effort values, keyed by translated model name.
+# Passing an unsupported value makes Copilot reject the whole request (400
+# invalid_reasoning_effort), so unsupported values must be dropped, not forwarded.
+MODEL_EFFORT_SUPPORT = {
+    "claude-opus-4.7-1m-internal": {"low", "medium", "high", "xhigh"},
+    "claude-opus-4.7-high": {"high"},
+    "claude-opus-4.7-xhigh": {"xhigh"},
+    "claude-opus-4.7": {"medium"},
+    "claude-opus-4.8": {"medium"},
+    "claude-opus-4.6-1m": {"low", "medium", "high"},
+    "claude-opus-4.5": set(),
 }
+
+# Normalize Claude Code effort values to Copilot's vocabulary.
+EFFORT_VALUE_ALIASES = {
+    "max": "xhigh",
+}
+
+
+def apply_effort_policy(payload: Dict, translated_model: str) -> Dict:
+    """Keep output_config only when the target model supports the (normalized) effort value."""
+    output_config = payload.get("output_config")
+    if not isinstance(output_config, dict):
+        return payload
+
+    eff = output_config.get("effort")
+    if eff is None:
+        return payload
+
+    normalized = EFFORT_VALUE_ALIASES.get(eff, eff)
+    supported = MODEL_EFFORT_SUPPORT.get(translated_model)
+
+    if supported is None:
+        print(f"[Effort] Model {translated_model} not in effort table; dropping output_config (effort={eff})")
+        return {k: v for k, v in payload.items() if k != "output_config"}
+
+    if normalized in supported:
+        return {**payload, "output_config": {**output_config, "effort": normalized}}
+
+    print(f"[Effort] Model {translated_model} does not support effort={eff} (normalized={normalized}); dropping output_config")
+    return {k: v for k, v in payload.items() if k != "output_config"}
 
 
 def _remove_scope_from_ephemeral_cache_control(block: Dict) -> None:
@@ -82,10 +121,9 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
     """Filter payload to only include fields supported by Copilot's Anthropic API."""
     filtered = {}
     unsupported_fields = []
-    supports_output_config = payload.get("model") in OUTPUT_CONFIG_SUPPORTED_MODELS
 
     for key, value in payload.items():
-        if key in COPILOT_SUPPORTED_FIELDS or (key == "output_config" and supports_output_config):
+        if key in COPILOT_SUPPORTED_FIELDS:
             filtered[key] = copy.deepcopy(value)
         else:
             unsupported_fields.append(key)
@@ -373,6 +411,9 @@ def anthropic_messages():
 
     # Apply tool result suffix filters (applies to both paths)
     anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
+
+    # Decide reasoning effort support per model (applies to both paths)
+    anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
 
     # Check if this model supports direct Anthropic API
     use_direct_api = supports_direct_anthropic_api(translated_model)
@@ -716,7 +757,8 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
     cleanup_log_entry = None
 
     for attempt in range(max_retries + 1):
-        # Translate to OpenAI format
+        # Translate to OpenAI format; output_config is intentionally dropped here
+        # since Copilot's /chat/completions effort support is unverified.
         openai_payload = translate_anthropic_to_openai(current_payload)
         openai_request_size = len(json.dumps(openai_payload))
         is_agent_call = any(
