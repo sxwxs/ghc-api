@@ -35,6 +35,7 @@ class State:
 
         # Direct Anthropic API settings
         self.redirect_anthropic: bool = False  # Force Anthropic through OpenAI translation
+        self.anthropic_thinking: Dict = {}
 
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
