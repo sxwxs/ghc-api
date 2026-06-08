@@ -163,3 +163,18 @@ def supports_responses_api(model_id: str) -> bool:
 
     supported_endpoints = model.get("supported_endpoints", [])
     return "/responses" in supported_endpoints
+
+
+def supported_reasoning_efforts(model_id: str) -> set:
+    """Reasoning-effort values Copilot reports for a model.
+
+    Empty set if the model has no reasoning_effort capability, is unknown,
+    or models are not loaded yet (callers should then drop output_config).
+    """
+    if not state.models or not state.models.get("data"):
+        return set()
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if model is None:
+        return set()
+    efforts = model.get("capabilities", {}).get("supports", {}).get("reasoning_effort")
+    return set(efforts) if efforts else set()
