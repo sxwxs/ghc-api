@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 import os
 import platform
+import time
 from typing import Dict, List
 
 
@@ -9,15 +10,27 @@ from .config import model_mappings
 from .state import state
 
 
-def log_error_request(endpoint: str, request_body: dict, response_body: str, status_code: int):
+def get_client_ip(request) -> str:
+    """Extract the client IP from a Flask request, honoring common proxy headers."""
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        # X-Forwarded-For may contain a comma-separated list; the first entry is the client.
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    return request.remote_addr or "unknown"
+
+
+def log_error_request(endpoint: str, request_body: dict, response_body: str, status_code: int, client_ip: str = None):
     """Log failed requests to error log file"""
     log_dir = get_config_dir()
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "error.log")
 
-    timestamp = datetime.now().isoformat()
     log_entry = {
-        "timestamp": timestamp,
+        "timestamp": int(time.time()),
+        "client_ip": client_ip,
         "endpoint": endpoint,
         "status_code": status_code,
         "request": request_body,

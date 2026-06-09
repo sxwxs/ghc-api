@@ -18,7 +18,7 @@ from ..cache import cache
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
-from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error
+from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error, get_client_ip
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -106,6 +106,7 @@ def chat_completions():
 
         # Capture incoming request headers (auth values redacted before caching).
         request_headers = redact_auth_headers(dict(request.headers))
+        client_ip = get_client_ip(request)
         user_id = _current_user_id()
 
         # Get the original and translated model names
@@ -141,7 +142,7 @@ def chat_completions():
         if payload.get("stream"):
             return stream_chat_completions(payload, headers, request_id, request_body, request_size, start_time,
                                            original_model, translated_model, original_request_body, request_headers,
-                                           user_id=user_id)
+                                           client_ip=client_ip, user_id=user_id)
 
         # Non-streaming request
         connection_retries = state.max_connection_retries
@@ -205,6 +206,7 @@ def chat_completions():
             cached_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "client_ip": client_ip,
                 "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
@@ -223,13 +225,14 @@ def chat_completions():
 
             return jsonify(result)
         else:
-            log_error_request("/v1/chat/completions", payload, response.text, response.status_code)
+            log_error_request("/v1/chat/completions", payload, response.text, response.status_code, client_ip)
             try:
                 result = response.json()
             except:
                 result = response.text
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "client_ip": client_ip,
                 "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
@@ -255,11 +258,13 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                             original_model: str, translated_model: str,
                             original_request_body: Dict = None,
                             request_headers: Dict = None,
+                            client_ip: str = None,
                             user_id: str = "anonymous") -> Response:
     """Handle streaming chat completions"""
     # Start tracking request immediately
     cache.start_request(request_id, {
         "request_headers": request_headers,
+        "client_ip": client_ip,
         "original_request_body": original_request_body,
         "request_body": payload,
         "model": original_model,
@@ -399,6 +404,7 @@ def responses():
 
         # Capture incoming request headers (auth values redacted before caching).
         request_headers = redact_auth_headers(dict(request.headers))
+        client_ip = get_client_ip(request)
         user_id = _current_user_id()
 
         original_model = payload.get("model", "unknown")
@@ -456,10 +462,10 @@ def responses():
                     if response.ok:
                         return stream_responses(response, request_id, request_size, start_time,
                                         original_model, translated_model, payload, original_request_body, request_headers,
-                                        user_id=user_id)
+                                        client_ip=client_ip, user_id=user_id)
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
-                    log_error_request("/v1/responses", payload, response.text, response.status_code)
+                    log_error_request("/v1/responses", payload, response.text, response.status_code, client_ip)
                     if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
                         request_input = payload.get("input")
                         if isinstance(request_input, list):
@@ -501,6 +507,7 @@ def responses():
             usage = result.get("usage", {})
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "client_ip": client_ip,
                 "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
@@ -519,7 +526,7 @@ def responses():
 
             return jsonify(result)
         else:
-            log_error_request("/v1/responses", payload, response.text, response.status_code)
+            log_error_request("/v1/responses", payload, response.text, response.status_code, client_ip)
             usage = {}
             try:
                 result = response.json()
@@ -527,6 +534,7 @@ def responses():
                 result = response.text
             cache.add_request(request_id, {
                 "request_headers": request_headers,
+                "client_ip": client_ip,
                 "original_request_body": original_request_body,
                 "request_body": payload,
                 "response_body": result,
@@ -552,10 +560,12 @@ def stream_responses(response: requests.Response, request_id: str,
                      original_model: str, translated_model: str, payload: dict,
                      original_request_body: Dict = None,
                      request_headers: Dict = None,
+                     client_ip: str = None,
                      user_id: str = "anonymous") -> Response:
     """Handle streaming Responses API (passthrough SSE events)"""
     cache.start_request(request_id, {
         "request_headers": request_headers,
+        "client_ip": client_ip,
         "original_request_body": original_request_body,
         "request_body": payload,
         "model": original_model,
