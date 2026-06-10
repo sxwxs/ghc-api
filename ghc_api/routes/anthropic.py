@@ -22,6 +22,7 @@ from ..api_helpers import (
 from ..cache import cache
 from ..auth import redact_auth_headers
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
+from ..tool_call_recovery import LeakedToolCallTransformer
 from ..translator import (
     translate_anthropic_to_openai,
     translate_model_name,
@@ -609,8 +610,10 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
         error_occurred = False
         status_code = response.status_code
         first_chunk_received = False
-        accumulated_content = []
         accumulated_model = original_model
+        # Recovers tool calls that Copilot intermittently leaks as plain text instead
+        # of structured tool_use blocks (see ghc_api/tool_call_recovery.py).
+        tool_call_recovery = LeakedToolCallTransformer()
 
         try:
             cache.update_request_state(request_id, cache.STATE_SENDING)
@@ -655,13 +658,13 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
                         elif event_type == "message_delta":
                             usage = event.get("usage", {})
                             total_output_tokens = usage.get("output_tokens", 0)
-                        elif event_type == "content_block_delta":
-                            delta = event.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                accumulated_content.append(delta.get("text", ""))
 
-                        # Forward event directly to client
-                        yield f"event: {event_type}\ndata: {data}\n\n"
+                        # Forward events through the leaked-tool-call recovery transformer.
+                        # For normal streams this is a passthrough (only text_delta chunk
+                        # boundaries may shift); when Copilot leaks a tool call as text it
+                        # re-emits structured tool_use events plus a stop_reason rewrite.
+                        for out_type, out_data in tool_call_recovery.process(event_type, event, data):
+                            yield f"event: {out_type}\ndata: {out_data}\n\n"
 
                     except json.JSONDecodeError:
                         continue
@@ -669,6 +672,10 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
                 elif status_code > 399:
                     # Non-JSON error response - yield as is
                     yield f"{line}\n\n"
+
+            # Flush any text/tool-call state left pending at end of stream.
+            for out_type, out_data in tool_call_recovery.finalize():
+                yield f"event: {out_type}\ndata: {out_data}\n\n"
 
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             error_occurred = True
@@ -692,12 +699,14 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
 
         duration = round(time.time() - start_time, 2)
 
-        # Build response for cache
+        # Build response for cache. Reflect any recovered tool calls so the cached
+        # response matches what the client actually received.
+        recovered_content = tool_call_recovery.build_response_content()
         anthropic_response = {
             "id": request_id,
             "type": "message",
             "role": "assistant",
-            "content": [{"type": "text", "text": "".join(accumulated_content)}] if accumulated_content else [],
+            "content": recovered_content,
             "model": accumulated_model,
             "usage": {
                 "input_tokens": total_input_tokens,
@@ -707,7 +716,7 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
             },
         }
 
-        if error_occurred and not accumulated_content:
+        if error_occurred and not recovered_content:
             anthropic_response = {"error": {"type": "api_error", "message": "Stream interrupted"}}
 
         cache.complete_request(request_id, {
