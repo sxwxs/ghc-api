@@ -313,8 +313,11 @@ class LeakedToolCallTransformer:
             self._buffer = ""
 
         if self._open_text_index is not None:
-            if not self._block_had_recovery and self._open_text_index == self._original_text_index \
-                    and raw_stop is not None:
+            if (
+                not self._block_had_recovery
+                and self._open_text_index == self._original_text_index
+                and raw_stop is not None
+            ):
                 # Pure passthrough: forward the upstream stop unchanged.
                 events.append(("content_block_stop", raw_stop))
             else:
