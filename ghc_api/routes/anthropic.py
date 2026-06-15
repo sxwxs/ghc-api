@@ -612,8 +612,9 @@ def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict,
         first_chunk_received = False
         accumulated_model = original_model
         # Recovers tool calls that Copilot intermittently leaks as plain text instead
-        # of structured tool_use blocks (see ghc_api/tool_call_recovery.py).
-        tool_call_recovery = LeakedToolCallTransformer()
+        # of structured tool_use blocks (see ghc_api/tool_call_recovery.py). Disabled by
+        # default; when off the transformer forwards the stream untouched.
+        tool_call_recovery = LeakedToolCallTransformer(enabled=state.enable_tool_call_recovery)
 
         try:
             cache.update_request_state(request_id, cache.STATE_SENDING)

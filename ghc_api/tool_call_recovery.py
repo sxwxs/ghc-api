@@ -129,7 +129,10 @@ class LeakedToolCallTransformer:
     ends to flush any pending state.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, enabled: bool = True) -> None:
+        # When False the transformer never recovers tool calls: events are forwarded
+        # untouched and only plain text is accumulated for the cached response body.
+        self._enabled = enabled
         # Index bookkeeping so injected tool_use blocks get unique, increasing indices.
         self._max_index = -1
         # The upstream text block currently being watched.
@@ -160,6 +163,8 @@ class LeakedToolCallTransformer:
 
     def process(self, event_type: str, event: Dict, raw_data: str) -> List[Emission]:
         """Transform a single parsed SSE event into the events to forward."""
+        if not self._enabled:
+            return self._passthrough(event_type, event, raw_data)
         if event_type == "content_block_start":
             return self._on_content_block_start(event, raw_data)
         if event_type == "content_block_delta":
@@ -171,8 +176,23 @@ class LeakedToolCallTransformer:
         # message_start, message_stop, ping, error, ... pass through untouched.
         return [(event_type, raw_data)]
 
+    def _passthrough(self, event_type: str, event: Dict, raw_data: str) -> List[Emission]:
+        """Forward an event unchanged, accumulating plain text for the cache body.
+
+        Used when recovery is disabled: no leak detection happens, so the stream is
+        identical to having no transformer at all, but we still record text deltas so
+        :meth:`build_response_content` reflects what the client received.
+        """
+        if event_type == "content_block_delta":
+            delta = event.get("delta", {})
+            if delta.get("type") == "text_delta":
+                self._emitted_text_parts.append(delta.get("text", ""))
+        return [(event_type, raw_data)]
+
     def finalize(self) -> List[Emission]:
         """Flush any pending text/invoke if the stream ended without a clean stop."""
+        if not self._enabled:
+            return []
         events: List[Emission] = []
         if self._original_text_index is not None:
             events += self._end_text_block(None)

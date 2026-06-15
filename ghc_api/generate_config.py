@@ -124,6 +124,11 @@ save_request_to_file: false
 # Local fallback files such as ~/.ghc-api/token_usage.jl are still used where supported.
 disable_onedrive_access: true
 
+# If true, recover tool calls that Copilot intermittently leaks as plain text instead
+# of structured tool_use blocks on the direct Anthropic streaming path (/v1/messages).
+# Disabled by default; when off the upstream stream is forwarded untouched.
+enable_tool_call_recovery: false
+
 # Session File Flush Interval
 # ---------------------------
 # How often (in seconds) buffered session updates are flushed to disk.

@@ -101,6 +101,9 @@ save_request_to_file: false # If true, save completed requests to requests/YYYY-
 
 # Optional OneDrive access gate
 disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared reads
+
+# Optional leaked tool-call recovery (direct Anthropic /v1/messages streaming)
+enable_tool_call_recovery: false # If true, recover tool calls Copilot leaks as plain text
 ```
 
 ### Token Management

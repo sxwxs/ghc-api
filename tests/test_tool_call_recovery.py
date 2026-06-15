@@ -206,5 +206,47 @@ class LeakRecoveryTest(unittest.TestCase):
         self.assertEqual(_input_jsons(emitted), [{"command": "echo hi"}])
 
 
+def _run_disabled(events):
+    """Feed events through a recovery-disabled transformer (pure passthrough)."""
+    transformer = LeakedToolCallTransformer(enabled=False)
+    emitted = []
+    for event_type, event in events:
+        raw = json.dumps(event)
+        for et, data in transformer.process(event_type, event, raw):
+            emitted.append((et, json.loads(data)))
+    for et, data in transformer.finalize():
+        emitted.append((et, json.loads(data)))
+    return transformer, emitted
+
+
+class DisabledPassthroughTest(unittest.TestCase):
+    LEAK = LeakRecoveryTest.LEAK
+
+    def _leak_events(self, chunks):
+        return LeakRecoveryTest._leak_events(self, chunks)
+
+    def test_leak_is_not_recovered_when_disabled(self):
+        # The same leak that LeakRecoveryTest recovers must pass through untouched.
+        transformer, emitted = _run_disabled(self._leak_events([self.LEAK]))
+        self.assertFalse(transformer.recovered_any)
+        # No tool_use blocks are injected; the leaked text is emitted verbatim.
+        self.assertEqual(_tool_uses(emitted), [])
+        self.assertEqual(_text_of(emitted), self.LEAK)
+        # stop_reason is left untouched (not rewritten to tool_use).
+        stop_reasons = [e["delta"]["stop_reason"] for et, e in emitted if et == "message_delta"]
+        self.assertEqual(stop_reasons, ["end_turn"])
+
+    def test_events_pass_through_unchanged_when_disabled(self):
+        events = self._leak_events([self.LEAK])
+        transformer, emitted = _run_disabled(events)
+        # Every input event is forwarded, in order, byte-for-byte.
+        self.assertEqual(emitted, [(et, ev) for et, ev in events])
+
+    def test_disabled_cache_content_captures_text(self):
+        transformer, _ = _run_disabled(self._leak_events([self.LEAK]))
+        content = transformer.build_response_content()
+        self.assertEqual(content, [{"type": "text", "text": self.LEAK}])
+
+
 if __name__ == "__main__":
     unittest.main()
