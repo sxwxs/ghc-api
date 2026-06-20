@@ -91,6 +91,8 @@ def main():
             state.save_request_to_file = bool(config['save_request_to_file'])
         if 'disable_onedrive_access' in config:
             state.disable_onedrive_access = bool(config['disable_onedrive_access'])
+        if 'enable_tool_call_recovery' in config:
+            state.enable_tool_call_recovery = bool(config['enable_tool_call_recovery'])
         if 'session_flush_interval' in config:
             state.session_flush_interval = int(config['session_flush_interval'])
 

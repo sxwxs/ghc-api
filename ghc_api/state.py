@@ -35,6 +35,10 @@ class State:
 
         # Direct Anthropic API settings
         self.redirect_anthropic: bool = False  # Force Anthropic through OpenAI translation
+        # Recover tool calls that Copilot intermittently leaks as plain text on the
+        # direct Anthropic streaming path. Disabled by default; when off the stream is
+        # forwarded untouched (see ghc_api/tool_call_recovery.py).
+        self.enable_tool_call_recovery: bool = False
 
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
