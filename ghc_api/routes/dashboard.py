@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from flask import Blueprint, Response, jsonify, render_template, request
 
 from ..cache import cache
-from ..config import model_mappings
+from ..config import chat_completions_model_support, model_mappings
 from ..config_sync import (
     get_software_versions,
     get_config_hash_overview,
@@ -45,6 +45,10 @@ def _runtime_config() -> Dict[str, Any]:
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
         },
+        "chat_completions_model_support": {
+            "exact": chat_completions_model_support.exact_model_names,
+            "prefix": chat_completions_model_support.prefix_model_names,
+        },
     }
 
 
@@ -71,6 +75,14 @@ def _validate_mapping(value: Any, field_name: str) -> Dict[str, str]:
     if any(not isinstance(k, str) or not isinstance(v, str) for k, v in value.items()):
         raise ValueError(f"'{field_name}' values must be string-to-string pairs")
     return value
+
+
+def _validate_endpoint_support(value: Any, field_name: str) -> tuple[List[str], List[str]]:
+    if not isinstance(value, dict):
+        raise ValueError(f"'{field_name}' must be an object")
+    exact = _validate_string_list(value.get("exact", []), f"{field_name}.exact")
+    prefix = _validate_string_list(value.get("prefix", []), f"{field_name}.prefix")
+    return exact, prefix
 
 
 @dashboard_bp.route("/", methods=["GET"])
@@ -123,6 +135,7 @@ def api_runtime_config_update():
         "save_request_to_file",
         "disable_onedrive_access",
         "model_mappings",
+        "chat_completions_model_support",
     }
     unknown_keys = sorted(set(payload.keys()) - allowed_keys)
     if unknown_keys:
@@ -191,6 +204,19 @@ def api_runtime_config_update():
             prefix = _validate_mapping(mappings.get("prefix", {}), "model_mappings.prefix")
             model_mappings.exact_mappings = exact
             model_mappings.prefix_mappings = prefix
+
+        if "chat_completions_model_support" in payload:
+            exact, prefix = _validate_endpoint_support(
+                payload["chat_completions_model_support"],
+                "chat_completions_model_support",
+            )
+            chat_completions_model_support.exact_model_names = exact
+            chat_completions_model_support.prefix_model_names = prefix
+
+            if state.models:
+                from ..api_helpers import apply_configured_chat_completions_support
+
+                apply_configured_chat_completions_support(state.models)
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

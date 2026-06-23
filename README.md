@@ -91,6 +91,13 @@ model_mappings:
     claude-sonnet-4-: claude-sonnet-4
     claude-opus-4.5-: claude-opus-4.5
 
+# Chat completions endpoint overrides
+chat_completions_model_support:
+  exact: []
+  prefix:
+    - gpt-
+    - mai-code-
+
 # Content Filtering
 system_prompt_remove: []    # Strings to remove from system prompts
 system_prompt_add: []       # Strings to append to system prompts

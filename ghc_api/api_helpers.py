@@ -8,8 +8,12 @@ from typing import Dict, List
 
 import requests
 
-from .config import GITHUB_API_BASE_URL
+from .config import GITHUB_API_BASE_URL, chat_completions_model_support
 from .state import state
+
+
+CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
+_configured_chat_completions_support_by_models_id: Dict[int, set[str]] = {}
 
 
 def get_copilot_base_url() -> str:
@@ -86,7 +90,10 @@ def fetch_models() -> None:
 
     if response.ok:
         state.models = response.json()
+        updated_count = apply_configured_chat_completions_support(state.models, reset_tracking=True)
         print(f"Loaded {len(state.models.get('data', []))} models")
+        if updated_count:
+            print(f"Added chat completions endpoint support to {updated_count} configured model(s)")
     else:
         print(f"Failed to fetch models: {response.status_code}")
 
@@ -95,6 +102,67 @@ def ensure_copilot_token() -> None:
     """Ensure we have a valid Copilot token"""
     if not state.copilot_token or time.time() >= state.token_expires_at - 60:
         refresh_copilot_token()
+
+
+def apply_configured_chat_completions_support(models: Dict, reset_tracking: bool = False) -> int:
+    """Add chat completions endpoints to configured models in a model listing.
+
+    Removes endpoint support added by previous calls when a model no longer
+    matches the current config. Returns the number of model entries changed.
+    """
+    if not isinstance(models, dict):
+        return 0
+
+    models_key = id(models)
+    if reset_tracking:
+        _configured_chat_completions_support_by_models_id.clear()
+    added_model_ids = _configured_chat_completions_support_by_models_id.setdefault(models_key, set())
+
+    data = models.get("data")
+    if not isinstance(data, list):
+        return 0
+
+    updated_count = 0
+    for model in data:
+        if not isinstance(model, dict):
+            continue
+
+        model_id = model.get("id")
+        if not isinstance(model_id, str):
+            continue
+
+        supported_endpoints = model.get("supported_endpoints")
+        if not isinstance(supported_endpoints, list):
+            supported_endpoints = []
+
+        changed = False
+        matches_config = chat_completions_model_support.matches(model_id)
+        was_added_by_config = model_id in added_model_ids
+
+        if matches_config and CHAT_COMPLETIONS_ENDPOINT not in supported_endpoints:
+            supported_endpoints.append(CHAT_COMPLETIONS_ENDPOINT)
+            added_model_ids.add(model_id)
+            changed = True
+        elif not matches_config and was_added_by_config:
+            supported_endpoints = [
+                endpoint for endpoint in supported_endpoints
+                if endpoint != CHAT_COMPLETIONS_ENDPOINT
+            ]
+            added_model_ids.discard(model_id)
+            changed = True
+
+        if changed:
+            model["supported_endpoints"] = supported_endpoints
+            updated_count += 1
+
+    return updated_count
+
+
+def is_configured_chat_completions_support_added(models: Dict, model_id: str) -> bool:
+    """Return True if this process added chat completions support for a model."""
+    if not isinstance(models, dict) or not isinstance(model_id, str):
+        return False
+    return model_id in _configured_chat_completions_support_by_models_id.get(id(models), set())
 
 
 def count_tokens(text: str, model: str = "gpt-4") -> int:

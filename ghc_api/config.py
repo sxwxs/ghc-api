@@ -37,6 +37,16 @@ DEFAULT_MODEL_MAPPINGS = {
     }
 }
 
+# Models that should be advertised as supporting the OpenAI-compatible
+# /v1/chat/completions endpoint even when Copilot's model metadata omits it.
+DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT = {
+    "exact": [],
+    "prefix": [
+        "gpt-",
+        "mai-code-",
+    ],
+}
+
 # GitHub OAuth App for Device Flow (using GitHub CLI's client ID as it's public)
 GITHUB_OAUTH_CLIENT_ID = "01ab8ac9400c4e429b23"
 
@@ -75,3 +85,45 @@ class ModelMappings:
 
 # Global model mappings instance
 model_mappings = ModelMappings()
+
+
+class ChatCompletionsModelSupport:
+    """Stores model names that should advertise chat completions support."""
+
+    def __init__(self):
+        self.exact_model_names: List[str] = []
+        self.prefix_model_names: List[str] = []
+
+    @staticmethod
+    def _string_list(value: Any) -> List[str]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str) and item]
+
+    def matches(self, model: str) -> bool:
+        """Return True when a model id matches exact or prefix config."""
+        if not isinstance(model, str):
+            return False
+
+        normalized_model = model.lower()
+        exact_model_names = {name.lower() for name in self.exact_model_names}
+        prefix_model_names = [prefix.lower() for prefix in self.prefix_model_names]
+
+        if normalized_model in exact_model_names:
+            return True
+
+        return any(normalized_model.startswith(prefix) for prefix in prefix_model_names)
+
+    def load_from_config(self, config: Dict[str, Any]) -> None:
+        """Load endpoint support overrides from config dictionary."""
+        endpoint_support = config.get("chat_completions_model_support", {})
+        if not isinstance(endpoint_support, dict):
+            endpoint_support = {}
+        self.exact_model_names = self._string_list(endpoint_support.get("exact"))
+        self.prefix_model_names = self._string_list(endpoint_support.get("prefix"))
+
+
+# Global chat completions endpoint support instance
+chat_completions_model_support = ChatCompletionsModelSupport()

@@ -12,7 +12,13 @@ import yaml
 
 from . import __version__
 from .app import create_app, initialize_app
-from .config import DEBUG, model_mappings, DEFAULT_MODEL_MAPPINGS
+from .config import (
+    DEBUG,
+    model_mappings,
+    DEFAULT_MODEL_MAPPINGS,
+    chat_completions_model_support,
+    DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
+)
 from .config_sync import print_sync_diff_status
 from .generate_config import generate_config_file
 from .state import state
@@ -122,12 +128,23 @@ def main():
             # Use default mappings if not specified
             model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
 
+        # Load configured chat completions endpoint support
+        if 'chat_completions_model_support' in config:
+            chat_completions_model_support.load_from_config(config)
+        else:
+            chat_completions_model_support.load_from_config({
+                "chat_completions_model_support": DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
+            })
+
         print(f"Loaded configuration from: {config_path}")
 
     except Exception as e:
         print(f"Error loading config file: {e}")
         # Use default mappings on error
         model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
+        chat_completions_model_support.load_from_config({
+            "chat_completions_model_support": DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
+        })
 
     # Command line args override config file
     if args.address is not None:

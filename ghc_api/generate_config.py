@@ -76,6 +76,19 @@ model_mappings:
     claude-opus-4.6-: claude-opus-4.6
 
 
+# Chat Completions Endpoint Overrides
+# -----------------------------------
+# Some Copilot model metadata can omit /v1/chat/completions even though the model
+# works through this proxy's OpenAI-compatible chat completions route. Models
+# matching these exact names or prefixes will be advertised as supporting
+# /v1/chat/completions in /v1/models/full/.
+chat_completions_model_support:
+  exact: []
+  prefix:
+    - gpt-
+    - mai-code-
+
+
 # Content Filtering
 # -----------------
 # Remove or add content from system prompts and tool results.
