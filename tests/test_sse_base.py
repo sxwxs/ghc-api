@@ -82,7 +82,9 @@ class SSEBasePassthroughTest(unittest.TestCase):
         self.assertIn("event: content_block_delta\n", out)
         self.assertIn(f"data: {delta}\n", out)
         self.assertIn(f"data: {message_delta}\n", out)
-        self.assertIn("data: [DONE]\n\n", out)
+        # Anthropic /v1/messages must NOT forward the OpenAI-style [DONE]
+        # sentinel -- it signals end-of-stream via message_stop.
+        self.assertNotIn("data: [DONE]\n\n", out)
 
     def test_cache_captures_raw_events_verbatim(self):
         message_start = json.dumps({"type": "message_start", "message": {"model": "claude-opus-4", "usage": {"input_tokens": 11, "cache_read_input_tokens": 3}}})

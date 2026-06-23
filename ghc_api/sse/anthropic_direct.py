@@ -30,6 +30,10 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
     endpoint = "/v1/messages"
     log_prefix = "[Stream Direct Anthropic]"
     emit_event_header = True
+    # Anthropic /v1/messages signals end-of-stream via ``message_stop``; the
+    # bare ``[DONE]`` sentinel is OpenAI-specific and would break clients that
+    # try to JSON-decode every SSE data line.
+    emit_done_sentinel = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

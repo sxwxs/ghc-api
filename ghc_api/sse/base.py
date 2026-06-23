@@ -57,6 +57,11 @@ class SSEStreamHandler:
     # verbatim (matches the existing ``/v1/responses`` handler). The two
     # conventions differ; set per subclass.
     emit_event_header: bool = True
+    # Whether to forward the OpenAI-style ``data: [DONE]`` sentinel to the
+    # client. OpenAI streams use it; Anthropic ``/v1/messages`` does not (it
+    # signals end-of-stream via ``message_stop`` events) and clients parsing
+    # each line as Anthropic JSON would choke on a bare ``[DONE]``.
+    emit_done_sentinel: bool = True
 
     def __init__(
         self,
@@ -232,7 +237,8 @@ class SSEStreamHandler:
                 if line.startswith("data: "):
                     data = line[6:]
                     if data == "[DONE]":
-                        yield "data: [DONE]\n\n"
+                        if self.emit_done_sentinel:
+                            yield "data: [DONE]\n\n"
                         break
 
                     # Record the raw payload before anything else so even
