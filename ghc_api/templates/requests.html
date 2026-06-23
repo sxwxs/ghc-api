@@ -1619,9 +1619,14 @@
                 requestContent.innerHTML = renderJsonDisplay(data.request_body);
             }
 
-            // Update response content
+            // Update response content. Streaming entries store the raw upstream
+            // SSE ``data:`` payloads under ``raw_events``; show them as a plain
+            // JSON list (no schema-aware parsing). Non-streaming entries still
+            // carry a reconstructed ``response_body`` dict and use the parsed view.
             const responseContent = document.getElementById('response-content');
-            if (parseResponse) {
+            if (Array.isArray(data.raw_events)) {
+                responseContent.innerHTML = renderJsonDisplay(data.raw_events);
+            } else if (parseResponse) {
                 responseContent.innerHTML = renderParsedResponse(data.response_body);
             } else {
                 responseContent.innerHTML = renderJsonDisplay(data.response_body);

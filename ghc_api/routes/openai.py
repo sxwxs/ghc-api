@@ -22,6 +22,7 @@ from ..api_helpers import (
 from ..auth import redact_auth_headers
 from ..cache import cache
 from ..config import chat_completions_model_support
+from ..sse import OpenAIResponsesStreamHandler
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
@@ -1145,9 +1146,19 @@ def responses():
                 )
                 if use_streaming:
                     if response.ok:
-                        return stream_responses(response, request_id, request_size, start_time,
-                                        original_model, translated_model, payload, original_request_body, request_headers,
-                                        client_ip=client_ip, user_id=user_id)
+                        return OpenAIResponsesStreamHandler(
+                            response=response,
+                            request_id=request_id,
+                            request_size=request_size,
+                            start_time=start_time,
+                            original_model=original_model,
+                            translated_model=translated_model,
+                            request_body_for_cache=payload,
+                            original_request_body=original_request_body,
+                            request_headers=request_headers,
+                            client_ip=client_ip,
+                            user_id=user_id,
+                        ).stream()
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
                     log_error_request("/v1/responses", payload, response.text, response.status_code, client_ip)
@@ -1239,137 +1250,3 @@ def responses():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-def stream_responses(response: requests.Response, request_id: str,
-                     request_size: int, start_time: float,
-                     original_model: str, translated_model: str, payload: dict,
-                     original_request_body: Dict = None,
-                     request_headers: Dict = None,
-                     client_ip: str = None,
-                     user_id: str = "anonymous") -> Response:
-    """Handle streaming Responses API (passthrough SSE events)"""
-    cache.start_request(request_id, {
-        "request_headers": request_headers,
-        "client_ip": client_ip,
-        "original_request_body": original_request_body,
-        "request_body": payload,
-        "model": original_model,
-        "translated_model": translated_model if translated_model != original_model else None,
-        "endpoint": "/v1/responses",
-        "request_size": request_size,
-        "user_id": user_id,
-    })
-
-    def generate() -> Generator[str, None, None]:
-        total_input_tokens = 0
-        total_output_tokens = 0
-        total_cache_creation_input_tokens = 0
-        error_occurred = False
-        status_code = response.status_code
-        first_chunk_received = False
-        accumulated_text = []
-        response_data = {}
-
-        try:
-            cache.update_request_state(request_id, cache.STATE_SENDING)
-
-            status_code = response.status_code
-
-            for line in response.iter_lines():
-                if not line:
-                    continue
-
-                line = line.decode("utf-8")
-
-                # The Responses API uses SSE with 'event:' and 'data:' lines
-                if line.startswith("event: "):
-                    # Forward event line directly
-                    yield f"{line}\n"
-                    continue
-
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        break
-
-                    try:
-                        event = json.loads(data)
-
-                        if not first_chunk_received:
-                            first_chunk_received = True
-                            cache.update_request_state(request_id, cache.STATE_RECEIVING)
-
-                        # Extract usage from response.completed event
-                        event_type = event.get("type", "")
-                        if event_type == "response.completed":
-                            resp = event.get("response", {})
-                            response_data = resp
-                            usage = resp.get("usage", {})
-                            total_input_tokens = usage.get("input_tokens", 0)
-                            total_output_tokens = usage.get("output_tokens", 0)
-                            total_cache_creation_input_tokens = usage.get("input_tokens_details", {}).get("cached_tokens", 0)
-                        elif event_type == "response.output_text.delta":
-                            accumulated_text.append(event.get("delta", ""))
-
-                        yield f"data: {data}\n\n"
-                    except json.JSONDecodeError:
-                        yield f"data: {data}\n\n"
-                        continue
-
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            error_occurred = True
-            status_code = 504
-            print(f"[Stream Responses] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
-        except GeneratorExit:
-            error_occurred = True
-            print(f"[Stream Responses] Client disconnected for request {request_id}")
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-            return
-        except Exception as e:
-            error_occurred = True
-            status_code = 500
-            print(f"[Stream Responses] Error for request {request_id}: {type(e).__name__}: {e}")
-            try:
-                error_payload = {"error": str(e)}
-                yield f"data: {json.dumps(error_payload)}\n\n"
-            except GeneratorExit:
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-                return
-
-        duration = round(time.time() - start_time, 2)
-
-        # Use the response.completed data if available, otherwise build a minimal response
-        cached_response = response_data if response_data else {}
-        if not cached_response and accumulated_text:
-            cached_response = {
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "".join(accumulated_text)}]}],
-            }
-        if error_occurred and not response_data and not accumulated_text:
-            cached_response = {"error": "Stream interrupted"}
-
-        cache.complete_request(request_id, {
-            "request_body": payload,
-            "response_body": cached_response,
-            "model": original_model,
-            "translated_model": translated_model if translated_model != original_model else None,
-            "endpoint": "/v1/responses",
-            "status_code": status_code,
-            "request_size": request_size,
-            "response_size": len(json.dumps(cached_response)),
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-            "cache_creation_input_tokens": total_cache_creation_input_tokens,
-            "duration": duration,
-            "user_id": user_id,
-        })
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )

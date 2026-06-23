@@ -333,6 +333,7 @@ def api_requests():
         summary.pop("original_request_body", None)
         summary.pop("request_body", None)
         summary.pop("response_body", None)
+        summary.pop("raw_events", None)
         summary.pop("request_headers", None)
         items_summary.append(summary)
 
@@ -366,10 +367,18 @@ def api_request_body(request_id: str):
 
 @dashboard_bp.route("/api/request/<request_id>/response-body", methods=["GET"])
 def api_response_body(request_id: str):
-    """Get just the response body"""
+    """Get just the response body.
+
+    For streaming entries written by the new SSE handlers, the cache stores the
+    raw upstream SSE ``data:`` payloads under ``raw_events`` instead of a
+    reconstructed ``response_body`` dict. Return either, with a discriminator
+    so the dashboard knows which view to render.
+    """
     item = cache.get_request(request_id)
     if not item:
         return jsonify({"error": "Request not found"}), 404
+    if item.get("raw_events") is not None:
+        return jsonify({"raw_events": item.get("raw_events")})
     return jsonify(item.get("response_body"))
 
 
@@ -401,6 +410,7 @@ def api_fulltext_search():
         summary.pop("original_request_body", None)
         summary.pop("request_body", None)
         summary.pop("response_body", None)
+        summary.pop("raw_events", None)
         summary.pop("request_headers", None)
         items_summary.append(summary)
 

@@ -870,7 +870,12 @@
                 overviewContent.innerHTML = overviewHtml;
 
                 document.getElementById('request-json').innerHTML = syntaxHighlight(data.request_body || {});
-                document.getElementById('response-json').innerHTML = syntaxHighlight(data.response_body || {});
+                // Streaming entries store raw SSE payloads under raw_events
+                // instead of a reconstructed response_body dict.
+                const responseView = Array.isArray(data.raw_events)
+                    ? data.raw_events
+                    : (data.response_body || {});
+                document.getElementById('response-json').innerHTML = syntaxHighlight(responseView);
 
                 document.getElementById('request-modal').classList.add('active');
             } catch (error) {

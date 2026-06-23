@@ -65,7 +65,11 @@ class RequestCache:
             entry["request_body"] = placeholder
             entry["original_request_body"] = placeholder
         if entry.get("response_size", 0) and entry["response_size"] > limit:
-            entry["response_body"] = {"_truncated": True, "_size": entry["response_size"], "_reason": f"response body exceeded cache_max_request_size ({limit} bytes)"}
+            placeholder = {"_truncated": True, "_size": entry["response_size"], "_reason": f"response body exceeded cache_max_request_size ({limit} bytes)"}
+            if entry.get("raw_events") is not None:
+                entry["raw_events"] = [json.dumps(placeholder)]
+            else:
+                entry["response_body"] = placeholder
 
     @classmethod
     def _normalize_import_timestamp(cls, value: Any) -> int:
@@ -102,6 +106,7 @@ class RequestCache:
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
                 "response_body": None,
+                "raw_events": None,
                 "model": data.get("model", "unknown"),
                 "translated_model": data.get("translated_model"),
                 "endpoint": data.get("endpoint", "unknown"),
@@ -142,7 +147,11 @@ class RequestCache:
                     entry["original_request_body"] = data.get("original_request_body")
                 if "request_body" in data:
                     entry["request_body"] = data.get("request_body")
-                entry["response_body"] = data.get("response_body")
+                if "raw_events" in data:
+                    entry["raw_events"] = data.get("raw_events")
+                    entry["response_body"] = None
+                else:
+                    entry["response_body"] = data.get("response_body")
                 entry["status_code"] = data.get("status_code", 200)
                 entry["request_size"] = data.get("request_size", entry.get("request_size", 0))
                 entry["response_size"] = data.get("response_size", 0)
@@ -156,6 +165,18 @@ class RequestCache:
                 # path or external caller forgot), fall back to anonymous.
                 if not entry.get("user_id"):
                     entry["user_id"] = _coerce_user_id(data.get("user_id"))
+                # Pass through any unrecognized keys so subclasses can surface
+                # sidecar fields (e.g. recovered_content for tool-call recovery).
+                _KNOWN = {
+                    "client_ip", "request_headers", "original_request_body",
+                    "request_body", "response_body", "raw_events", "status_code",
+                    "request_size", "response_size", "input_tokens", "output_tokens",
+                    "cache_creation_input_tokens", "cache_read_input_tokens",
+                    "duration", "user_id", "model", "translated_model", "endpoint",
+                }
+                for key, value in data.items():
+                    if key not in _KNOWN:
+                        entry[key] = value
                 self._truncate_oversize_bodies(entry)
             else:
                 # Fallback: create new entry if somehow missing
@@ -169,7 +190,8 @@ class RequestCache:
                     "request_headers": data.get("request_headers"),
                     "original_request_body": data.get("original_request_body"),
                     "request_body": data.get("request_body"),
-                    "response_body": data.get("response_body"),
+                    "response_body": data.get("response_body") if "raw_events" not in data else None,
+                    "raw_events": data.get("raw_events"),
                     "model": data.get("model", "unknown"),
                     "translated_model": data.get("translated_model"),
                     "endpoint": data.get("endpoint", "unknown"),
@@ -450,8 +472,11 @@ class RequestCache:
                     continue
                 # Search in request body
                 request_body_str = json.dumps(item.get("request_body", {})).lower()
-                # Search in response body
-                response_body_str = json.dumps(item.get("response_body", {})).lower()
+                # Search in response body (or raw SSE events for streaming entries)
+                if item.get("raw_events") is not None:
+                    response_body_str = "\n".join(item.get("raw_events") or []).lower()
+                else:
+                    response_body_str = json.dumps(item.get("response_body", {})).lower()
 
                 if query_lower in request_body_str or query_lower in response_body_str:
                     results.append(item)
@@ -482,6 +507,7 @@ class RequestCache:
                 "original_request_body": data.get("original_request_body"),
                 "request_body": data.get("request_body"),
                 "response_body": data.get("response_body"),
+                "raw_events": data.get("raw_events"),
                 "model": data.get("model", "unknown"),
                 "translated_model": data.get("translated_model"),
                 "endpoint": data.get("endpoint", "unknown"),
@@ -496,6 +522,20 @@ class RequestCache:
                 "state": data.get("state", "completed"),
                 "user_id": user_id,
             }
+            # Pass through any unrecognized keys so sidecar fields written by
+            # subclassed SSE handlers (e.g. recovered_content) round-trip
+            # through export/import.
+            _IMPORT_KNOWN = {
+                "id", "timestamp", "client_ip", "request_headers",
+                "original_request_body", "request_body", "response_body",
+                "raw_events", "model", "translated_model", "endpoint",
+                "status_code", "request_size", "response_size", "input_tokens",
+                "output_tokens", "cache_creation_input_tokens",
+                "cache_read_input_tokens", "duration", "state", "user_id",
+            }
+            for key, value in data.items():
+                if key not in _IMPORT_KNOWN:
+                    self.cache[request_id][key] = value
             self._truncate_oversize_bodies(self.cache[request_id])
 
             # Update stats

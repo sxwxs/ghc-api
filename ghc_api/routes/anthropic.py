@@ -22,7 +22,10 @@ from ..api_helpers import (
 from ..cache import cache
 from ..auth import redact_auth_headers
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
-from ..tool_call_recovery import LeakedToolCallTransformer
+from ..sse import (
+    AnthropicDirectStreamHandler,
+    AnthropicDirectStreamHandlerWithRecovery,
+)
 from ..translator import (
     translate_anthropic_to_openai,
     translate_model_name,
@@ -524,10 +527,24 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                     stream=use_streaming
                 )
                 if use_streaming and response.ok:
-                    return stream_direct_anthropic(response, filtered_payload, headers, request_id,
-                            filtered_request_size, start_time,
-                            original_model, translated_model, original_request_body, request_headers,
-                            client_ip=client_ip, user_id=user_id)
+                    handler_cls = (
+                        AnthropicDirectStreamHandlerWithRecovery
+                        if state.enable_tool_call_recovery
+                        else AnthropicDirectStreamHandler
+                    )
+                    return handler_cls(
+                        response=response,
+                        request_id=request_id,
+                        request_size=filtered_request_size,
+                        start_time=start_time,
+                        original_model=original_model,
+                        translated_model=translated_model,
+                        request_body_for_cache=filtered_payload,
+                        original_request_body=original_request_body,
+                        request_headers=request_headers,
+                        client_ip=client_ip,
+                        user_id=user_id,
+                    ).stream()
                 last_connection_error = None
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
@@ -645,172 +662,6 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
         log_tool_result_cleanup(cleanup_log_entry)
 
     return Response(response.text, status=response.status_code, mimetype="application/json")
-
-
-def stream_direct_anthropic(response: requests.Response, filtered_payload: Dict, headers: Dict, request_id: str,
-                            request_size: int, start_time: float,
-                            original_model: str, translated_model: str, original_request_body: Dict = None,
-                            request_headers: Dict = None,
-                            client_ip: str = None,
-                            user_id: str = "anonymous") -> Response:
-    """Handle streaming direct Anthropic response (passthrough SSE events)."""
-    # Start tracking request immediately
-    cache.start_request(request_id, {
-        "request_headers": request_headers,
-        "client_ip": client_ip,
-        "original_request_body": original_request_body,
-        "request_body": filtered_payload,
-        "model": original_model,
-        "translated_model": translated_model if translated_model != original_model else None,
-        "endpoint": "/v1/messages",
-        "request_size": request_size,
-        "user_id": user_id,
-    })
-
-    def generate() -> Generator[str, None, None]:
-        total_input_tokens = 0
-        total_output_tokens = 0
-        total_cache_creation_input_tokens = 0
-        total_cache_read_input_tokens = 0
-        error_occurred = False
-        status_code = response.status_code
-        first_chunk_received = False
-        accumulated_model = original_model
-        # Recovers tool calls that Copilot intermittently leaks as plain text instead
-        # of structured tool_use blocks (see ghc_api/tool_call_recovery.py). Disabled by
-        # default; when off the transformer forwards the stream untouched.
-        tool_call_recovery = LeakedToolCallTransformer(enabled=state.enable_tool_call_recovery)
-
-        try:
-            cache.update_request_state(request_id, cache.STATE_SENDING)
-            sse_event_type = ""
-
-            for line in response.iter_lines():
-                if not line:
-                    continue
-
-                line = line.decode("utf-8")
-
-                # Handle SSE format - capture event type for the next data line
-                if line.startswith("event: "):
-                    sse_event_type = line[7:]
-                    continue
-
-                elif line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        break
-
-                    try:
-                        event = json.loads(data)
-
-                        if not first_chunk_received:
-                            first_chunk_received = True
-                            cache.update_request_state(request_id, cache.STATE_RECEIVING)
-
-                        # Use SSE event header if available, otherwise fall back to JSON type field
-                        event_type = sse_event_type or event.get("type", "")
-                        # Reset so it doesn't leak into the next data line
-                        sse_event_type = ""
-
-                        # Extract usage info from events
-                        if event_type == "message_start":
-                            msg = event.get("message", {})
-                            accumulated_model = msg.get("model", original_model)
-                            usage = msg.get("usage", {})
-                            total_input_tokens = usage.get("input_tokens", 0)
-                            total_cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
-                            total_cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
-                        elif event_type == "message_delta":
-                            usage = event.get("usage", {})
-                            total_output_tokens = usage.get("output_tokens", 0)
-
-                        # Forward events through the leaked-tool-call recovery transformer.
-                        # For normal streams this is a passthrough (only text_delta chunk
-                        # boundaries may shift); when Copilot leaks a tool call as text it
-                        # re-emits structured tool_use events plus a stop_reason rewrite.
-                        for out_type, out_data in tool_call_recovery.process(event_type, event, data):
-                            yield f"event: {out_type}\ndata: {out_data}\n\n"
-
-                    except json.JSONDecodeError:
-                        continue
-
-                elif status_code > 399:
-                    # Non-JSON error response - yield as is
-                    yield f"{line}\n\n"
-
-            # Flush any text/tool-call state left pending at end of stream.
-            for out_type, out_data in tool_call_recovery.finalize():
-                yield f"event: {out_type}\ndata: {out_data}\n\n"
-
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            error_occurred = True
-            status_code = 504
-            print(f"[Stream Direct Anthropic] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
-        except GeneratorExit:
-            error_occurred = True
-            print(f"[Stream Direct Anthropic] Client disconnected for request {request_id}")
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-            return
-        except Exception as e:
-            error_occurred = True
-            status_code = 500
-            print(f"[Stream Direct Anthropic] Error for request {request_id}: {type(e).__name__}: {e}")
-            try:
-                error_event = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
-                yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
-            except GeneratorExit:
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-                return
-
-        duration = round(time.time() - start_time, 2)
-
-        # Build response for cache. Reflect any recovered tool calls so the cached
-        # response matches what the client actually received.
-        recovered_content = tool_call_recovery.build_response_content()
-        anthropic_response = {
-            "id": request_id,
-            "type": "message",
-            "role": "assistant",
-            "content": recovered_content,
-            "model": accumulated_model,
-            "usage": {
-                "input_tokens": total_input_tokens,
-                "output_tokens": total_output_tokens,
-                **({"cache_creation_input_tokens": total_cache_creation_input_tokens} if total_cache_creation_input_tokens else {}),
-                **({"cache_read_input_tokens": total_cache_read_input_tokens} if total_cache_read_input_tokens else {}),
-            },
-        }
-
-        if error_occurred and not recovered_content:
-            anthropic_response = {"error": {"type": "api_error", "message": "Stream interrupted"}}
-
-        cache.complete_request(request_id, {
-            "request_body": filtered_payload,
-            "response_body": anthropic_response,
-            "model": original_model,
-            "translated_model": translated_model if translated_model != original_model else None,
-            "endpoint": "/v1/messages",
-            "status_code": status_code,
-            "request_size": request_size,
-            "response_size": len(json.dumps(anthropic_response)),
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-            "cache_creation_input_tokens": total_cache_creation_input_tokens,
-            "cache_read_input_tokens": total_cache_read_input_tokens,
-            "duration": duration,
-            "user_id": user_id,
-        })
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
 
 
 def handle_translated_request(anthropic_payload: Dict, request_id: str, start_time: float,
