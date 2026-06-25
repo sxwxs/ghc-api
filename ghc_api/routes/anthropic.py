@@ -20,12 +20,14 @@ from ..api_helpers import (
     count_tokens,
 )
 from ..cache import cache
+from ..counters import counters
 from ..auth import redact_auth_headers
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
 from ..sse import (
     AnthropicDirectStreamHandler,
     AnthropicDirectStreamHandlerWithRecovery,
 )
+from ..sse.keepalive import KEEPALIVE, iter_lines_with_keepalive
 from ..translator import (
     translate_anthropic_to_openai,
     translate_model_name,
@@ -70,6 +72,7 @@ def apply_effort_policy(payload: Dict, translated_model: str) -> Dict:
 
     print(f"[Effort] Model {translated_model} does not support effort={eff} "
           f"(supported: {sorted(supported) or 'none'}); dropping output_config")
+    counters.incr("mod.effort_policy_filter")
     return {k: v for k, v in payload.items() if k != "output_config"}
 
 
@@ -130,6 +133,7 @@ def translate_thinking_enabled_to_adaptive(payload: Dict, translated_model: str)
               f"(preserving headroom from original budget_tokens={budget_tokens})")
         new_payload["max_tokens"] = new_max_tokens
 
+    counters.incr("mod.thinking_protocol_translate")
     return new_payload
 
 
@@ -139,6 +143,7 @@ def _remove_scope_from_ephemeral_cache_control(block: Dict) -> None:
     if cc and isinstance(cc, dict) and cc.get("type") == "ephemeral" and "scope" in cc:
         print(f"[DirectAnthropic] Removing `scope` from cache_control in content block: {cc}")
         cc.pop("scope")
+        counters.incr("mod.cache_control_scope_removal")
 
 
 def _remove_scope_from_cache_control_in_payload(payload: Dict) -> None:
@@ -177,6 +182,7 @@ def filter_payload_for_copilot(payload: Dict) -> Dict:
 
     if unsupported_fields:
         print(f"[DirectAnthropic] Filtered unsupported fields: {', '.join(unsupported_fields)}")
+        counters.incr("mod.unsupported_field_filter")
 
     # Remove scope from ephemeral cache_control in tools, messages, and system prompt
     _remove_scope_from_cache_control_in_payload(filtered)
@@ -202,6 +208,7 @@ def adjust_max_tokens_for_thinking(payload: Dict) -> Dict:
         response_buffer = min(16384, budget_tokens)
         new_max_tokens = budget_tokens + response_buffer
         print(f"[DirectAnthropic] Adjusted max_tokens: {max_tokens} → {new_max_tokens} (thinking.budget_tokens={budget_tokens})")
+        counters.incr("mod.thinking_max_tokens_adjust")
         return {**payload, "max_tokens": new_max_tokens}
 
     return payload
@@ -232,6 +239,7 @@ def apply_system_prompt_filters_to_payload(payload: Dict) -> Dict:
             for add_str in state.system_prompt_add:
                 print(f"[Content Filter] Added new system prompt block: {add_str[:50]}{'...' if len(add_str) > 50 else ''}")
                 new_system.append({"type": "text", "text": add_str})
+                counters.incr("mod.system_prompt_add")
             if new_system:
                 return {**payload, "system": new_system}
         return payload
@@ -242,6 +250,7 @@ def apply_system_prompt_filters_to_payload(payload: Dict) -> Dict:
             for add_str in state.system_prompt_add:
                 if add_str not in filtered_system:
                     filtered_system = filtered_system + "\n\n" + add_str
+                    counters.incr("mod.system_prompt_add")
                     print(f"[Content Filter] Added to system prompt: {add_str[:50]}{'...' if len(add_str) > 50 else ''}")
             return {**payload, "system": filtered_system}
     elif isinstance(system, list):
@@ -262,12 +271,14 @@ def apply_system_prompt_filters_to_payload(payload: Dict) -> Dict:
                 if original_text.startswith("x-anthropic-billing-header:"):
                     print(f"[Content Filter] Removed billing header block from system prompt: {original_text[:50]}{'...' if len(original_text) > 50 else ''}")
                     modified = True
+                    counters.incr("mod.billing_header_removal")
                     continue
                 # Only apply removal filters, not additions (we'll handle additions separately)
                 filtered_text = original_text
                 for remove_str in state.system_prompt_remove:
                     if remove_str in filtered_text:
                         filtered_text = filtered_text.replace(remove_str, "")
+                        counters.incr("mod.system_prompt_remove")
                         print(f"[Content Filter] Removed from system prompt: {remove_str[:50]}{'...' if len(remove_str) > 50 else ''}")
 
                 if filtered_text != original_text:
@@ -285,6 +296,7 @@ def apply_system_prompt_filters_to_payload(payload: Dict) -> Dict:
             if add_str not in all_text_content:
                 print(f"[Content Filter] Added new system prompt block: {add_str[:50]}{'...' if len(add_str) > 50 else ''}")
                 new_system.append({"type": "text", "text": add_str})
+                counters.incr("mod.system_prompt_add")
                 modified = True
 
         if modified:
@@ -523,7 +535,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                     f"{get_copilot_base_url()}/v1/messages",
                     headers=headers,
                     json=filtered_payload,
-                    timeout=1200,
+                    timeout=state.upstream_read_timeout,
                     stream=use_streaming
                 )
                 if use_streaming and response.ok:
@@ -709,7 +721,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
                     json=openai_payload,
-                    timeout=1200,
+                    timeout=state.upstream_read_timeout,
                 )
                 last_connection_error = None
                 break
@@ -842,7 +854,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                 headers=headers,
                 json=openai_payload,
                 stream=True,
-                timeout=1200,
+                timeout=state.upstream_read_timeout,
             )
             status_code = response.status_code
 
@@ -867,11 +879,16 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                     headers=headers,
                     json=new_openai_payload,
                     stream=True,
-                    timeout=1200,
+                    timeout=state.upstream_read_timeout,
                 )
                 status_code = response.status_code
 
-            for line in response.iter_lines():
+            for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
+                if line is KEEPALIVE:
+                    counters.incr("ping_sent")
+                    yield 'event: ping\ndata: {"type": "ping"}\n\n'
+                    continue
+
                 if not line:
                     continue
 

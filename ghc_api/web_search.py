@@ -121,6 +121,8 @@ def remove_web_search_tools(payload: Dict) -> Dict:
 
 def apply_web_search_fallback(payload: Dict, endpoint: str) -> Dict:
     """Orchestrate the full web search fallback: search, inject results, remove tools."""
+    from .counters import counters
+    counters.incr("mod.web_search_fallback")
     query = extract_search_query(payload)
     print(f"[WebSearch] Extracted search query: {query!r}")
 

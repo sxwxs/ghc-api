@@ -21,8 +21,10 @@ from ..api_helpers import (
 )
 from ..auth import redact_auth_headers
 from ..cache import cache
+from ..counters import counters
 from ..config import chat_completions_model_support
 from ..sse import OpenAIResponsesStreamHandler
+from ..sse.keepalive import KEEPALIVE, iter_lines_with_keepalive
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
@@ -427,7 +429,12 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                 response_chunks.append(role_chunk)
                 yield f"data: {json.dumps(role_chunk)}\n\n"
 
-                for line in response.iter_lines():
+                for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
+                    if line is KEEPALIVE:
+                        counters.incr("ping_sent")
+                        yield ": keepalive\n\n"
+                        continue
+
                     if not line:
                         continue
 
@@ -449,6 +456,8 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                         cache.update_request_state(request_id, cache.STATE_RECEIVING)
 
                     event_type = event.get("type", "")
+                    if "ping" in event_type:
+                        counters.incr("ping_received")
                     if event_type == "response.output_text.delta":
                         text_delta = event.get("delta", "")
                         if text_delta:
@@ -610,7 +619,7 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
                 headers=headers,
                 json=responses_payload,
                 stream=bool(payload.get("stream")),
-                timeout=1200,
+                timeout=state.upstream_read_timeout,
             )
             last_connection_error = None
             break
@@ -839,7 +848,7 @@ def chat_completions():
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=1200,
+                    timeout=state.upstream_read_timeout,
                 )
                 last_connection_error = None
                 break
@@ -869,13 +878,14 @@ def chat_completions():
                     cleaned_input.append(item)
 
                 if removed_count > 0:
+                    counters.incr("mod.encrypted_content_removal")
                     retry_payload = dict(payload)
                     retry_payload["input"] = cleaned_input
                     response = requests.post(
                         f"{get_copilot_base_url()}/v1/responses",
                         headers=headers,
                         json=retry_payload,
-                        timeout=1200,
+                        timeout=state.upstream_read_timeout,
                     )
                     payload = retry_payload
                     request_size = len(json.dumps(payload))
@@ -978,11 +988,16 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                 headers=headers,
                 json=payload,
                 stream=True,
-                timeout=1200,
+                timeout=state.upstream_read_timeout,
             )
             status_code = response.status_code
 
-            for line in response.iter_lines():
+            for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
+                if line is KEEPALIVE:
+                    counters.incr("ping_sent")
+                    yield ": keepalive\n\n"
+                    continue
+
                 if not line:
                     continue
 
@@ -1142,7 +1157,7 @@ def responses():
                     headers=headers,
                     json=payload,
                     stream=use_streaming,
-                    timeout=1200,
+                    timeout=state.upstream_read_timeout,
                 )
                 if use_streaming:
                     if response.ok:
@@ -1175,6 +1190,7 @@ def responses():
                             print("Warning: Detected possible encrypted content parse error in response. auto_remove_encrypted_content_on_parse_error is enabled, so will remove encrypted content and retry the request. May cause loss of information.")
                             print("Try to remove encrypted content and retry", f"Removed {removed_count} encrypted content items from input for request {request_id}")
                             if removed_count > 0:
+                                counters.incr("mod.encrypted_content_removal")
                                 retry_payload = dict(payload)
                                 retry_payload["input"] = cleaned_input
                                 payload = retry_payload

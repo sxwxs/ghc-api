@@ -111,6 +111,12 @@ disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared
 
 # Optional leaked tool-call recovery (direct Anthropic /v1/messages streaming)
 enable_tool_call_recovery: false # If true, recover tool calls Copilot leaks as plain text
+
+# Streaming reliability
+upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot request
+sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
+                              # this many seconds (keeps clients like Claude Code from
+                              # timing out while the model "thinks"). Set 0 to disable.
 ```
 
 ### Token Management

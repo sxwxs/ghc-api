@@ -557,6 +557,27 @@
 
         <div class="section">
             <div class="header-row">
+                <h2>Proxy Activity</h2>
+                <button class="refresh-btn" onclick="loadStats()">Refresh</button>
+            </div>
+            <p style="color:#888; font-size:12px; margin:0 0 8px;">
+                Keepalive pings and request/response modifications since the proxy started.
+                Counts are global and reset on restart.
+            </p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Activity</th>
+                        <th>Count</th>
+                    </tr>
+                </thead>
+                <tbody id="counters-body">
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <div class="header-row">
                 <h2>Recent Requests</h2>
                 <a href="/requests" class="refresh-btn">View All</a>
             </div>
@@ -654,6 +675,21 @@
             return labels[state] || state || 'Unknown';
         }
 
+        const IN_PROGRESS_STATES = ['pending', 'sending', 'receiving'];
+
+        function formatDuration(item) {
+            const state = item.state || 'completed';
+            if (IN_PROGRESS_STATES.includes(state)) {
+                // Request not finished yet: show live elapsed time from start.
+                if (item.timestamp) {
+                    const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - Number(item.timestamp));
+                    return `${elapsed}s…`;
+                }
+                return '…';
+            }
+            return (item.duration !== null && item.duration !== undefined) ? `${item.duration}s` : '-';
+        }
+
         function syntaxHighlight(json) {
             if (typeof json !== 'string') {
                 json = JSON.stringify(json, null, 2);
@@ -721,8 +757,57 @@
                     `;
                     endpointBody.appendChild(row);
                 }
+
+                renderCounters(stats.counters || {});
             } catch (error) {
                 console.error('Failed to load stats:', error);
+            }
+        }
+
+        const COUNTER_LABELS = {
+            'ping_sent': 'Keepalive pings sent to clients',
+            'ping_received': 'Pings received from upstream',
+            'mod.system_prompt_remove': 'System prompt: text removed',
+            'mod.system_prompt_add': 'System prompt: text added',
+            'mod.billing_header_removal': 'System prompt: billing header removed',
+            'mod.tool_result_suffix_remove': 'Tool result suffix removed',
+            'mod.leaked_tool_call_recovery': 'Leaked tool calls recovered',
+            'mod.web_search_fallback': 'Web search fallback applied',
+            'mod.encrypted_content_removal': 'Encrypted content removed',
+            'mod.thinking_max_tokens_adjust': 'Thinking max_tokens adjusted',
+            'mod.thinking_protocol_translate': 'Thinking protocol translated',
+            'mod.model_name_mapping': 'Model name mapped',
+            'mod.orphaned_tool_cleanup': 'Orphaned tool results cleaned',
+            'mod.cache_control_scope_removal': 'cache_control scope removed',
+            'mod.effort_policy_filter': 'Effort policy dropped output_config',
+            'mod.unsupported_field_filter': 'Unsupported fields filtered',
+        };
+
+        function renderCounters(counters) {
+            const body = document.getElementById('counters-body');
+            if (!body) return;
+            body.innerHTML = '';
+            const keys = Object.keys(counters);
+            if (keys.length === 0) {
+                const row = document.createElement('tr');
+                row.innerHTML = '<td colspan="2" style="color:#888;">No activity recorded yet.</td>';
+                body.appendChild(row);
+                return;
+            }
+            // Pings first, then modifications, each alphabetized by label.
+            keys.sort((a, b) => {
+                const aPing = a.startsWith('ping_') ? 0 : 1;
+                const bPing = b.startsWith('ping_') ? 0 : 1;
+                if (aPing !== bPing) return aPing - bPing;
+                return (COUNTER_LABELS[a] || a).localeCompare(COUNTER_LABELS[b] || b);
+            });
+            for (const key of keys) {
+                const row = document.createElement('tr');
+                row.innerHTML = `
+                    <td>${COUNTER_LABELS[key] || key}</td>
+                    <td>${formatNumber(counters[key])}</td>
+                `;
+                body.appendChild(row);
             }
         }
 
@@ -767,7 +852,7 @@
                     row.onclick = () => showRequestDetails(item.id);
                     const state = item.state || 'completed';
                     const statusCode = item.status_code !== null ? item.status_code : '-';
-                    const duration = item.duration !== null ? `${item.duration}s` : '-';
+                    const duration = formatDuration(item);
 
                     // Show translated model if different
                     let modelDisplay = item.model;

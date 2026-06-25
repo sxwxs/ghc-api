@@ -87,5 +87,38 @@ class DashboardRequestTimestampTests(unittest.TestCase):
         self.assertIsInstance(list_data["items"][0]["timestamp"], int)
 
 
+class RequestDurationOnErrorTests(unittest.TestCase):
+    def test_error_state_records_duration_from_timestamp(self) -> None:
+        cache = RequestCache()
+        cache.start_request("req-err", {"model": "gpt-5", "endpoint": "/v1/messages"})
+        # Simulate the request having started 7 seconds ago.
+        cache.get_request("req-err")["timestamp"] -= 7
+
+        cache.update_request_state("req-err", RequestCache.STATE_ERROR, status_code=499)
+
+        item = cache.get_request("req-err")
+        self.assertEqual(item["state"], RequestCache.STATE_ERROR)
+        self.assertGreaterEqual(item["duration"], 7)
+
+    def test_caller_supplied_duration_is_not_overwritten(self) -> None:
+        cache = RequestCache()
+        cache.start_request("req-err2", {"model": "gpt-5", "endpoint": "/v1/messages"})
+        cache.get_request("req-err2")["timestamp"] -= 30
+
+        cache.update_request_state(
+            "req-err2", RequestCache.STATE_ERROR, status_code=504, duration=2.5
+        )
+
+        self.assertEqual(cache.get_request("req-err2")["duration"], 2.5)
+
+    def test_non_error_state_does_not_force_duration(self) -> None:
+        cache = RequestCache()
+        cache.start_request("req-ok", {"model": "gpt-5", "endpoint": "/v1/messages"})
+
+        cache.update_request_state("req-ok", RequestCache.STATE_RECEIVING)
+
+        self.assertEqual(cache.get_request("req-ok")["duration"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

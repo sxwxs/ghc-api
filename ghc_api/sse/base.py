@@ -25,6 +25,9 @@ import requests
 from flask import Response, stream_with_context
 
 from ..cache import cache
+from ..counters import counters
+from ..state import state
+from .keepalive import KEEPALIVE, iter_lines_with_keepalive
 
 
 class SSEStreamHandler:
@@ -134,6 +137,14 @@ class SSEStreamHandler:
         """Emit any pending events after the upstream iterator ends. Default: none."""
         return iter(())
 
+    def keepalive_event(self) -> str:
+        """SSE payload emitted to the client when the upstream stream has been
+        idle past ``state.sse_keepalive_interval``. Default: an SSE comment line,
+        which every SSE client ignores. Subclasses that need a protocol-specific
+        keepalive (e.g. Anthropic's ``ping`` event) override this.
+        """
+        return ": keepalive\n\n"
+
     def extra_cache_fields(self) -> Dict[str, Any]:
         """Extra keys for ``cache.complete_request``. Default: none."""
         return {}
@@ -217,7 +228,12 @@ class SSEStreamHandler:
             cache.update_request_state(self.request_id, cache.STATE_SENDING)
             sse_event_type = ""
 
-            for line in self.response.iter_lines():
+            for line in iter_lines_with_keepalive(self.response, state.sse_keepalive_interval):
+                if line is KEEPALIVE:
+                    counters.incr("ping_sent")
+                    yield self.keepalive_event()
+                    continue
+
                 if not line:
                     continue
 
@@ -225,6 +241,8 @@ class SSEStreamHandler:
 
                 if line.startswith("event: "):
                     sse_event_type = line[7:]
+                    if sse_event_type == "ping":
+                        counters.incr("ping_received")
                     if not self.emit_event_header:
                         # Pass the event header through verbatim and let the
                         # next ``data:`` line emit only the data part. Matches

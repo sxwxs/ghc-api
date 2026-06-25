@@ -15,7 +15,11 @@ def translate_model_name(model: str) -> str:
     - Prefix match: model name starts with the prefix
     """
     from .config import model_mappings
-    return model_mappings.translate(model)
+    from .counters import counters
+    result = model_mappings.translate(model)
+    if result != model:
+        counters.incr("mod.model_name_mapping")
+    return result
 
 
 def apply_system_prompt_filters(system_text: str) -> str:
@@ -25,11 +29,13 @@ def apply_system_prompt_filters(system_text: str) -> str:
     - Appends strings specified in system_prompt_add
     """
     from .state import state
+    from .counters import counters
 
     # Remove specified strings from system prompt
     for remove_str in state.system_prompt_remove:
         if remove_str in system_text:
             system_text = system_text.replace(remove_str, "")
+            counters.incr("mod.system_prompt_remove")
             print(f"[Content Filter] Removed from system prompt: {remove_str[:50]}{'...' if len(remove_str) > 50 else ''}")
 
     # Add specified strings to system prompt (only if not already present)
@@ -47,10 +53,12 @@ def apply_tool_result_suffix_filter(content: str) -> str:
     Only removes strings if they appear at the END of the content.
     """
     from .state import state
+    from .counters import counters
 
     for suffix in state.tool_result_suffix_remove:
         if content.endswith(suffix):
             content = content[:-len(suffix)]
+            counters.incr("mod.tool_result_suffix_remove")
             print(f"[Content Filter] Removed suffix from tool result: {suffix[:50]}{'...' if len(suffix) > 50 else ''}")
 
     return content
