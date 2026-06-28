@@ -495,6 +495,29 @@ sudo htpasswd -B /etc/nginx/ghc-api.htpasswd alice
 - **The two `Authorization` schemes don't conflict**: basic-auth lives in admin `location` blocks (`Authorization: Basic ...`), user tokens live in LLM `location` blocks (`Authorization: Bearer ...`). They never coexist on the same request.
 - **For local-only single-user use without nginx**, bind ghc-api to localhost so the admin endpoints aren't reachable from the network: `ghc-api --enable-auth -a 127.0.0.1`.
 
+## Testing
+
+Endpoint perf benchmarks are skipped by default so normal test runs stay fast.
+Run them explicitly with:
+
+```bash
+GHC_API_RUN_PERF_BENCHMARKS=1 python -m unittest discover -s tests -p 'test_perf_benchmark.py'
+```
+
+Optional controls:
+
+```bash
+GHC_API_RUN_PERF_BENCHMARKS=1 \
+GHC_API_PERF_ITERATIONS=2000 \
+GHC_API_PERF_WARMUP=100 \
+GHC_API_PERF_MAX_MEAN_MS=5 \
+GHC_API_PERF_MAX_P95_MS=10 \
+python -m unittest discover -s tests -p 'test_perf_benchmark.py'
+```
+
+The benchmark exercises `/v1/messages` and `/v1/responses` through the Flask
+test client with Copilot upstream calls mocked in memory.
+
 ## Architecture
 
 - **Modular Design**: Organized into separate modules for maintainability
