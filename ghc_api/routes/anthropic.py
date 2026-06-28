@@ -4,6 +4,7 @@ Anthropic-compatible API routes
 
 import copy
 import json
+import queue
 import time
 import uuid
 from typing import Dict, Generator, Any
@@ -27,7 +28,12 @@ from ..sse import (
     AnthropicDirectStreamHandler,
     AnthropicDirectStreamHandlerWithRecovery,
 )
-from ..sse.keepalive import KEEPALIVE, iter_lines_with_keepalive
+from ..sse.keepalive import (
+    BackgroundResult,
+    KEEPALIVE,
+    iter_lines_with_keepalive,
+    wait_result_with_keepalive,
+)
 from ..translator import (
     translate_anthropic_to_openai,
     translate_model_name,
@@ -219,6 +225,352 @@ def get_anthropic_headers(enable_vision: bool = False) -> Dict[str, str]:
     headers = get_copilot_headers(enable_vision)
     headers["anthropic-version"] = "2023-06-01"
     return headers
+
+
+def _direct_anthropic_stream_handler_cls():
+    return (
+        AnthropicDirectStreamHandlerWithRecovery
+        if state.enable_tool_call_recovery
+        else AnthropicDirectStreamHandler
+    )
+
+
+def _start_direct_anthropic_post(headers: Dict, payload: Dict, stream: bool):
+    return BackgroundResult(lambda: requests.post(
+        f"{get_copilot_base_url()}/v1/messages",
+        headers=headers,
+        json=payload,
+        timeout=state.upstream_read_timeout,
+        stream=stream,
+    ))
+
+
+def _anthropic_ping_event() -> str:
+    return 'event: ping\ndata: {"type": "ping"}\n\n'
+
+
+def _parse_response_body(response: requests.Response):
+    try:
+        return response.json()
+    except Exception:
+        return response.text
+
+
+def _anthropic_error_event(response_body, status_code: int) -> str:
+    if isinstance(response_body, dict):
+        if response_body.get("type") == "error" and isinstance(response_body.get("error"), dict):
+            event = response_body
+        elif isinstance(response_body.get("error"), dict):
+            event = {"type": "error", "error": response_body["error"]}
+        else:
+            event = {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": json.dumps(response_body),
+                },
+            }
+    else:
+        event = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": str(response_body) or f"Upstream returned HTTP {status_code}",
+            },
+        }
+    return f"event: error\ndata: {json.dumps(event)}\n\n"
+
+
+def _complete_direct_anthropic_stream_cache(
+    request_id: str,
+    request_body: Dict,
+    response_body,
+    status_code: int,
+    request_size: int,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    user_id: str,
+) -> None:
+    duration = round(time.time() - start_time, 2)
+    cache.complete_request(request_id, {
+        "request_body": request_body,
+        "response_body": response_body,
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
+        "endpoint": "/v1/messages",
+        "status_code": status_code,
+        "request_size": request_size,
+        "response_size": len(json.dumps(response_body)),
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "duration": duration,
+        "user_id": user_id,
+    })
+
+
+def _wait_anthropic_response_with_ping(pending_response, emit_initial_ping: bool = False):
+    if emit_initial_ping:
+        counters.incr("ping_sent")
+        yield _anthropic_ping_event()
+
+    result_iter = wait_result_with_keepalive(
+        pending_response,
+        state.sse_keepalive_interval,
+    )
+    while True:
+        try:
+            item = next(result_iter)
+        except StopIteration as stop:
+            return stop.value
+        if item is KEEPALIVE:
+            counters.incr("ping_sent")
+            yield _anthropic_ping_event()
+
+
+def _stream_pending_direct_anthropic_request(
+    pending_response,
+    headers: Dict,
+    anthropic_payload: Dict,
+    current_payload: Dict,
+    filtered_payload: Dict,
+    filtered_request_size: int,
+    request_id: str,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    original_request_body: Dict = None,
+    request_headers: Dict = None,
+    client_ip: str = None,
+    user_id: str = "anonymous",
+    cleanup_log_entry=None,
+    attempt: int = 0,
+    conn_attempt: int = 0,
+) -> Response:
+    """Continue a direct Anthropic stream after the first upstream call idles.
+
+    The route has already waited one keepalive interval for response headers.
+    Returning this ``Response`` commits to SSE semantics and keeps the client
+    alive while the upstream response object is still pending.
+    """
+    cache.start_request(request_id, {
+        "request_headers": request_headers,
+        "client_ip": client_ip,
+        "original_request_body": original_request_body,
+        "request_body": filtered_payload,
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
+        "endpoint": "/v1/messages",
+        "request_size": filtered_request_size,
+        "user_id": user_id,
+    })
+
+    def generate() -> Generator[str, None, None]:
+        nonlocal cleanup_log_entry
+        active_payload = current_payload
+        active_filtered_payload = filtered_payload
+        active_request_size = filtered_request_size
+        active_pending = pending_response
+        last_response = None
+        last_response_body = None
+
+        try:
+            cache.update_request_state(request_id, cache.STATE_SENDING)
+
+            max_retries = 3
+            for active_attempt in range(attempt, max_retries + 1):
+                if active_attempt != attempt:
+                    active_filtered_payload = filter_payload_for_copilot(active_payload)
+                    active_filtered_payload = adjust_max_tokens_for_thinking(active_filtered_payload)
+                    active_request_size = len(json.dumps(active_filtered_payload))
+                    cache.update_request_state(
+                        request_id,
+                        cache.STATE_SENDING,
+                        request_body=active_filtered_payload,
+                        request_size=active_request_size,
+                    )
+                    active_pending = None
+
+                connection_retries = state.max_connection_retries
+                first_conn_attempt = conn_attempt if active_attempt == attempt else 0
+                last_connection_error = None
+
+                for active_conn_attempt in range(first_conn_attempt, connection_retries + 1):
+                    try:
+                        if active_pending is None:
+                            active_pending = _start_direct_anthropic_post(
+                                headers,
+                                active_filtered_payload,
+                                stream=True,
+                            )
+                            response = yield from _wait_anthropic_response_with_ping(active_pending)
+                        else:
+                            response = yield from _wait_anthropic_response_with_ping(
+                                active_pending,
+                                emit_initial_ping=True,
+                            )
+                        active_pending = None
+
+                        if response.ok:
+                            handler_cls = _direct_anthropic_stream_handler_cls()
+                            handler = handler_cls(
+                                response=response,
+                                request_id=request_id,
+                                request_size=active_request_size,
+                                start_time=start_time,
+                                original_model=original_model,
+                                translated_model=translated_model,
+                                request_body_for_cache=active_filtered_payload,
+                                original_request_body=original_request_body,
+                                request_headers=request_headers,
+                                client_ip=client_ip,
+                                user_id=user_id,
+                            )
+                            handler._cache_seeded = True
+                            yield from handler._generate()
+                            return
+
+                        last_connection_error = None
+                        break
+                    except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                        active_pending = None
+                        last_connection_error = e
+                        log_connection_retry(request_id, "/v1/messages", active_conn_attempt, connection_retries, e)
+                        ensure_copilot_token()
+                        if active_conn_attempt < connection_retries:
+                            print(f"[Direct Anthropic] Connection error (attempt {active_conn_attempt + 1}/{connection_retries + 1}) for request {request_id}: {type(e).__name__}: {e}")
+                            time.sleep(min(2 ** active_conn_attempt, 8))
+                            continue
+                        print(f"[Direct Anthropic] Connection error (final attempt) for request {request_id}: {type(e).__name__}: {e}")
+
+                if last_connection_error is not None:
+                    last_response_body = {
+                        "type": "error",
+                        "error": {
+                            "type": "api_error",
+                            "message": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}",
+                        },
+                    }
+                    _complete_direct_anthropic_stream_cache(
+                        request_id,
+                        active_filtered_payload,
+                        last_response_body,
+                        504,
+                        active_request_size,
+                        start_time,
+                        original_model,
+                        translated_model,
+                        user_id,
+                    )
+                    yield _anthropic_error_event(last_response_body, 504)
+                    return
+
+                last_response = response
+                response_text = response.text
+                log_error_request("/v1/messages", active_payload, response_text, response.status_code, client_ip)
+                last_response_body = _parse_response_body(response)
+
+                if (state.enable_web_search_proxy and
+                        has_web_search_tool(active_payload) and
+                        is_web_search_unsupported_error(response.status_code, response_text)):
+                    print(f"[Direct Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
+                    active_payload = apply_web_search_fallback(active_payload, state.web_search_proxy_endpoint)
+                    continue
+
+                if is_orphaned_tool_result_error(response.status_code, response_text):
+                    orphaned_ids = extract_orphaned_tool_use_ids(response_text)
+                    if orphaned_ids:
+                        print(f"[Direct Anthropic] Attempt {active_attempt + 1}: Found orphaned tool_result IDs: {orphaned_ids}")
+
+                        if cleanup_log_entry is None:
+                            cleanup_log_entry = {
+                                "request_id": request_id,
+                                "original_request": anthropic_payload,
+                                "error_response": response_text,
+                                "error_status_code": response.status_code,
+                                "orphaned_ids": orphaned_ids,
+                            }
+                        else:
+                            cleanup_log_entry["orphaned_ids"].extend(orphaned_ids)
+
+                        cleaned_messages = remove_orphaned_tool_results(
+                            active_payload.get("messages", []), orphaned_ids
+                        )
+                        active_payload = dict(active_payload)
+                        active_payload["messages"] = cleaned_messages
+                        print(f"[Direct Anthropic] Retrying with cleaned messages...")
+                        continue
+
+                _complete_direct_anthropic_stream_cache(
+                    request_id,
+                    active_filtered_payload,
+                    last_response_body,
+                    response.status_code,
+                    active_request_size,
+                    start_time,
+                    original_model,
+                    translated_model,
+                    user_id,
+                )
+                yield _anthropic_error_event(last_response_body, response.status_code)
+                return
+
+            if cleanup_log_entry is not None and last_response is not None:
+                cleanup_log_entry["modified_request"] = active_payload
+                cleanup_log_entry["final_status_code"] = last_response.status_code
+                cleanup_log_entry["final_response"] = last_response.text
+                log_tool_result_cleanup(cleanup_log_entry)
+
+            if last_response is not None:
+                _complete_direct_anthropic_stream_cache(
+                    request_id,
+                    active_filtered_payload,
+                    last_response_body,
+                    last_response.status_code,
+                    active_request_size,
+                    start_time,
+                    original_model,
+                    translated_model,
+                    user_id,
+                )
+                yield _anthropic_error_event(last_response_body, last_response.status_code)
+                return
+
+        except GeneratorExit:
+            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+            return
+        except Exception as e:
+            print(f"[Direct Anthropic] Error while waiting for upstream stream for request {request_id}: {type(e).__name__}: {e}")
+            response_body = {
+                "type": "error",
+                "error": {"type": "api_error", "message": str(e)},
+            }
+            _complete_direct_anthropic_stream_cache(
+                request_id,
+                active_filtered_payload,
+                response_body,
+                500,
+                active_request_size,
+                start_time,
+                original_model,
+                translated_model,
+                user_id,
+            )
+            try:
+                yield _anthropic_error_event(response_body, 500)
+            except GeneratorExit:
+                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+                return
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def apply_system_prompt_filters_to_payload(payload: Dict) -> Dict:
@@ -531,19 +883,44 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
         use_streaming = filtered_payload.get("stream")
         for conn_attempt in range(connection_retries + 1):
             try:
-                response = requests.post(
-                    f"{get_copilot_base_url()}/v1/messages",
-                    headers=headers,
-                    json=filtered_payload,
-                    timeout=state.upstream_read_timeout,
-                    stream=use_streaming
-                )
-                if use_streaming and response.ok:
-                    handler_cls = (
-                        AnthropicDirectStreamHandlerWithRecovery
-                        if state.enable_tool_call_recovery
-                        else AnthropicDirectStreamHandler
+                if use_streaming and state.sse_keepalive_interval > 0:
+                    pending_response = _start_direct_anthropic_post(
+                        headers,
+                        filtered_payload,
+                        stream=True,
                     )
+                    try:
+                        response = pending_response.get(timeout=state.sse_keepalive_interval)
+                    except queue.Empty:
+                        return _stream_pending_direct_anthropic_request(
+                            pending_response=pending_response,
+                            headers=headers,
+                            anthropic_payload=anthropic_payload,
+                            current_payload=current_payload,
+                            filtered_payload=filtered_payload,
+                            filtered_request_size=filtered_request_size,
+                            request_id=request_id,
+                            start_time=start_time,
+                            original_model=original_model,
+                            translated_model=translated_model,
+                            original_request_body=original_request_body,
+                            request_headers=request_headers,
+                            client_ip=client_ip,
+                            user_id=user_id,
+                            cleanup_log_entry=cleanup_log_entry,
+                            attempt=attempt,
+                            conn_attempt=conn_attempt,
+                        )
+                else:
+                    response = requests.post(
+                        f"{get_copilot_base_url()}/v1/messages",
+                        headers=headers,
+                        json=filtered_payload,
+                        timeout=state.upstream_read_timeout,
+                        stream=use_streaming
+                    )
+                if use_streaming and response.ok:
+                    handler_cls = _direct_anthropic_stream_handler_cls()
                     return handler_cls(
                         response=response,
                         request_id=request_id,
@@ -849,13 +1226,14 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             # Update state to sending
             cache.update_request_state(request_id, cache.STATE_SENDING)
 
-            response = requests.post(
+            pending_response = BackgroundResult(lambda: requests.post(
                 f"{get_copilot_base_url()}/chat/completions",
                 headers=headers,
                 json=openai_payload,
                 stream=True,
                 timeout=state.upstream_read_timeout,
-            )
+            ))
+            response = yield from _wait_anthropic_response_with_ping(pending_response)
             status_code = response.status_code
 
             # Handle web search unsupported error before streaming begins
@@ -874,13 +1252,14 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                     request_body=new_openai_payload,
                     request_size=final_request_size,
                 )
-                response = requests.post(
+                pending_response = BackgroundResult(lambda: requests.post(
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
                     json=new_openai_payload,
                     stream=True,
                     timeout=state.upstream_read_timeout,
-                )
+                ))
+                response = yield from _wait_anthropic_response_with_ping(pending_response)
                 status_code = response.status_code
 
             for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):

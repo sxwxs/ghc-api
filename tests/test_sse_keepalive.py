@@ -11,7 +11,12 @@ import unittest
 
 import requests
 
-from ghc_api.sse.keepalive import KEEPALIVE, iter_lines_with_keepalive
+from ghc_api.sse.keepalive import (
+    BackgroundResult,
+    KEEPALIVE,
+    iter_lines_with_keepalive,
+    wait_result_with_keepalive,
+)
 
 
 class _SlowResponse:
@@ -44,6 +49,14 @@ class _RaisingResponse:
 
 
 class KeepaliveTest(unittest.TestCase):
+    def _drain_with_return(self, gen):
+        out = []
+        while True:
+            try:
+                out.append(next(gen))
+            except StopIteration as stop:
+                return out, stop.value
+
     def test_idle_stream_yields_keepalive_before_real_line(self):
         # Line arrives after 0.3s but the keepalive interval is 0.1s, so at least
         # one KEEPALIVE must be emitted before the real line.
@@ -84,6 +97,36 @@ class KeepaliveTest(unittest.TestCase):
         # Give the daemon thread a moment to wind down after the sentinel.
         time.sleep(0.05)
         self.assertLessEqual(threading.active_count(), before + 1)
+
+    def test_background_result_yields_keepalive_until_result_is_ready(self):
+        def slow_result():
+            time.sleep(0.25)
+            return "ready"
+
+        pending = BackgroundResult(slow_result)
+        out, result = self._drain_with_return(
+            wait_result_with_keepalive(pending, interval=0.1)
+        )
+
+        self.assertIn(KEEPALIVE, out)
+        self.assertEqual(result, "ready")
+
+    def test_background_result_returns_without_keepalive_when_ready_fast(self):
+        pending = BackgroundResult(lambda: "ready")
+        out, result = self._drain_with_return(
+            wait_result_with_keepalive(pending, interval=5)
+        )
+
+        self.assertEqual(out, [])
+        self.assertEqual(result, "ready")
+
+    def test_background_result_reraises_exception_in_consumer(self):
+        pending = BackgroundResult(lambda: (_ for _ in ()).throw(
+            requests.exceptions.ConnectionError("boom")
+        ))
+
+        with self.assertRaises(requests.exceptions.ConnectionError):
+            list(wait_result_with_keepalive(pending, interval=5))
 
 
 if __name__ == "__main__":

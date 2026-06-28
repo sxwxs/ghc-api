@@ -22,6 +22,52 @@ KEEPALIVE = object()
 _SENTINEL = object()
 
 
+class BackgroundResult:
+    """Run a blocking operation on a daemon thread and expose its result.
+
+    This is used before an upstream SSE response object exists: the foreground
+    generator can wait with a timeout and emit a client keepalive only when the
+    upstream call has made no progress.
+    """
+
+    def __init__(self, fn):
+        self._q: "queue.Queue" = queue.Queue(maxsize=1)
+
+        def _runner():
+            try:
+                self._q.put((False, fn()))
+            except Exception as exc:  # propagate to the consumer thread
+                self._q.put((True, exc))
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def get(self, timeout=None):
+        is_exc, item = self._q.get(timeout=timeout)
+        if is_exc:
+            raise item
+        return item
+
+
+def wait_result_with_keepalive(pending_result, interval):
+    """Return a background result; yield ``KEEPALIVE`` while it is idle.
+
+    This covers the phase before ``requests.post(..., stream=True)`` has
+    returned response headers. Once the response object exists,
+    ``iter_lines_with_keepalive`` covers idle gaps in the SSE body.
+    """
+    if not interval or interval <= 0:
+        result = pending_result.get()
+        if False:
+            yield KEEPALIVE
+        return result
+
+    while True:
+        try:
+            return pending_result.get(timeout=interval)
+        except queue.Empty:
+            yield KEEPALIVE
+
+
 def iter_lines_with_keepalive(response, interval):
     """Yield raw lines from ``response.iter_lines()``; yield ``KEEPALIVE`` when
     the stream has been idle for more than ``interval`` seconds.
