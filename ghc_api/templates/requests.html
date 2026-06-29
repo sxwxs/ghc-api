@@ -1062,6 +1062,20 @@
             return labels[state] || state || 'Unknown';
         }
 
+        const IN_PROGRESS_STATES = ['pending', 'sending', 'receiving'];
+
+        function formatDuration(item) {
+            const state = item.state || 'completed';
+            if (IN_PROGRESS_STATES.includes(state)) {
+                if (item.timestamp) {
+                    const elapsed = Math.max(0, Math.floor(Date.now() / 1000) - Number(item.timestamp));
+                    return `${elapsed}s…`;
+                }
+                return '…';
+            }
+            return (item.duration !== null && item.duration !== undefined) ? `${item.duration}s` : '-';
+        }
+
         function escapeHtml(text) {
             const div = document.createElement('div');
             div.textContent = text;
@@ -1671,7 +1685,7 @@
                     for (const item of data.items) {
                         const state = item.state || 'completed';
                         const isSelected = item.id === selectedRequestId;
-                        const duration = item.duration !== null ? `${item.duration}s` : '-';
+                        const duration = formatDuration(item);
                         const requestDate = formatRequestDate(item.timestamp);
                         const timestamp = requestDate.toLocaleTimeString();
                         const date = requestDate.toLocaleDateString();

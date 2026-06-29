@@ -403,6 +403,9 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
             def iter_lines(self):
                 yield b'data: {"type":"response.failed","response":{"error":{"message":"model failed"}}}'
 
+            def close(self):
+                pass
+
         app = create_app()
 
         with app.test_request_context("/v1/chat/completions"):
@@ -435,6 +438,9 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
                 yield b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"location"}'
                 yield b'data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"\\":\\"SF\\"}"}'
                 yield b'data: {"type":"response.completed","response":{"id":"resp-1","output":[{"type":"function_call","call_id":"call-1","name":"get_weather","arguments":"{\\"location\\":\\"SF\\"}"}],"usage":{"input_tokens":5,"output_tokens":3,"total_tokens":8}}}'
+
+            def close(self):
+                pass
 
         app = create_app()
 
@@ -487,6 +493,9 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
                 yield b'data: {"type":"response.output_text.delta","delta":"Hello"}'
                 yield b'data: {"type":"response.completed","response":{"id":"resp-1","output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}}'
 
+            def close(self):
+                pass
+
         app = create_app()
 
         with app.test_request_context("/v1/chat/completions"):
@@ -526,6 +535,9 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
                 yield b'data: {"choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"function":{"arguments":"{\\"location\\":\\"SF\\"}"},"index":2,"type":"function"}]}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
                 yield b'data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{"content":null}}],"created":1,"id":"chat-1","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},"model":"claude-sonnet-4.6"}'
                 yield b"data: [DONE]"
+
+            def close(self):
+                pass
 
         app = create_app()
 

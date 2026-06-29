@@ -91,6 +91,10 @@ def main():
         # Load retry settings
         if 'max_connection_retries' in config:
             state.max_connection_retries = config['max_connection_retries']
+        if 'upstream_read_timeout' in config:
+            state.upstream_read_timeout = int(config['upstream_read_timeout'])
+        if 'sse_keepalive_interval' in config:
+            state.sse_keepalive_interval = int(config['sse_keepalive_interval'])
         if 'auto_remove_encrypted_content_on_parse_error' in config:
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
         if 'save_request_to_file' in config:

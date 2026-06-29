@@ -397,6 +397,8 @@ class LeakedToolCallTransformer:
         return events
 
     def _emit_tool_use(self, name: Optional[str], input_obj: Dict) -> List[Emission]:
+        from .counters import counters
+        counters.incr("mod.leaked_tool_call_recovery")
         tool_index = self._next_index()
         tool_id = "toolu_" + uuid.uuid4().hex
         self._block_had_recovery = True

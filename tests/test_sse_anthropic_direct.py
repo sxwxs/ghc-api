@@ -30,6 +30,9 @@ class _FakeResponse:
         for line in self._lines:
             yield line
 
+    def close(self):
+        pass
+
 
 class RecoveryClassIsolationTest(unittest.TestCase):
     """When the route picks the base class (recovery toggle off), the

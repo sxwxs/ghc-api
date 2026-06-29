@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from flask import Blueprint, Response, jsonify, render_template, request
 
 from ..cache import cache
+from ..counters import counters
 from ..config import chat_completions_model_support, model_mappings
 from ..config_sync import (
     get_software_versions,
@@ -37,6 +38,8 @@ def _runtime_config() -> Dict[str, Any]:
         "tool_result_suffix_remove": state.tool_result_suffix_remove,
         "system_prompt_add": state.system_prompt_add,
         "max_connection_retries": state.max_connection_retries,
+        "upstream_read_timeout": state.upstream_read_timeout,
+        "sse_keepalive_interval": state.sse_keepalive_interval,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
         "save_request_to_file": state.save_request_to_file,
         "disable_onedrive_access": state.disable_onedrive_access,
@@ -131,6 +134,8 @@ def api_runtime_config_update():
         "tool_result_suffix_remove",
         "system_prompt_add",
         "max_connection_retries",
+        "upstream_read_timeout",
+        "sse_keepalive_interval",
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
         "disable_onedrive_access",
@@ -177,6 +182,18 @@ def api_runtime_config_update():
             if not isinstance(retries, int) or retries < 0:
                 raise ValueError("'max_connection_retries' must be an integer >= 0")
             state.max_connection_retries = retries
+
+        if "upstream_read_timeout" in payload:
+            timeout = payload["upstream_read_timeout"]
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout < 0:
+                raise ValueError("'upstream_read_timeout' must be an integer >= 0")
+            state.upstream_read_timeout = timeout
+
+        if "sse_keepalive_interval" in payload:
+            interval = payload["sse_keepalive_interval"]
+            if not isinstance(interval, int) or isinstance(interval, bool) or interval < 0:
+                raise ValueError("'sse_keepalive_interval' must be an integer >= 0")
+            state.sse_keepalive_interval = interval
 
         if "auto_remove_encrypted_content_on_parse_error" in payload:
             flag = payload["auto_remove_encrypted_content_on_parse_error"]
@@ -282,7 +299,9 @@ def api_config_manager_software_versions():
 @dashboard_bp.route("/api/stats", methods=["GET"])
 def api_stats():
     """Get API statistics, optionally filtered to a single user via ?user=<id>."""
-    return jsonify(cache.get_stats(user_id=_user_filter_from_request()))
+    stats = cache.get_stats(user_id=_user_filter_from_request())
+    stats["counters"] = counters.snapshot()
+    return jsonify(stats)
 
 
 @dashboard_bp.route("/api/users-list", methods=["GET"])

@@ -233,6 +233,8 @@ def remove_orphaned_tool_results(messages: List[Dict], orphaned_ids: List[str]) 
     if not orphaned_ids:
         return messages
 
+    from .counters import counters
+    counters.incr("mod.orphaned_tool_cleanup")
     orphaned_set = set(orphaned_ids)
     cleaned_messages = []
 

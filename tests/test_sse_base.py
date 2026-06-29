@@ -31,6 +31,9 @@ class _FakeResponse:
                 raise line
             yield line
 
+    def close(self):
+        pass
+
 
 def _collect(generator):
     """Drain a generator into a list."""
@@ -202,6 +205,53 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
         self.assertEqual(entry["input_tokens"], 12)
         self.assertEqual(entry["output_tokens"], 4)
         self.assertEqual(entry["cache_creation_input_tokens"], 2)
+
+
+class SSEKeepaliveIntegrationTest(unittest.TestCase):
+    """The base handler must translate an idle stream into a client keepalive.
+    AnthropicDirectStreamHandler emits an Anthropic ``ping`` event."""
+
+    def setUp(self) -> None:
+        self.cache = RequestCache()
+        self._cache_patch = mock.patch.object(base_module, "cache", self.cache)
+        self._cache_patch.start()
+
+    def tearDown(self) -> None:
+        self._cache_patch.stop()
+
+    def test_idle_stream_emits_anthropic_ping(self):
+        import time as _time
+
+        message_start = json.dumps({"type": "message_start", "message": {"usage": {}}})
+
+        class _SlowResponse:
+            status_code = 200
+            ok = True
+            text = ""
+
+            def iter_lines(self):
+                # Idle long enough to trip the 0.1s keepalive before the line.
+                _time.sleep(0.25)
+                yield f"data: {message_start}".encode()
+                yield b"data: [DONE]"
+
+            def close(self):
+                pass
+
+        handler = AnthropicDirectStreamHandler(
+            response=_SlowResponse(),
+            request_id="req-ka",
+            request_size=10,
+            start_time=0.0,
+            original_model="claude-opus-4",
+            translated_model="claude-opus-4",
+            request_body_for_cache={"model": "claude-opus-4"},
+        )
+        with mock.patch.object(base_module.state, "sse_keepalive_interval", 0.1):
+            out = "".join(_collect(handler._generate()))
+        self.assertIn('event: ping\ndata: {"type": "ping"}\n\n', out)
+        # The real event still comes through after the ping.
+        self.assertIn(f"data: {message_start}\n", out)
 
 
 if __name__ == "__main__":

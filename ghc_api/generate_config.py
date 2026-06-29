@@ -124,6 +124,18 @@ system_prompt_add: []
 # ReadTimeout). Set to 0 to disable retries.
 max_connection_retries: 3
 
+# Read timeout (in seconds) for each upstream request to GitHub Copilot. If the upstream
+# sends no data for this long, the request is aborted.
+upstream_read_timeout: 1800
+
+# SSE Keepalive
+# -------------
+# When a streaming response is idle (no data from upstream) for this many seconds,
+# the proxy sends a keepalive ping to the client so its read timeout does not fire.
+# This is what keeps clients like Claude Code connected while the model "thinks"
+# before emitting the first token. Set to 0 to disable keepalive.
+sse_keepalive_interval: 30
+
 # If true, when /v1/responses gets HTTP 400 with message that starts with
 # "The encrypted content" and ends with
 # "Reason: Encrypted content could not be decrypted or parsed.",

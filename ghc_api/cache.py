@@ -127,10 +127,19 @@ class RequestCache:
         """Update the state and optional fields of an existing request"""
         with self.lock:
             if request_id in self.cache:
-                self.cache[request_id]["state"] = state
+                entry = self.cache[request_id]
+                entry["state"] = state
                 for key, value in kwargs.items():
-                    if key in self.cache[request_id]:
-                        self.cache[request_id][key] = value
+                    if key in entry:
+                        entry[key] = value
+                # Failed/errored requests often never reach complete_request (the
+                # streaming generators return early on disconnect/timeout), leaving
+                # duration at 0. Record elapsed time here so the UI can show it,
+                # unless the caller already supplied a duration.
+                if state == self.STATE_ERROR and "duration" not in kwargs and not entry.get("duration"):
+                    started = entry.get("timestamp")
+                    if started:
+                        entry["duration"] = max(0, self._current_timestamp() - started)
 
     def complete_request(self, request_id: str, data: Dict) -> None:
         """Complete a request with response data and update statistics"""

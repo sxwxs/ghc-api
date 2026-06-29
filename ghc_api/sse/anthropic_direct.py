@@ -41,6 +41,11 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         # when ``message_start`` arrives.
         self.accumulated_model: str = self.original_model
 
+    def keepalive_event(self) -> str:
+        # Anthropic's real API sends ``ping`` events as keepalive; clients like
+        # Claude Code already tolerate them. Match that shape exactly.
+        return 'event: ping\ndata: {"type": "ping"}\n\n'
+
     def on_event(self, event_type: str, event: Dict) -> None:
         if event_type == "message_start":
             msg = event.get("message", {}) or {}
