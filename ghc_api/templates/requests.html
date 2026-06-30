@@ -1710,6 +1710,10 @@
                                     <span>Duration: ${duration}</span>
                                     <span>In: ${formatNumber(item.input_tokens + (item.cache_creation_input_tokens || 0) + (item.cache_read_input_tokens || 0))}${item.cache_creation_input_tokens ? ` / Cache+: ${formatNumber(item.cache_creation_input_tokens)}` : ''}${item.cache_read_input_tokens ? ` / Cache: ${formatNumber(item.cache_read_input_tokens)}` : ''} / Out: ${formatNumber(item.output_tokens)}</span>
                                 </div>
+                                <div class="request-item-stats">
+                                    <span>User: ${escapeHtml(item.user_id || 'anonymous')}</span>
+                                    <span>IP: ${escapeHtml(item.client_ip || 'unknown')}</span>
+                                </div>
                             </div>
                         `;
                     }
@@ -1906,6 +1910,14 @@
                 <div class="overview-item">
                     <label>Endpoint</label>
                     <div class="value">${data.endpoint}</div>
+                </div>
+                <div class="overview-item">
+                    <label>User</label>
+                    <div class="value">${escapeHtml(data.user_id || 'anonymous')}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Client IP</label>
+                    <div class="value">${escapeHtml(data.client_ip || 'unknown')}</div>
                 </div>
                 <div class="overview-item">
                     <label>Status Code</label>

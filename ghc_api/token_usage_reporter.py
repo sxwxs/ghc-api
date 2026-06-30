@@ -73,9 +73,14 @@ class TokenUsageReporter:
             delta_request_count = max(0, int(now.get("request_count", 0)) - int(prev.get("request_count", 0)))
             delta_input = max(0, int(now.get("input_tokens", 0)) - int(prev.get("input_tokens", 0)))
             delta_output = max(0, int(now.get("output_tokens", 0)) - int(prev.get("output_tokens", 0)))
+            delta_cache_create = max(0, int(now.get("cache_creation_input_tokens", 0)) - int(prev.get("cache_creation_input_tokens", 0)))
+            delta_cache_read = max(0, int(now.get("cache_read_input_tokens", 0)) - int(prev.get("cache_read_input_tokens", 0)))
             delta_bytes_sent = max(0, int(now.get("bytes_sent", 0)) - int(prev.get("bytes_sent", 0)))
             delta_bytes_received = max(0, int(now.get("bytes_received", 0)) - int(prev.get("bytes_received", 0)))
-            delta_total = delta_input + delta_output
+            # total_tokens reflects full token processing: uncached input + newly-cached + cache-read + output.
+            # Anthropic's `input_tokens` alone is the uncached-new slice; when prompt caching is active the
+            # real prompt size is the sum of the three input components.
+            delta_total = delta_input + delta_cache_create + delta_cache_read + delta_output
             delta_total_data = delta_bytes_sent + delta_bytes_received
             if delta_total == 0 and delta_total_data == 0 and delta_request_count == 0:
                 continue
@@ -84,6 +89,8 @@ class TokenUsageReporter:
                 "model": model_name,
                 "request_count": delta_request_count,
                 "input_tokens": delta_input,
+                "cache_creation_input_tokens": delta_cache_create,
+                "cache_read_input_tokens": delta_cache_read,
                 "output_tokens": delta_output,
                 "total_tokens": delta_total,
                 "data_sent": delta_bytes_sent,
@@ -318,6 +325,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
                             aggregate[key] = {
                                 "request_count": 0,
                                 "input_tokens": 0,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
                                 "data_sent": 0,
@@ -329,6 +338,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
                             user_aggregate[user_key] = {
                                 "request_count": 0,
                                 "input_tokens": 0,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": 0,
                                 "output_tokens": 0,
                                 "total_tokens": 0,
                                 "data_sent": 0,
@@ -338,7 +349,12 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
                         req_count = int(model_usage.get("request_count", 0) or 0)
                         input_tokens = int(model_usage.get("input_tokens", 0) or 0)
                         output_tokens = int(model_usage.get("output_tokens", 0) or 0)
-                        total_tokens = int(model_usage.get("total_tokens", input_tokens + output_tokens) or 0)
+                        cache_creation = int(model_usage.get("cache_creation_input_tokens", 0) or 0)
+                        cache_read = int(model_usage.get("cache_read_input_tokens", 0) or 0)
+                        # Old JSONL rows (pre-cache-tracking) stored total_tokens = input + output.
+                        # New rows include cache tokens in total_tokens. Recompute on read so old and
+                        # new rows aggregate consistently regardless of how they were originally written.
+                        total_tokens = input_tokens + cache_creation + cache_read + output_tokens
                         data_sent = int(model_usage.get("data_sent", model_usage.get("bytes_sent", 0)) or 0)
                         data_received = int(model_usage.get("data_received", model_usage.get("bytes_received", 0)) or 0)
                         total_data = int(model_usage.get("total_data", data_sent + data_received) or 0)
@@ -346,6 +362,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
                         for target in (aggregate[key], user_aggregate[user_key]):
                             target["request_count"] += req_count
                             target["input_tokens"] += input_tokens
+                            target["cache_creation_input_tokens"] += cache_creation
+                            target["cache_read_input_tokens"] += cache_read
                             target["output_tokens"] += output_tokens
                             target["total_tokens"] += total_tokens
                             target["data_sent"] += data_sent
@@ -363,6 +381,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
     totals = {
         "request_count": 0,
         "input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
         "data_sent": 0,
@@ -376,6 +396,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
             "model_id": model_id,
             "request_count": stats["request_count"],
             "input_tokens": stats["input_tokens"],
+            "cache_creation_input_tokens": stats["cache_creation_input_tokens"],
+            "cache_read_input_tokens": stats["cache_read_input_tokens"],
             "output_tokens": stats["output_tokens"],
             "total_tokens": stats["total_tokens"],
             "data_sent": stats["data_sent"],
@@ -385,6 +407,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
         rows.append(row)
         totals["request_count"] += row["request_count"]
         totals["input_tokens"] += row["input_tokens"]
+        totals["cache_creation_input_tokens"] += row["cache_creation_input_tokens"]
+        totals["cache_read_input_tokens"] += row["cache_read_input_tokens"]
         totals["output_tokens"] += row["output_tokens"]
         totals["total_tokens"] += row["total_tokens"]
         totals["data_sent"] += row["data_sent"]
@@ -401,6 +425,8 @@ def get_token_usage_overview(range_key: str = "all", user_filter: str | None = N
             "model_id": model_id,
             "request_count": stats["request_count"],
             "input_tokens": stats["input_tokens"],
+            "cache_creation_input_tokens": stats["cache_creation_input_tokens"],
+            "cache_read_input_tokens": stats["cache_read_input_tokens"],
             "output_tokens": stats["output_tokens"],
             "total_tokens": stats["total_tokens"],
             "data_sent": stats["data_sent"],
