@@ -11,11 +11,17 @@ from .state import state
 
 
 def get_client_ip(request) -> str:
-    """Extract the client IP from a Flask request, honoring common proxy headers."""
+    """Extract the client IP from a Flask request, honoring common proxy headers.
+
+    X-Forwarded-For is preferred, but a second proxy layer can overwrite it with a
+    loopback address (e.g. nginx using $remote_addr). When XFF is loopback, fall
+    back to X-Real-IP, which carries the genuine client address in that setup.
+    """
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
-        # X-Forwarded-For may contain a comma-separated list; the first entry is the client.
-        return forwarded_for.split(",")[0].strip()
+        client = forwarded_for.split(",")[0].strip()
+        if client and not client.startswith("127."):
+            return client
     real_ip = request.headers.get("X-Real-IP")
     if real_ip:
         return real_ip.strip()
