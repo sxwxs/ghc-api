@@ -8,6 +8,7 @@ from typing import Any, Dict, List
 
 from flask import Blueprint, Response, jsonify, render_template, request
 
+from ..anthropic_responses import VALID_MODES, WIRE_PROFILES
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support, model_mappings
@@ -44,6 +45,18 @@ def _runtime_config() -> Dict[str, Any]:
         "save_request_to_file": state.save_request_to_file,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
+        "anthropic_responses_compat_enabled": state.anthropic_responses_compat_enabled,
+        "anthropic_responses_compat_mode": state.anthropic_responses_compat_mode,
+        "anthropic_responses_wire_profile": state.anthropic_responses_wire_profile,
+        "anthropic_responses_model_profiles": state.anthropic_responses_model_profiles,
+        "anthropic_responses_replay_path": state.anthropic_responses_replay_path,
+        "anthropic_responses_replay_ttl_seconds": state.anthropic_responses_replay_ttl_seconds,
+        "anthropic_responses_replay_max_bytes": state.anthropic_responses_replay_max_bytes,
+        "anthropic_responses_replay_max_tenant_bytes": state.anthropic_responses_replay_max_tenant_bytes,
+        "anthropic_responses_replay_max_record_bytes": state.anthropic_responses_replay_max_record_bytes,
+        "anthropic_responses_replay_encryption_key_env": state.anthropic_responses_replay_encryption_key_env,
+        "anthropic_responses_replay_require_trusted_tenant": state.anthropic_responses_replay_require_trusted_tenant,
+        "anthropic_responses_replay_trusted_single_user": state.anthropic_responses_replay_trusted_single_user,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
@@ -86,6 +99,43 @@ def _validate_endpoint_support(value: Any, field_name: str) -> tuple[List[str], 
     exact = _validate_string_list(value.get("exact", []), f"{field_name}.exact")
     prefix = _validate_string_list(value.get("prefix", []), f"{field_name}.prefix")
     return exact, prefix
+
+
+def _validate_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"'{field_name}' must be a boolean")
+    return value
+
+
+def _validate_string(value: Any, field_name: str, *, allow_empty: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"'{field_name}' must be a string")
+    if not allow_empty and not value.strip():
+        raise ValueError(f"'{field_name}' must not be empty")
+    return value
+
+
+def _validate_positive_integer(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"'{field_name}' must be an integer > 0")
+    return value
+
+
+def _validate_wire_profile(value: Any, field_name: str) -> str:
+    profile = _validate_string(value, field_name, allow_empty=False)
+    if profile not in WIRE_PROFILES:
+        choices = ", ".join(sorted(WIRE_PROFILES))
+        raise ValueError(f"'{field_name}' must be one of: {choices}")
+    return profile
+
+
+def _validate_model_profiles(value: Any) -> Dict[str, str]:
+    profiles = _validate_mapping(value, "anthropic_responses_model_profiles")
+    for model, profile in profiles.items():
+        if not model.strip():
+            raise ValueError("'anthropic_responses_model_profiles' model names must not be empty")
+        _validate_wire_profile(profile, f"anthropic_responses_model_profiles.{model}")
+    return dict(profiles)
 
 
 @dashboard_bp.route("/", methods=["GET"])
@@ -139,6 +189,18 @@ def api_runtime_config_update():
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
         "disable_onedrive_access",
+        "anthropic_responses_compat_enabled",
+        "anthropic_responses_compat_mode",
+        "anthropic_responses_wire_profile",
+        "anthropic_responses_model_profiles",
+        "anthropic_responses_replay_path",
+        "anthropic_responses_replay_ttl_seconds",
+        "anthropic_responses_replay_max_bytes",
+        "anthropic_responses_replay_max_tenant_bytes",
+        "anthropic_responses_replay_max_record_bytes",
+        "anthropic_responses_replay_encryption_key_env",
+        "anthropic_responses_replay_require_trusted_tenant",
+        "anthropic_responses_replay_trusted_single_user",
         "model_mappings",
         "chat_completions_model_support",
     }
@@ -147,6 +209,38 @@ def api_runtime_config_update():
         return jsonify({"error": f"Unknown config key(s): {', '.join(unknown_keys)}"}), 400
 
     try:
+        proposed_total = _validate_positive_integer(
+            payload.get(
+                "anthropic_responses_replay_max_bytes",
+                state.anthropic_responses_replay_max_bytes,
+            ),
+            "anthropic_responses_replay_max_bytes",
+        )
+        proposed_tenant = _validate_positive_integer(
+            payload.get(
+                "anthropic_responses_replay_max_tenant_bytes",
+                state.anthropic_responses_replay_max_tenant_bytes,
+            ),
+            "anthropic_responses_replay_max_tenant_bytes",
+        )
+        proposed_record = _validate_positive_integer(
+            payload.get(
+                "anthropic_responses_replay_max_record_bytes",
+                state.anthropic_responses_replay_max_record_bytes,
+            ),
+            "anthropic_responses_replay_max_record_bytes",
+        )
+        if proposed_record > proposed_tenant:
+            raise ValueError(
+                "'anthropic_responses_replay_max_record_bytes' must not exceed "
+                "'anthropic_responses_replay_max_tenant_bytes'"
+            )
+        if proposed_tenant > proposed_total:
+            raise ValueError(
+                "'anthropic_responses_replay_max_tenant_bytes' must not exceed "
+                "'anthropic_responses_replay_max_bytes'"
+            )
+
         if "account_type" in payload:
             account_type = payload["account_type"]
             if not isinstance(account_type, str) or account_type not in ALLOWED_ACCOUNT_TYPES:
@@ -212,6 +306,82 @@ def api_runtime_config_update():
             if not isinstance(disable_onedrive, bool):
                 raise ValueError("'disable_onedrive_access' must be a boolean")
             state.disable_onedrive_access = disable_onedrive
+
+        if "anthropic_responses_compat_enabled" in payload:
+            state.anthropic_responses_compat_enabled = _validate_bool(
+                payload["anthropic_responses_compat_enabled"],
+                "anthropic_responses_compat_enabled",
+            )
+
+        if "anthropic_responses_compat_mode" in payload:
+            mode = _validate_string(
+                payload["anthropic_responses_compat_mode"],
+                "anthropic_responses_compat_mode",
+                allow_empty=False,
+            )
+            if mode not in VALID_MODES:
+                choices = ", ".join(sorted(VALID_MODES))
+                raise ValueError(f"'anthropic_responses_compat_mode' must be one of: {choices}")
+            state.anthropic_responses_compat_mode = mode
+
+        if "anthropic_responses_wire_profile" in payload:
+            state.anthropic_responses_wire_profile = _validate_wire_profile(
+                payload["anthropic_responses_wire_profile"],
+                "anthropic_responses_wire_profile",
+            )
+
+        if "anthropic_responses_model_profiles" in payload:
+            state.anthropic_responses_model_profiles = _validate_model_profiles(
+                payload["anthropic_responses_model_profiles"]
+            )
+
+        if "anthropic_responses_replay_path" in payload:
+            state.anthropic_responses_replay_path = _validate_string(
+                payload["anthropic_responses_replay_path"],
+                "anthropic_responses_replay_path",
+            )
+
+        if "anthropic_responses_replay_ttl_seconds" in payload:
+            state.anthropic_responses_replay_ttl_seconds = _validate_positive_integer(
+                payload["anthropic_responses_replay_ttl_seconds"],
+                "anthropic_responses_replay_ttl_seconds",
+            )
+
+        if "anthropic_responses_replay_max_bytes" in payload:
+            state.anthropic_responses_replay_max_bytes = _validate_positive_integer(
+                payload["anthropic_responses_replay_max_bytes"],
+                "anthropic_responses_replay_max_bytes",
+            )
+
+        if "anthropic_responses_replay_max_tenant_bytes" in payload:
+            state.anthropic_responses_replay_max_tenant_bytes = _validate_positive_integer(
+                payload["anthropic_responses_replay_max_tenant_bytes"],
+                "anthropic_responses_replay_max_tenant_bytes",
+            )
+
+        if "anthropic_responses_replay_max_record_bytes" in payload:
+            state.anthropic_responses_replay_max_record_bytes = _validate_positive_integer(
+                payload["anthropic_responses_replay_max_record_bytes"],
+                "anthropic_responses_replay_max_record_bytes",
+            )
+
+        if "anthropic_responses_replay_encryption_key_env" in payload:
+            state.anthropic_responses_replay_encryption_key_env = _validate_string(
+                payload["anthropic_responses_replay_encryption_key_env"],
+                "anthropic_responses_replay_encryption_key_env",
+            )
+
+        if "anthropic_responses_replay_require_trusted_tenant" in payload:
+            state.anthropic_responses_replay_require_trusted_tenant = _validate_bool(
+                payload["anthropic_responses_replay_require_trusted_tenant"],
+                "anthropic_responses_replay_require_trusted_tenant",
+            )
+
+        if "anthropic_responses_replay_trusted_single_user" in payload:
+            state.anthropic_responses_replay_trusted_single_user = _validate_bool(
+                payload["anthropic_responses_replay_trusted_single_user"],
+                "anthropic_responses_replay_trusted_single_user",
+            )
 
         if "model_mappings" in payload:
             mappings = payload["model_mappings"]

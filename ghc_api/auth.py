@@ -321,9 +321,26 @@ def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(headers, dict):
         return headers
     redacted = dict(headers)
+    sensitive_names = {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "api-key",
+        "cookie",
+        "set-cookie",
+        "x-auth-token",
+        "x-access-token",
+        "x-github-token",
+    }
     for key in list(redacted.keys()):
-        lower = key.lower()
-        if lower in ("authorization", "x-api-key", "proxy-authorization"):
+        lower = key.lower().strip()
+        if (
+            lower in sensitive_names
+            or lower.endswith("-access-token")
+            or lower.endswith("-auth-token")
+            or lower.endswith("-api-key")
+            or lower.endswith("-secret")
+        ):
             redacted[key] = "***REDACTED***"
     return redacted
 

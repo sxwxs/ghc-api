@@ -30,7 +30,8 @@ setup(
         "Flask>=2.0.0",
         "requests>=2.25.0",
         "PyYAML>=5.4.0",
-        "tiktoken>=0.3.0"
+        "tiktoken>=0.3.0",
+        "cryptography>=41.0.0"
     ],
     entry_points={
         "console_scripts": [
