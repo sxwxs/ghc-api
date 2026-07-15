@@ -64,9 +64,13 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
                 anthropic_module.state, "anthropic_responses_compat_enabled", True
             ),
             "enable_auth": anthropic_module.state.enable_auth,
+            "enable_web_search_proxy": anthropic_module.state.enable_web_search_proxy,
+            "web_search_proxy_endpoint": anthropic_module.state.web_search_proxy_endpoint,
         }
         anthropic_module.state.anthropic_responses_compat_enabled = True
         anthropic_module.state.enable_auth = False
+        anthropic_module.state.enable_web_search_proxy = False
+        anthropic_module.state.web_search_proxy_endpoint = "http://127.0.0.1:5002"
 
     def tearDown(self):
         self.client = None
@@ -224,6 +228,41 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
         patched["direct"].assert_not_called()
         patched["fallback"].assert_not_called()
 
+    def test_enabled_web_search_proxy_preprocesses_before_responses_routing(self):
+        payload = {
+            "model": "client-model-alias",
+            "messages": [{"role": "user", "content": "长鑫存储"}],
+            "tools": [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 8,
+            }],
+            "max_tokens": 32,
+        }
+        proxied = {
+            **payload,
+            "model": "gpt-5.6-sol",
+            "system": [{"type": "text", "text": "[Web Search Results]\nresult"}],
+        }
+        proxied.pop("tools")
+        anthropic_module.state.enable_web_search_proxy = True
+        stack, patched = self._selection_patches(direct=False, responses=True)
+        with stack, mock.patch.object(
+            anthropic_module,
+            "apply_web_search_fallback",
+            return_value=proxied,
+        ) as apply_proxy:
+            response = self.client.post("/v1/messages", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        apply_proxy.assert_called_once_with(
+            {**payload, "model": "gpt-5.6-sol"},
+            "http://127.0.0.1:5002",
+        )
+        call = patched["responses"].call_args
+        self.assertEqual(_call_argument(call, 0, "anthropic_payload"), proxied)
+        self.assertEqual(_call_argument(call, 5, "original_request_body"), payload)
+
     def test_disabled_responses_compatibility_uses_legacy_fallback(self):
         anthropic_module.state.anthropic_responses_compat_enabled = False
         stack, patched = self._selection_patches(direct=False, responses=True)
@@ -296,6 +335,8 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 "anthropic_responses_replay_encryption_key_env",
                 "anthropic_responses_replay_require_trusted_tenant",
                 "enable_auth",
+                "enable_web_search_proxy",
+                "web_search_proxy_endpoint",
                 "max_connection_retries",
                 "sse_keepalive_interval",
                 "upstream_read_timeout",
@@ -310,6 +351,8 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         state.anthropic_responses_replay_max_tenant_bytes = 8 * 1024 * 1024
         state.anthropic_responses_replay_max_record_bytes = 4 * 1024 * 1024
         state.enable_auth = False
+        state.enable_web_search_proxy = False
+        state.web_search_proxy_endpoint = "http://127.0.0.1:5002"
         state.max_connection_retries = 0
         state.sse_keepalive_interval = 0
         state.upstream_read_timeout = 123
@@ -514,6 +557,135 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.get_json()["type"], "error")
         self.assertNotIn("future-status-private", response.get_data(as_text=True))
+
+    def test_nonstream_web_search_proxy_injects_context_before_responses_conversion(self):
+        upstream = _FakeResponse(self._terminal_response())
+        payload = self._request_payload(stream=False)
+        payload["messages"][0]["content"] = "长鑫存储"
+        payload["tools"] = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 8,
+        }]
+        anthropic_module.state.enable_web_search_proxy = True
+
+        with mock.patch.object(
+            anthropic_module.requests,
+            "get",
+            return_value=mock.Mock(
+                raise_for_status=mock.Mock(),
+                json=mock.Mock(return_value={
+                    "results": [{
+                        "title": "CXMT",
+                        "link": "https://example.com/cxmt",
+                        "description": "Latest update",
+                    }],
+                }),
+            ),
+        ) as get, mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=upstream,
+        ) as post:
+            response = self.client.post("/v1/messages", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        get.assert_called_once_with(
+            "http://127.0.0.1:5002/search",
+            params={"keyword": "长鑫存储", "limit": 3},
+            timeout=30,
+        )
+        outgoing = post.call_args.kwargs["json"]
+        self.assertNotIn("tools", outgoing)
+        self.assertEqual(outgoing["input"][0]["role"], "developer")
+        search_context = outgoing["input"][0]["content"][0]["text"]
+        self.assertIn("CXMT", search_context)
+        self.assertIn("https://example.com/cxmt", search_context)
+
+        cached = next(iter(self.cache.cache.values()))
+        self.assertEqual(cached["original_request_body"], payload)
+        self.assertEqual(cached["request_body"], outgoing)
+
+    def test_stream_web_search_proxy_runs_once_before_upstream_stream(self):
+        completed = {
+            "type": "response.completed",
+            "response": self._terminal_response(),
+            "sequence_number": 0,
+        }
+        upstream = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(completed, separators=(",", ":"))).encode()
+        ])
+        payload = self._request_payload(stream=True)
+        payload["messages"][0]["content"] = "长鑫存储"
+        payload["tools"] = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+        }]
+        anthropic_module.state.enable_web_search_proxy = True
+
+        search_response = mock.Mock(
+            raise_for_status=mock.Mock(),
+            json=mock.Mock(return_value={
+                "results": [{
+                    "title": "CXMT",
+                    "link": "https://example.com/cxmt",
+                    "description": "Latest update",
+                }],
+            }),
+        )
+        with mock.patch.object(
+            anthropic_module.requests, "get", return_value=search_response
+        ) as get, mock.patch.object(
+            anthropic_module.requests, "post", return_value=upstream
+        ) as post:
+            response = self.client.post("/v1/messages", json=payload)
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: message_stop\n", body)
+        get.assert_called_once()
+        post.assert_called_once()
+        outgoing = post.call_args.kwargs["json"]
+        self.assertTrue(outgoing["stream"])
+        self.assertNotIn("tools", outgoing)
+        self.assertIn("CXMT", outgoing["input"][0]["content"][0]["text"])
+
+    def test_lossless_mode_accepts_web_search_after_proxy_preprocessing(self):
+        upstream = _FakeResponse(self._terminal_response())
+        payload = self._request_payload(stream=False)
+        payload["tools"] = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+        }]
+        anthropic_module.state.enable_web_search_proxy = True
+        anthropic_module.state.anthropic_responses_compat_mode = "lossless_required"
+        anthropic_module.state.anthropic_responses_replay_trusted_single_user = True
+
+        with mock.patch.object(
+            anthropic_module.requests,
+            "get",
+            return_value=mock.Mock(
+                raise_for_status=mock.Mock(),
+                json=mock.Mock(return_value={"results": []}),
+            ),
+        ), mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=upstream,
+        ) as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=payload,
+                headers={
+                    "x-session-id": "web-search-lossless-test",
+                    "user-agent": "claude-cli/2.1.207 (external, cli)",
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        post.assert_called_once()
+        self.assertNotIn("tools", post.call_args.kwargs["json"])
 
     def test_stream_uses_anthropic_sse_and_keeps_raw_responses_events_in_cache(self):
         terminal = self._terminal_response()

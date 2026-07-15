@@ -227,15 +227,14 @@ cache_max_request_size: 1048576
 
 # Web Search Proxy Settings
 # -------------------------
-# When enabled, if the Copilot backend rejects a request containing the web_search tool
-# (e.g. Anthropic's web_search_20250305), the proxy will:
-# 1. Call the external search proxy to perform the search
-# 2. Remove the web_search tool from the request
-# 3. Inject the search results into the system prompt
-# 4. Retry the request
+# When enabled, Anthropic /v1/messages requests containing a web_search tool
+# (e.g. web_search_20250305) are preprocessed before calling Copilot:
+# 1. GET <endpoint>/search?keyword=<query>&limit=3
+# 2. Inject the search results into the system prompt
+# 3. Remove the unsupported web_search tool from the upstream request
 #
-# enable_web_search_proxy: Whether to enable the web search proxy fallback
-# web_search_proxy_endpoint: The URL of the search proxy service
+# enable_web_search_proxy: Whether to proxy web_search requests locally
+# web_search_proxy_endpoint: Base URL of the local search proxy service
 enable_web_search_proxy: false
 web_search_proxy_endpoint: "http://127.0.0.1:5002"
 

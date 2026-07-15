@@ -58,6 +58,8 @@ def _runtime_config() -> Dict[str, Any]:
         "save_request_to_file": state.save_request_to_file,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
+        "enable_web_search_proxy": state.enable_web_search_proxy,
+        "web_search_proxy_endpoint": state.web_search_proxy_endpoint,
         "anthropic_responses_compat_enabled": state.anthropic_responses_compat_enabled,
         "anthropic_responses_compat_mode": state.anthropic_responses_compat_mode,
         "anthropic_responses_wire_profile": state.anthropic_responses_wire_profile,
@@ -214,6 +216,8 @@ def api_runtime_config_update():
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
         "disable_onedrive_access",
+        "enable_web_search_proxy",
+        "web_search_proxy_endpoint",
         "anthropic_responses_compat_enabled",
         "anthropic_responses_compat_mode",
         "anthropic_responses_wire_profile",
@@ -331,6 +335,18 @@ def api_runtime_config_update():
             if not isinstance(disable_onedrive, bool):
                 raise ValueError("'disable_onedrive_access' must be a boolean")
             state.disable_onedrive_access = disable_onedrive
+
+        if "enable_web_search_proxy" in payload:
+            state.enable_web_search_proxy = _validate_bool(
+                payload["enable_web_search_proxy"],
+                "enable_web_search_proxy",
+            )
+
+        if "web_search_proxy_endpoint" in payload:
+            state.web_search_proxy_endpoint = _validate_string(
+                payload["web_search_proxy_endpoint"],
+                "web_search_proxy_endpoint",
+            )
 
         if "anthropic_responses_compat_enabled" in payload:
             state.anthropic_responses_compat_enabled = _validate_bool(

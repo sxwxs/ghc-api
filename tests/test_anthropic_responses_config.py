@@ -11,6 +11,11 @@ from ghc_api.generate_config import generate_config_file
 from ghc_api.main import apply_anthropic_responses_config
 
 
+WEB_SEARCH_CONFIG_FIELDS = (
+    "enable_web_search_proxy",
+    "web_search_proxy_endpoint",
+)
+
 CONFIG_FIELDS = (
     "anthropic_responses_compat_enabled",
     "anthropic_responses_compat_mode",
@@ -206,6 +211,57 @@ class AnthropicResponsesRuntimeConfigTest(unittest.TestCase):
                     apply_anthropic_responses_config(value)
 
 
+class WebSearchRuntimeConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.state = ghc_api.state.state
+        self.saved = {
+            field: getattr(self.state, field)
+            for field in WEB_SEARCH_CONFIG_FIELDS
+        }
+        self.state.enable_web_search_proxy = False
+        self.state.web_search_proxy_endpoint = "http://127.0.0.1:5002"
+        self.app = create_app()
+
+    def tearDown(self):
+        for field, value in self.saved.items():
+            setattr(self.state, field, value)
+
+    def test_get_and_post_expose_web_search_settings(self):
+        with self.app.test_client() as client:
+            get_response = client.get("/api/runtime-config")
+            post_response = client.post("/api/runtime-config", json={
+                "enable_web_search_proxy": True,
+                "web_search_proxy_endpoint": "http://search.internal:5002",
+            })
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(
+            {field: get_response.get_json()[field] for field in WEB_SEARCH_CONFIG_FIELDS},
+            {
+                "enable_web_search_proxy": False,
+                "web_search_proxy_endpoint": "http://127.0.0.1:5002",
+            },
+        )
+        self.assertEqual(post_response.status_code, 200)
+        body = post_response.get_json()["config"]
+        self.assertTrue(body["enable_web_search_proxy"])
+        self.assertEqual(body["web_search_proxy_endpoint"], "http://search.internal:5002")
+        self.assertTrue(self.state.enable_web_search_proxy)
+        self.assertEqual(self.state.web_search_proxy_endpoint, "http://search.internal:5002")
+
+    def test_post_rejects_invalid_web_search_types(self):
+        with self.app.test_client() as client:
+            invalid = (
+                ("enable_web_search_proxy", 1),
+                ("web_search_proxy_endpoint", None),
+            )
+            for field, value in invalid:
+                with self.subTest(field=field):
+                    response = client.post("/api/runtime-config", json={field: value})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn(field, response.get_json()["error"])
+
+
 class AnthropicResponsesGeneratedConfigTest(unittest.TestCase):
     def test_generated_yaml_documents_all_runtime_fields_and_defaults(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -235,8 +291,17 @@ class AnthropicResponsesGeneratedConfigTest(unittest.TestCase):
             "anthropic_responses_replay_trusted_single_user": False,
         }
         self.assertEqual({field: config[field] for field in CONFIG_FIELDS}, expected)
+        self.assertEqual(
+            {field: config[field] for field in WEB_SEARCH_CONFIG_FIELDS},
+            {
+                "enable_web_search_proxy": False,
+                "web_search_proxy_endpoint": "http://127.0.0.1:5002",
+            },
+        )
         self.assertIn("every approximation", text)
         self.assertIn("urlsafe-base64 Fernet key", text)
+        self.assertIn("/search?keyword=<query>&limit=3", text)
+        self.assertIn("preprocessed before calling Copilot", text)
 
 
 if __name__ == "__main__":

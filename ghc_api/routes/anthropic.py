@@ -79,7 +79,7 @@ from ..reasoning_replay import (
     ReasoningReplayStore,
 )
 from ..utils import get_config_dir
-from ..web_search import has_web_search_tool, is_web_search_unsupported_error, apply_web_search_fallback
+from ..web_search import has_web_search_tool, apply_web_search_fallback
 
 
 def _current_user_id() -> str:
@@ -1025,13 +1025,6 @@ def _stream_pending_direct_anthropic_request(
                 log_error_request("/v1/messages", active_payload, response_text, response.status_code, client_ip)
                 last_response_body = _parse_response_body(response)
 
-                if (state.enable_web_search_proxy and
-                        has_web_search_tool(active_payload) and
-                        is_web_search_unsupported_error(response.status_code, response_text)):
-                    print(f"[Direct Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
-                    active_payload = apply_web_search_fallback(active_payload, state.web_search_proxy_endpoint)
-                    continue
-
                 if is_orphaned_tool_result_error(response.status_code, response_text):
                     orphaned_ids = extract_orphaned_tool_use_ids(response_text)
                     if orphaned_ids:
@@ -1384,6 +1377,13 @@ def anthropic_messages():
     if translated_model != original_model:
         print(f"[Anthropic API] Model name translated: {original_model} -> {translated_model}")
         anthropic_payload = {**anthropic_payload, "model": translated_model}
+
+    if state.enable_web_search_proxy and has_web_search_tool(anthropic_payload):
+        print(f"[Anthropic API] Applying web search proxy for request {request_id}")
+        anthropic_payload = apply_web_search_fallback(
+            anthropic_payload,
+            state.web_search_proxy_endpoint,
+        )
 
     # Capability routing deliberately happens before any legacy content or
     # thinking rewrite. The Responses converter owns its loss accounting and
@@ -2012,7 +2012,7 @@ def handle_responses_anthropic_request(
     wire_profile = anthropic_responses_wire_profile(translated_model)
     request_audit = audit_anthropic_request(
         request_headers,
-        original_request_body,
+        anthropic_payload,
         mode=mode,
         baseline_manifest={"profiles": CLAUDE_CLI_TOOL_CONTRACT_BASELINES},
     )
@@ -2868,14 +2868,6 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                 "user_id": user_id,
             })
 
-            # Handle web search unsupported error with proxy fallback
-            if (state.enable_web_search_proxy and
-                    has_web_search_tool(current_payload) and
-                    is_web_search_unsupported_error(response.status_code, response.text)):
-                print(f"[Direct Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
-                current_payload = apply_web_search_fallback(current_payload, state.web_search_proxy_endpoint)
-                continue
-
             # Handle orphaned tool_result error with retry
             if is_orphaned_tool_result_error(response.status_code, response.text):
                 orphaned_ids = extract_orphaned_tool_use_ids(response.text)
@@ -3007,14 +2999,6 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
         else:
             log_error_request("/v1/messages", anthropic_payload, response.text, response.status_code, client_ip)
 
-            # Handle web search unsupported error with proxy fallback
-            if (state.enable_web_search_proxy and
-                    has_web_search_tool(current_payload) and
-                    is_web_search_unsupported_error(response.status_code, response.text)):
-                print(f"[Translated API] Web search unsupported, applying search proxy fallback for request {request_id}")
-                current_payload = apply_web_search_fallback(current_payload, state.web_search_proxy_endpoint)
-                continue
-
             if is_orphaned_tool_result_error(response.status_code, response.text):
                 orphaned_ids = extract_orphaned_tool_use_ids(response.text)
                 if orphaned_ids:
@@ -3093,32 +3077,6 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             ))
             response = yield from _wait_anthropic_response_with_ping(pending_response)
             status_code = response.status_code
-
-            # Handle web search unsupported error before streaming begins
-            if (not response.ok and
-                    state.enable_web_search_proxy and
-                    has_web_search_tool(anthropic_payload) and
-                    is_web_search_unsupported_error(response.status_code, response.text)):
-                print(f"[Stream Anthropic] Web search unsupported, applying search proxy fallback for request {request_id}")
-                modified_payload = apply_web_search_fallback(anthropic_payload, state.web_search_proxy_endpoint)
-                new_openai_payload = translate_anthropic_to_openai(modified_payload)
-                final_openai_payload = new_openai_payload
-                final_request_size = len(json.dumps(new_openai_payload))
-                cache.update_request_state(
-                    request_id,
-                    cache.STATE_SENDING,
-                    request_body=new_openai_payload,
-                    request_size=final_request_size,
-                )
-                pending_response = BackgroundResult(lambda: requests.post(
-                    f"{get_copilot_base_url()}/chat/completions",
-                    headers=headers,
-                    json=new_openai_payload,
-                    stream=True,
-                    timeout=state.upstream_read_timeout,
-                ))
-                response = yield from _wait_anthropic_response_with_ping(pending_response)
-                status_code = response.status_code
 
             for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
                 if line is KEEPALIVE:

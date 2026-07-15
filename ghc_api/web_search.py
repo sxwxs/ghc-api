@@ -1,10 +1,9 @@
 """
-Web search proxy fallback.
+Web search proxy preprocessing.
 
-When the Copilot backend rejects a request containing the web_search tool,
-this module calls an external search proxy, injects the results into the
-system prompt, removes the web_search tool, and returns a modified payload
-ready for retry.
+When enabled for a request containing the web_search tool, this module calls
+an external search proxy, injects the results into the system prompt, removes
+the unsupported tool, and returns the payload to send to Copilot.
 """
 
 from typing import Any, Dict, List
@@ -12,21 +11,26 @@ from typing import Any, Dict, List
 import requests
 
 
-def is_web_search_unsupported_error(status_code: int, response_text: str) -> bool:
-    """Return True if the backend response indicates web_search is unsupported."""
-    if status_code not in (400, 422):
-        return False
-    text_lower = response_text.lower()
-    return "web search" in text_lower and ("unsupported" in text_lower or "not supported" in text_lower)
+SEARCH_QUERY_PREFIX = "Perform a web search for the query:"
 
 
 def has_web_search_tool(payload: Dict) -> bool:
     """Return True if the payload contains any web_search-type tool."""
     for tool in payload.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
         tool_type = tool.get("type", "")
         if isinstance(tool_type, str) and tool_type.startswith("web_search"):
             return True
     return False
+
+
+def _normalize_search_query(text: str) -> str:
+    """Remove Claude Code's web-search wrapper from a query string."""
+    query = text.strip()
+    if query.casefold().startswith(SEARCH_QUERY_PREFIX.casefold()):
+        query = query[len(SEARCH_QUERY_PREFIX):].lstrip()
+    return query[:200]
 
 
 def extract_search_query(payload: Dict) -> str:
@@ -36,18 +40,17 @@ def extract_search_query(payload: Dict) -> str:
             continue
         content = msg.get("content", "")
         if isinstance(content, str):
-            return content[:200].strip()
+            return _normalize_search_query(content)
         if isinstance(content, list):
             parts = []
             for block in content:
                 if isinstance(block, dict) and block.get("type") == "text":
                     parts.append(block.get("text", ""))
-            text = " ".join(parts).strip()
-            return text[:200]
+            return _normalize_search_query(" ".join(parts))
     return ""
 
 
-def call_search_proxy(query: str, endpoint: str, limit: int = 5) -> List[Dict[str, Any]]:
+def call_search_proxy(query: str, endpoint: str, limit: int = 3) -> List[Dict[str, Any]]:
     """Call the external search proxy and return a list of result dicts."""
     if not query or not endpoint:
         return []
@@ -60,7 +63,19 @@ def call_search_proxy(query: str, endpoint: str, limit: int = 5) -> List[Dict[st
         )
         resp.raise_for_status()
         data = resp.json()
-        return data.get("results", [])
+        if isinstance(data, list):
+            results = data
+        elif isinstance(data, dict):
+            results = data.get("results")
+            if not isinstance(results, list):
+                results = data.get("items")
+            if not isinstance(results, list):
+                results = data.get("data")
+        else:
+            results = None
+        if not isinstance(results, list):
+            return []
+        return [item for item in results if isinstance(item, dict)]
     except Exception as e:
         print(f"[WebSearch] Search proxy call failed: {type(e).__name__}: {e}")
         return []
@@ -76,12 +91,19 @@ def format_search_results(query: str, results: List[Dict[str, Any]]) -> str:
         f'Search results for "{query}":',
         "",
     ]
-    for i, r in enumerate(results, 1):
-        lines.append(f"{i}. {r.get('title', 'Untitled')}")
-        if r.get("link"):
-            lines.append(f"   URL: {r['link']}")
-        if r.get("description"):
-            lines.append(f"   {r['description']}")
+    for i, result in enumerate(results, 1):
+        title = result.get("title") or "Untitled"
+        url = result.get("link") or result.get("url")
+        description = (
+            result.get("description")
+            or result.get("snippet")
+            or result.get("content")
+        )
+        lines.append(f"{i}. {title}")
+        if url:
+            lines.append(f"   URL: {url}")
+        if description:
+            lines.append(f"   {description}")
         lines.append("")
     return "\n".join(lines)
 
@@ -108,7 +130,15 @@ def remove_web_search_tools(payload: Dict) -> Dict:
     if not tools:
         return payload
 
-    filtered = [t for t in tools if not (isinstance(t.get("type", ""), str) and t["type"].startswith("web_search"))]
+    filtered = [
+        tool
+        for tool in tools
+        if not (
+            isinstance(tool, dict)
+            and isinstance(tool.get("type", ""), str)
+            and tool.get("type", "").startswith("web_search")
+        )
+    ]
 
     new_payload = dict(payload)
     if filtered:
@@ -120,7 +150,7 @@ def remove_web_search_tools(payload: Dict) -> Dict:
 
 
 def apply_web_search_fallback(payload: Dict, endpoint: str) -> Dict:
-    """Orchestrate the full web search fallback: search, inject results, remove tools."""
+    """Search locally, inject the results, and remove web_search tools."""
     from .counters import counters
     counters.incr("mod.web_search_fallback")
     query = extract_search_query(payload)

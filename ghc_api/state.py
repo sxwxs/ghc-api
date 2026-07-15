@@ -79,7 +79,7 @@ class State:
 
         # Web search proxy settings
         self.enable_web_search_proxy: bool = False
-        self.web_search_proxy_endpoint: str = ""
+        self.web_search_proxy_endpoint: str = "http://127.0.0.1:5002"
 
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses, /v1/models

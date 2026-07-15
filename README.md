@@ -117,6 +117,13 @@ disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared
 # Optional leaked tool-call recovery (direct Anthropic /v1/messages streaming)
 enable_tool_call_recovery: false # If true, recover tool calls Copilot leaks as plain text
 
+# Optional local web search proxy for Anthropic /v1/messages
+# Requests containing web_search call <endpoint>/search?keyword=<query>&limit=3,
+# inject the returned results into the system context, then call Copilot without
+# the unsupported web_search tool.
+enable_web_search_proxy: false
+web_search_proxy_endpoint: "http://127.0.0.1:5002"
+
 # Streaming reliability
 upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot request
 sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
