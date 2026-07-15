@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>Request File Detail</title>
+    <style>
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif; background:#f5f5f5; color:#333; line-height:1.6; }
+        .navbar { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; padding:1rem 2rem; display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap; box-shadow:0 2px 10px rgba(0,0,0,.1); }
+        .navbar h1 { font-size:1.5rem; font-weight:600; }
+        .navbar-actions { display:flex; gap:1rem; flex-wrap:wrap; }
+        .navbar-actions a { color:#fff; text-decoration:none; padding:.5rem 1rem; border-radius:4px; background:rgba(255,255,255,.2); font-size:.875rem; transition:background .2s; }
+        .navbar-actions a:hover { background:rgba(255,255,255,.3); }
+        main { max-width:1400px; margin:0 auto; padding:2rem; }
+        .heading { background:#fff; border-radius:12px; padding:1.5rem; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:1rem; }
+        .heading h2 { font-size:1.25rem; font-weight:600; border-bottom:2px solid #667eea; padding-bottom:.5rem; }
+        .heading p { color:#888; font-size:.875rem; margin-top:.5rem; }
+        .notice { padding:1rem; background:#fff; border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:1rem; color:#555; }
+        .notice.error { background:#ffebee; color:#c62828; }
+        .overview { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:.75rem; margin-bottom:1.5rem; }
+        .overview-item { padding:.75rem; background:#f8f9fa; border-radius:6px; }
+        .label { color:#666; text-transform:uppercase; letter-spacing:.5px; font-size:.6875rem; }
+        .value { margin-top:.25rem; font-size:.875rem; font-weight:500; word-break:break-all; }
+        .section { background:#fff; border-radius:12px; padding:1.25rem 1.5rem; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:1rem; }
+        .section summary { cursor:pointer; font-weight:600; color:#333; display:flex; align-items:center; gap:.45rem; }
+        .parsed-toggle-indicator { color:#666; transition:transform .15s ease; }
+        details:not([open]) > summary .parsed-toggle-indicator { transform:rotate(-90deg); }
+        .section pre { margin-top:1rem; padding:1rem; max-height:70vh; overflow:auto; white-space:pre-wrap; word-break:break-word; background:#1e1e1e; color:#d4d4d4; border-radius:8px; font:12px/1.55 Consolas,"Cascadia Mono",monospace; }
+        a:focus-visible, summary:focus-visible { outline:2px solid #5a6fd6; outline-offset:2px; }
+        @media(max-width:768px){.navbar{align-items:flex-start;flex-direction:column;padding:1rem}.navbar-actions{gap:.5rem}main{padding:1rem}}
+        @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+    </style>
+</head>
+<body>
+    <nav class="navbar"><h1>Request Detail</h1><div class="navbar-actions"><a href="/">Dashboard</a><a href="/requests">Request Browser</a><a href="/chat">Chat</a><a href="/agent">Code Agent</a><a href="/code-agent-manager">Code Agent Manager</a><a href="/request-stats">Request Stats</a><a href="/api/stats">API Stats</a></div></nav>
+    <main>
+        <header class="heading"><h2>Indexed request</h2><p id="locator">Loading stable file locator…</p></header>
+        <div id="message" class="notice">Reading the indexed JSONL line and verifying its hash…</div>
+        <div id="content" hidden>
+            <section class="overview" id="overview"></section>
+            <details class="section" open><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>Request headers</summary><pre id="headers"></pre></details>
+            <details class="section"><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>Original request</summary><pre id="original-request"></pre></details>
+            <details class="section" open><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>Request body</summary><pre id="request-body"></pre></details>
+            <details class="section" open><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>Response / raw events</summary><pre id="response-body"></pre></details>
+            <details class="section"><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>Complete indexed record</summary><pre id="complete-record"></pre></details>
+        </div>
+    </main>
+    <script>
+        const params = new URLSearchParams(location.search);
+        const byId = (id) => document.getElementById(id);
+        const pretty = (value) => value === undefined ? "Field not present" : JSON.stringify(value, null, 2);
+        const overviewFields = [
+            ["ID", "id"], ["Timestamp", "timestamp"], ["Model", "model"], ["Translated model", "translated_model"],
+            ["Endpoint", "endpoint"], ["Status", "status_code"], ["State", "state"], ["Duration", "duration"],
+            ["Request size", "request_size"], ["Response size", "response_size"], ["Input tokens", "input_tokens"],
+            ["Cache write", "cache_creation_input_tokens"], ["Cache read", "cache_read_input_tokens"], ["Output tokens", "output_tokens"],
+            ["User", "user_id"], ["Client IP", "client_ip"]
+        ];
+        async function load() {
+            byId("locator").textContent = `${params.get("file") || "?"} @ ${params.get("offset") || "?"} + ${params.get("length") || "?"}`;
+            try {
+                const response = await fetch(`/api/request-stats/request-detail?${params.toString()}`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                byId("message").textContent = "Hash verified. The detail below was read directly from the persisted request file.";
+                const overview = byId("overview");
+                for (const [label, key] of overviewFields) {
+                    const item = document.createElement("div"); item.className = "overview-item";
+                    const labelEl = document.createElement("div"); labelEl.className = "label"; labelEl.textContent = label;
+                    const valueEl = document.createElement("div"); valueEl.className = "value";
+                    const value = data[key]; valueEl.textContent = value === null || value === undefined || value === "" ? "—" : String(value);
+                    item.append(labelEl, valueEl); overview.appendChild(item);
+                }
+                byId("headers").textContent = pretty(data.request_headers);
+                byId("original-request").textContent = pretty(data.original_request_body);
+                byId("request-body").textContent = pretty(data.request_body);
+                byId("response-body").textContent = pretty(data.raw_events !== undefined && data.raw_events !== null ? data.raw_events : data.response_body);
+                byId("complete-record").textContent = pretty(data);
+                byId("content").hidden = false;
+            } catch (error) {
+                byId("message").className = "notice error";
+                byId("message").textContent = error.message || String(error);
+            }
+        }
+        load();
+    </script>
+</body>
+</html>
