@@ -23,6 +23,19 @@ from ..config_sync import (
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
 from ..token_usage_reporter import get_token_usage_overview
+from ..request_file_stats import (
+    MAX_BUCKET_PAGE_SIZE,
+    MAX_DETAIL_LINE_BYTES,
+    RequestFileChangedError,
+    RequestStatsBusyError,
+    RequestIndexValidationError,
+    RequestStatsDatasetNotFound,
+    RequestStatsJobNotFound,
+    RequestStatsValidationError,
+    list_request_files,
+    read_request_detail,
+    request_stats_jobs,
+)
 
 dashboard_bp = Blueprint('dashboard', __name__)
 
@@ -160,6 +173,18 @@ def chat_page():
 def code_agent_manager_page():
     """Serve the code agent manager page"""
     return render_template("code_agent_manager.html")
+
+
+@dashboard_bp.route("/request-stats", methods=["GET"])
+def request_stats_page():
+    """Serve the persisted request-file statistics page."""
+    return render_template("request_stats.html")
+
+
+@dashboard_bp.route("/request-file-detail", methods=["GET"])
+def request_file_detail_page():
+    """Serve one stable request-file detail view."""
+    return render_template("request_file_detail.html")
 
 
 @dashboard_bp.route("/api/runtime-config", methods=["GET"])
@@ -472,6 +497,97 @@ def api_stats():
     stats = cache.get_stats(user_id=_user_filter_from_request())
     stats["counters"] = counters.snapshot()
     return jsonify(stats)
+
+
+@dashboard_bp.route("/api/request-stats/files", methods=["GET"])
+def api_request_stats_files():
+    """List persisted request files and their request-statistics index state."""
+    return jsonify({"files": list_request_files(request_stats_jobs.active_files())})
+
+
+@dashboard_bp.route("/api/request-stats/jobs", methods=["POST"])
+def api_request_stats_jobs_create():
+    """Start an asynchronous statistics job for selected request files."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Invalid JSON body"}), 400
+    try:
+        job, reused = request_stats_jobs.start(payload.get("files"))
+    except RequestStatsValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RequestStatsBusyError as exc:
+        return jsonify({
+            "error": "busy",
+            "message": str(exc),
+            "active_job_id": exc.active_job_id,
+        }), 409
+    return jsonify({"job": job, "reused": reused}), 200 if reused else 202
+
+
+@dashboard_bp.route("/api/request-stats/jobs/<job_id>", methods=["GET"])
+def api_request_stats_job(job_id: str):
+    """Get progress or the completed result for one statistics job."""
+    try:
+        return jsonify({"job": request_stats_jobs.get(job_id)})
+    except RequestStatsJobNotFound:
+        return jsonify({"error": "Request statistics job not found"}), 404
+
+
+@dashboard_bp.route("/api/request-stats/jobs/<job_id>/cancel", methods=["POST"])
+def api_request_stats_job_cancel(job_id: str):
+    """Request cooperative cancellation of a running statistics job."""
+    try:
+        return jsonify({"job": request_stats_jobs.cancel(job_id)})
+    except RequestStatsJobNotFound:
+        return jsonify({"error": "Request statistics job not found"}), 404
+
+
+@dashboard_bp.route("/api/request-stats/datasets/<dataset_id>/requests", methods=["GET"])
+def api_request_stats_dataset_requests(dataset_id: str):
+    """List requests that contributed to one histogram bucket."""
+    metric = request.args.get("metric", "")
+    view = request.args.get("view", "overall")
+    value = request.args.get("value")
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    bucket = request.args.get("bucket", type=int)
+    if page < 1 or per_page < 1 or per_page > MAX_BUCKET_PAGE_SIZE or bucket is None:
+        return jsonify({"error": f"Invalid pagination or bucket; per_page must be 1-{MAX_BUCKET_PAGE_SIZE}"}), 400
+    try:
+        result = request_stats_jobs.query_dataset(
+            dataset_id,
+            metric=metric,
+            bucket=bucket,
+            view=view,
+            value=value,
+            page=page,
+            per_page=per_page,
+        )
+    except RequestStatsValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RequestStatsDatasetNotFound:
+        return jsonify({"error": "Request statistics dataset expired; generate statistics again"}), 410
+    return jsonify(result)
+
+
+@dashboard_bp.route("/api/request-stats/request-detail", methods=["GET"])
+def api_request_stats_request_detail():
+    """Read one indexed request line from its source JSONL file."""
+    filename = request.args.get("file", "")
+    sha256 = request.args.get("sha256", "")
+    offset = request.args.get("offset", type=int)
+    length = request.args.get("length", type=int)
+    if offset is None or length is None:
+        return jsonify({"error": "offset and length are required integers"}), 400
+    try:
+        return jsonify(read_request_detail(filename, offset, length, sha256))
+    except RequestStatsValidationError as exc:
+        status_code = 413 if "display limit" in str(exc) else 400
+        return jsonify({"error": str(exc), "max_detail_bytes": MAX_DETAIL_LINE_BYTES}), status_code
+    except RequestIndexValidationError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except RequestFileChangedError as exc:
+        return jsonify({"error": str(exc)}), 409
 
 
 @dashboard_bp.route("/api/users-list", methods=["GET"])

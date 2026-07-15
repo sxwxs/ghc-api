@@ -239,6 +239,7 @@
             <a href="/requests">Request Browser</a>
             <a href="/chat">Chat</a>
             <a href="/agent">Code Agent</a>
+            <a href="/request-stats">Request Stats</a>
             <a href="/api/stats">API Stats</a>
         </div>
     </nav>
@@ -306,6 +307,8 @@
                             <th>Model Id</th>
                             <th>Request Count</th>
                             <th>Token Input</th>
+                            <th>Cache Create</th>
+                            <th>Cache Read</th>
                             <th>Token Output</th>
                             <th>Total Token</th>
                             <th>Data Send</th>
@@ -580,6 +583,8 @@
                         model_id: key,
                         request_count: 0,
                         input_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                         output_tokens: 0,
                         total_tokens: 0,
                         data_sent: 0,
@@ -590,6 +595,8 @@
                 const agg = rowsByModel.get(key);
                 agg.request_count += row.request_count || 0;
                 agg.input_tokens += row.input_tokens || 0;
+                agg.cache_creation_input_tokens += row.cache_creation_input_tokens || 0;
+                agg.cache_read_input_tokens += row.cache_read_input_tokens || 0;
                 agg.output_tokens += row.output_tokens || 0;
                 agg.total_tokens += row.total_tokens || 0;
                 agg.data_sent += row.data_sent || 0;
@@ -601,6 +608,8 @@
             const sum = {
                 request_count: 0,
                 input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
                 data_sent: 0,
@@ -611,6 +620,8 @@
             for (const row of modelRows) {
                 sum.request_count += row.request_count || 0;
                 sum.input_tokens += row.input_tokens || 0;
+                sum.cache_creation_input_tokens += row.cache_creation_input_tokens || 0;
+                sum.cache_read_input_tokens += row.cache_read_input_tokens || 0;
                 sum.output_tokens += row.output_tokens || 0;
                 sum.total_tokens += row.total_tokens || 0;
                 sum.data_sent += row.data_sent || 0;
@@ -622,6 +633,8 @@
                     <td>${row.model_id}</td>
                     <td>${formatNumber(row.request_count || 0)}</td>
                     <td>${formatNumber(row.input_tokens || 0)}</td>
+                    <td>${formatNumber(row.cache_creation_input_tokens || 0)}</td>
+                    <td>${formatNumber(row.cache_read_input_tokens || 0)}</td>
                     <td>${formatNumber(row.output_tokens || 0)}</td>
                     <td>${formatNumber(row.total_tokens || 0)}</td>
                     <td>${formatNumber(row.data_sent || 0)}</td>
@@ -633,7 +646,7 @@
 
             if (modelRows.length === 0) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"8\">No token usage in selected range/machines.</td>";
+                tr.innerHTML = "<td colspan=\"10\">No token usage in selected range/machines.</td>";
                 tbody.appendChild(tr);
                 return;
             }
@@ -644,6 +657,8 @@
                 <td>Sum</td>
                 <td>${formatNumber(sum.request_count)}</td>
                 <td>${formatNumber(sum.input_tokens)}</td>
+                <td>${formatNumber(sum.cache_creation_input_tokens)}</td>
+                <td>${formatNumber(sum.cache_read_input_tokens)}</td>
                 <td>${formatNumber(sum.output_tokens)}</td>
                 <td>${formatNumber(sum.total_tokens)}</td>
                 <td>${formatNumber(sum.data_sent)}</td>

@@ -1,0 +1,918 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="data:,">
+    <title>Request File Statistics</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif; background:#f5f5f5; color:#333; line-height:1.6; min-height:100vh; }
+        button, select, input { font: inherit; }
+        .navbar { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; padding:1rem 2rem; display:flex; justify-content:space-between; align-items:center; gap:1rem; box-shadow:0 2px 10px rgba(0,0,0,.1); }
+        .navbar h1 { font-size:1.5rem; font-weight:600; }
+        .navbar-actions { display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
+        .navbar-actions a { color:#fff; text-decoration:none; padding:.5rem 1rem; border-radius:4px; background:rgba(255,255,255,.2); transition:background .2s; font-size:.875rem; }
+        .navbar-actions a:hover, .navbar-actions a[aria-current="page"] { background:rgba(255,255,255,.3); }
+        .container { max-width:1400px; margin:0 auto; padding:2rem; }
+
+        .panel { background:#fff; border-radius:12px; padding:1.5rem; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:2rem; }
+        .panel-header { display:flex; align-items:center; justify-content:space-between; gap:1rem; border-bottom:2px solid #667eea; padding-bottom:.5rem; margin-bottom:1rem; }
+        .panel-header h3 { font-size:1.25rem; font-weight:600; color:#333; }
+        .panel-header p { margin-top:.25rem; color:#888; font-size:.875rem; }
+
+        .button-row, .filter-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem; }
+        .btn { border:1px solid #ddd; color:#333; background:#fff; padding:.5rem .8rem; cursor:pointer; border-radius:6px; font-weight:600; transition:all .2s; }
+        .btn:hover:not(:disabled) { background:#667eea; color:#fff; border-color:#667eea; }
+        .btn.primary { color:#fff; background:#667eea; border-color:#667eea; }
+        .btn.primary:hover:not(:disabled) { background:#5a6fd6; }
+        .btn.danger { color:#c62828; background:#ffebee; border-color:#ffcdd2; }
+        .btn:disabled { cursor: not-allowed; opacity: 0.48; }
+
+        .file-toolbar { padding:.75rem 0; display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
+        .selection-summary { color:#666; font-size:.875rem; }
+        .file-list { max-height:335px; overflow:auto; border:1px solid #eee; border-radius:8px; }
+        .file-item {
+            display: grid;
+            grid-template-columns: 30px minmax(155px, 1fr) minmax(90px, auto) minmax(90px, auto);
+            align-items: center;
+            gap: 0.75rem;
+            min-height: 48px;
+            padding: 0.5rem 1.2rem;
+            border-bottom: 1px solid #eee;
+            cursor: pointer;
+        }
+        .file-item:hover { background:#f8f9fa; }
+        .file-name { font-family:Consolas,monospace; font-weight:700; }
+        .file-size, .file-date { color:#888; font-size:.8rem; text-align:right; }
+        .status-chip { justify-self:start; display:inline-flex; padding:.2rem .55rem; border-radius:12px; font-size:.6875rem; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+        .status-chip.ready { background:#e8f5e9; color:#2e7d32; }
+        .status-chip.stale { background:#fff3e0; color:#e65100; }
+        .status-chip.missing { background:#f8f9fa; color:#555; }
+        .status-chip.error { background:#ffebee; color:#c62828; }
+        .status-chip.indexing { background:#e3f2fd; color:#1565c0; animation:pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+        .empty { padding:2.3rem 1.2rem; text-align:center; color:#888; }
+
+        .job-panel { padding: 1.1rem 1.2rem; }
+        .job-topline { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+        .job-title { font-weight: 750; }
+        .job-meta { margin-top:.38rem; color:#888; font-size:.82rem; font-family:Consolas,monospace; }
+        .progress-track { height:8px; background:#eee; margin-top:.9rem; overflow:hidden; border-radius:4px; }
+        .progress-fill { height:100%; width:0; background:#667eea; transition:width 220ms ease; }
+        .progress-fill.indeterminate { width: 35%; animation: scan 1.25s ease-in-out infinite; }
+        @keyframes scan { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }
+
+        .notices { display: grid; gap: 0.6rem; margin-bottom: 1.2rem; }
+        .notice { padding:.75rem .9rem; border-radius:8px; background:#fff; box-shadow:0 2px 8px rgba(0,0,0,.08); color:#555; }
+        .notice.warning { background:#fff3e0; color:#e65100; }
+        .notice.error { background:#ffebee; color:#c62828; }
+
+        .results { transition: opacity 150ms ease; }
+        .results.loading { opacity: 0.46; pointer-events: none; }
+        .results[hidden] { display: none; }
+
+        .filter-panel { display:flex; justify-content:space-between; gap:1rem; flex-wrap:wrap; align-items:center; }
+        .segmented { display:inline-flex; gap:.35rem; }
+        .segmented button, .token-tab { padding:.5rem .75rem; border:1px solid #ddd; background:#fff; border-radius:6px; font-size:.75rem; cursor:pointer; transition:all .2s; color:#333; }
+        .segmented button.active, .token-tab.active { background:#667eea; color:#fff; border-color:#667eea; }
+        .segmented button:hover:not(.active), .token-tab:hover:not(.active) { background:#f0f0f0; }
+        select { color:#333; background:#fff; border:1px solid #ddd; border-radius:6px; padding:.5rem 2rem .5rem .65rem; }
+
+        .kpi-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:1.5rem; margin-bottom:2rem; }
+        .kpi { min-height:116px; padding:1.5rem; background:#fff; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.08); }
+        .kpi-label { color:#666; font-size:.75rem; text-transform:uppercase; letter-spacing:.5px; }
+        .kpi-value { margin-top:.5rem; font-size:2rem; font-weight:700; color:#333; }
+        .kpi-note { color:#888; font-size:.75rem; margin-top:.25rem; }
+
+        .charts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.2rem; margin-bottom: 1.2rem; }
+        .chart-card { min-width: 0; }
+        .chart-card.token { grid-column: 1 / -1; }
+        .chart-body { position: relative; min-height: 300px; padding: 0.7rem 1rem 0.4rem; }
+        .chart-body svg { display: block; width: 100%; height: auto; }
+        .chart-tooltip { position:fixed; z-index:30; pointer-events:none; min-width:150px; padding:.6rem .75rem; color:#d4d4d4; background:#1e1e1e; border-radius:6px; box-shadow:0 2px 10px rgba(0,0,0,.25); font-size:.78rem; opacity:0; transform:translate(12px,12px); }
+        .chart-tooltip strong { display:block; color:#fff; font-size:1rem; margin-bottom:.16rem; }
+        .chart-empty { height:250px; display:grid; place-items:center; color:#888; }
+        details { border-top:1px solid #eee; }
+        summary { cursor:pointer; padding:.75rem 0; color:#555; font-weight:600; display:flex; align-items:center; gap:.45rem; }
+        .parsed-toggle-indicator { flex-shrink:0; color:#666; transition:transform .15s ease; }
+        details:not([open]) > summary .parsed-toggle-indicator { transform:rotate(-90deg); }
+        .token-tabs { padding:.7rem 0 0; display:flex; gap:.45rem; flex-wrap:wrap; }
+
+        .table-wrap { overflow: auto; }
+        table { width:100%; border-collapse:collapse; font-size:.875rem; font-variant-numeric:tabular-nums; }
+        th, td { padding:.75rem 1rem; border-bottom:1px solid #eee; text-align:right; white-space:nowrap; }
+        th { color:#555; background:#f8f9fa; text-transform:uppercase; letter-spacing:.5px; font-size:.75rem; font-weight:600; position:sticky; top:0; }
+        tbody tr:hover { background:#f8f9fa; }
+        th:first-child, td:first-child { text-align: left; }
+        tr:last-child td { border-bottom: 0; }
+        .model-cell { font-family: Consolas, monospace; font-weight: 650; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+        .status-code { display:inline-flex; align-items:center; gap:.45rem; font-family:Consolas,monospace; font-weight:750; }
+        .status-code::before { content:""; width:8px; height:8px; border-radius:50%; background:currentColor; }
+        .status-code.success { color:#2e7d32; } .status-code.redirect { color:#1565c0; }
+        .status-code.client-error { color:#e65100; } .status-code.server-error { color:#c62828; }
+        .status-code.cancelled, .status-code.unknown { color:#666; }
+        .request-link { color:#667eea; font-weight:700; text-decoration:none; }
+        .request-link:hover { text-decoration:underline; text-underline-offset:3px; }
+        .sum-row { font-weight:700; background:#f0f2ff; }
+        .btn:focus-visible, select:focus-visible, rect[role="button"]:focus-visible { outline:2px solid #5a6fd6; outline-offset:2px; }
+
+        @media (max-width: 1100px) {
+            .kpi-grid { grid-template-columns: repeat(3, 1fr); }
+            .charts-grid { grid-template-columns: 1fr; }
+            .chart-card.token { grid-column: auto; }
+        }
+        @media (max-width: 720px) {
+            .navbar { align-items:flex-start; flex-direction:column; padding:1rem; }
+            .container { padding:1rem; }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+            .file-item { grid-template-columns: 28px 1fr auto; }
+            .file-date { display: none; }
+            .panel-header { align-items: flex-start; flex-direction: column; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar">
+        <h1>Request File Statistics</h1>
+        <div class="navbar-actions">
+            <a href="/">Dashboard</a>
+            <a href="/requests">Request Browser</a>
+            <a href="/chat">Chat</a>
+            <a href="/agent">Code Agent</a>
+            <a href="/code-agent-manager">Code Agent Manager</a>
+            <a href="/request-stats" aria-current="page">Request Stats</a>
+            <a href="/api/stats">API Stats</a>
+        </div>
+    </nav>
+
+    <main class="container">
+        <section class="panel" aria-labelledby="file-picker-title">
+            <div class="panel-header">
+                <div><h3 id="file-picker-title">01 / Select source files</h3><p>Only checked files are read. Listing this directory never scans request contents.</p></div>
+                <button class="btn" type="button" id="refresh-files-btn">Refresh files</button>
+            </div>
+            <div class="file-toolbar">
+                <div class="button-row">
+                    <button class="btn" type="button" id="select-all-btn">Select all</button>
+                    <button class="btn" type="button" id="clear-selection-btn">Clear</button>
+                </div>
+                <div class="selection-summary" id="selection-summary">Loading request files…</div>
+                <button class="btn primary" type="button" id="generate-btn" disabled>Generate statistics</button>
+            </div>
+            <div class="file-list" id="file-list"><div class="empty">Loading request files…</div></div>
+        </section>
+
+        <section class="panel" id="job-panel" hidden aria-live="polite">
+            <div class="job-panel">
+                <div class="job-topline">
+                    <div><div class="job-title" id="job-title">Preparing scan…</div><div class="job-meta" id="job-meta"></div></div>
+                    <button class="btn danger" type="button" id="cancel-btn">Cancel</button>
+                </div>
+                <div class="progress-track" aria-hidden="true"><div class="progress-fill indeterminate" id="progress-fill"></div></div>
+            </div>
+        </section>
+
+        <div class="notices" id="notices" aria-live="polite"></div>
+
+        <section class="results" id="results" hidden>
+            <div class="panel filter-panel">
+                <div class="filter-row">
+                    <strong>View</strong>
+                    <div class="segmented" role="group" aria-label="Statistics view">
+                        <button type="button" class="active" id="overall-view-btn">Overall</button>
+                        <button type="button" id="model-view-btn">By model</button>
+                        <button type="button" id="status-code-view-btn">By response code</button>
+                    </div>
+                    <select id="model-select" hidden aria-label="Model"></select>
+                    <select id="status-code-select" hidden aria-label="Response code"></select>
+                </div>
+                <div class="selection-summary" id="result-caption"></div>
+            </div>
+
+            <div class="kpi-grid" id="kpi-grid"></div>
+
+            <div class="charts-grid">
+                <section class="panel chart-card">
+                    <div class="panel-header"><div><h3>Request size distribution</h3><p>Bytes sent to the upstream request.</p></div></div>
+                    <div class="chart-body" id="request-size-chart"></div>
+                    <details><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>View bucket table</summary><div class="table-wrap"><table><thead><tr><th>Range</th><th>Requests</th><th>Share</th></tr></thead><tbody id="request-size-table"></tbody></table></div></details>
+                </section>
+
+                <section class="panel chart-card">
+                    <div class="panel-header"><div><h3>Request duration distribution</h3><p>Completed request latency from the persisted duration field.</p></div></div>
+                    <div class="chart-body" id="duration-chart"></div>
+                    <details><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>View bucket table</summary><div class="table-wrap"><table><thead><tr><th>Range</th><th>Requests</th><th>Share</th></tr></thead><tbody id="duration-table"></tbody></table></div></details>
+                </section>
+
+                <section class="panel chart-card token">
+                    <div class="panel-header"><div><h3>Billing token distribution</h3><p>One request per bucket, split using the usage fields persisted by ghc-api.</p></div></div>
+                    <div class="token-tabs" id="token-tabs"></div>
+                    <div class="chart-body" id="token-chart"></div>
+                    <details><summary><span class="parsed-toggle-indicator" aria-hidden="true">▾</span>View bucket table</summary><div class="table-wrap"><table><thead><tr><th>Range</th><th>Requests</th><th>Share</th></tr></thead><tbody id="token-table"></tbody></table></div></details>
+                </section>
+            </div>
+
+            <section class="panel">
+                <div class="panel-header"><div><h3>Model comparison</h3><p>Totals remain visible while the charts focus on one overall/model slice.</p></div></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Model</th><th>Requests</th><th>Avg size</th><th>Avg duration</th><th>Input not cached</th><th>Cache write</th><th>Cache read</th><th>Output</th><th>Total billed</th></tr></thead>
+                        <tbody id="model-table"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel">
+                <div class="panel-header"><div><h3>Response code comparison</h3><p>Exact codes preserve the distinction between rate limits, cancellations, and upstream failures.</p></div></div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Response code</th><th>Requests</th><th>Avg size</th><th>Avg duration</th><th>Input not cached</th><th>Cache write</th><th>Cache read</th><th>Output</th><th>Total billed</th></tr></thead>
+                        <tbody id="status-code-table"></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="panel" id="matching-requests-panel" hidden>
+                <div class="panel-header">
+                    <div><h3>Matching requests</h3><p id="matching-requests-caption">Select a histogram bucket to inspect its requests.</p></div>
+                    <button class="btn" type="button" id="close-matches-btn">Close</button>
+                </div>
+                <div class="table-wrap">
+                    <table>
+                        <thead><tr><th>Time</th><th>Model</th><th>Endpoint</th><th>Status</th><th>Duration</th><th>Request size</th><th>Total tokens</th><th>User</th><th>Source</th></tr></thead>
+                        <tbody id="matching-requests-body"></tbody>
+                    </table>
+                </div>
+                <div class="file-toolbar"><div class="selection-summary" id="matches-page-summary"></div><div class="button-row"><button class="btn" id="matches-prev-btn" type="button">Previous</button><button class="btn" id="matches-next-btn" type="button">Next</button></div></div>
+            </section>
+        </section>
+    </main>
+
+    <div class="chart-tooltip" id="chart-tooltip" role="status"></div>
+
+    <script>
+        const TOKEN_METRICS = [
+            ["input_not_cached_tokens", "Input not cached"],
+            ["cache_write_tokens", "Cache write"],
+            ["cache_read_tokens", "Cache read"],
+            ["output_tokens", "Output"],
+            ["total_billed_tokens", "Total billed"]
+        ];
+        const TERMINAL_STATES = new Set(["completed", "cancelled", "failed"]);
+        const MAX_SELECTED_FILES = 366;
+
+        let files = [];
+        let selectedFiles = new Set();
+        let currentJobId = null;
+        let pollTimer = null;
+        let resultData = null;
+        let viewMode = "overall";
+        let selectedModel = null;
+        let selectedStatusCode = null;
+        let tokenMetric = "total_billed_tokens";
+        let activeMatchFilter = null;
+        let matchesPage = 1;
+        let matchesTotalPages = 0;
+
+        const byId = (id) => document.getElementById(id);
+
+        function formatNumber(value, maximumFractionDigits = 0) {
+            if (value === null || value === undefined || !Number.isFinite(Number(value))) return "—";
+            return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(Number(value));
+        }
+
+        function formatCompact(value) {
+            const n = Number(value || 0);
+            if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+            if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+            return Math.round(n).toString();
+        }
+
+        function formatBytes(value) {
+            if (value === null || value === undefined) return "—";
+            const n = Number(value);
+            if (n === 0) return "0 B";
+            const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+            const index = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+            return `${formatNumber(n / Math.pow(1024, index), index === 0 ? 0 : 2)} ${units[index]}`;
+        }
+
+        function formatDuration(value) {
+            if (value === null || value === undefined) return "—";
+            const ms = Number(value);
+            if (ms < 1000) return `${formatNumber(ms)} ms`;
+            if (ms < 60000) return `${formatNumber(ms / 1000, 2)} s`;
+            return `${formatNumber(ms / 60000, 2)} min`;
+        }
+
+        function addNotice(message, className = "") {
+            const notice = document.createElement("div");
+            notice.className = "notice" + (className ? ` ${className}` : "");
+            notice.textContent = message;
+            byId("notices").appendChild(notice);
+        }
+
+        function clearNotices() { byId("notices").innerHTML = ""; }
+
+        function statusLabel(status) {
+            return ({ ready: "indexed", stale: "append pending", missing: "not indexed", indexing: "indexing", error: "rebuild needed" })[status] || status;
+        }
+
+        async function loadFiles(preserveSelection = true) {
+            byId("refresh-files-btn").disabled = true;
+            try {
+                const response = await fetch("/api/request-stats/files");
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                files = data.files || [];
+                const valid = new Set(files.map((file) => file.name));
+                selectedFiles = preserveSelection
+                    ? new Set([...selectedFiles].filter((name) => valid.has(name)))
+                    : new Set();
+                renderFiles();
+            } catch (error) {
+                byId("file-list").innerHTML = "";
+                const empty = document.createElement("div");
+                empty.className = "empty";
+                empty.textContent = `Failed to list request files: ${error.message || error}`;
+                byId("file-list").appendChild(empty);
+            } finally {
+                byId("refresh-files-btn").disabled = false;
+            }
+        }
+
+        function renderFiles() {
+            const list = byId("file-list");
+            list.innerHTML = "";
+            if (!files.length) {
+                const empty = document.createElement("div");
+                empty.className = "empty";
+                empty.textContent = "No daily request files found. Enable save_request_to_file and complete at least one request.";
+                list.appendChild(empty);
+                updateSelectionSummary();
+                return;
+            }
+
+            for (const file of files) {
+                const label = document.createElement("label");
+                label.className = "file-item";
+                const checkbox = document.createElement("input");
+                checkbox.type = "checkbox";
+                checkbox.checked = selectedFiles.has(file.name);
+                checkbox.addEventListener("change", () => {
+                    if (checkbox.checked) selectedFiles.add(file.name);
+                    else selectedFiles.delete(file.name);
+                    updateSelectionSummary();
+                });
+                const main = document.createElement("div");
+                const name = document.createElement("div");
+                name.className = "file-name";
+                name.textContent = file.name;
+                const chip = document.createElement("span");
+                chip.className = `status-chip ${file.index_status}`;
+                chip.textContent = statusLabel(file.index_status);
+                main.append(name, chip);
+                const size = document.createElement("div");
+                size.className = "file-size";
+                size.textContent = formatBytes(file.size_bytes);
+                const date = document.createElement("div");
+                date.className = "file-date";
+                date.textContent = new Date(file.modified_ts * 1000).toLocaleString();
+                label.append(checkbox, main, size, date);
+                list.appendChild(label);
+            }
+            updateSelectionSummary();
+        }
+
+        function updateSelectionSummary() {
+            const total = files.filter((file) => selectedFiles.has(file.name)).reduce((sum, file) => sum + file.size_bytes, 0);
+            byId("selection-summary").textContent = `${selectedFiles.size} file${selectedFiles.size === 1 ? "" : "s"} selected · ${formatBytes(total)}`;
+            byId("generate-btn").disabled = selectedFiles.size === 0 || Boolean(currentJobId);
+        }
+
+        async function startJob() {
+            if (!selectedFiles.size) return;
+            clearNotices();
+            byId("results").classList.toggle("loading", Boolean(resultData));
+            byId("job-panel").hidden = false;
+            byId("cancel-btn").disabled = false;
+            byId("job-title").textContent = "Submitting selected files…";
+            byId("job-meta").textContent = "";
+            byId("progress-fill").className = "progress-fill indeterminate";
+            updateSelectionSummary();
+            try {
+                const response = await fetch("/api/request-stats/jobs", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ files: [...selectedFiles] })
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.message || data.error || `HTTP ${response.status}`);
+                }
+                currentJobId = data.job.id;
+                renderJob(data.job);
+                schedulePoll(80);
+            } catch (error) {
+                byId("results").classList.remove("loading");
+                byId("job-panel").hidden = true;
+                addNotice(`Unable to start statistics job: ${error.message || error}`, "error");
+                updateSelectionSummary();
+            }
+        }
+
+        function schedulePoll(delay = 450) {
+            clearTimeout(pollTimer);
+            pollTimer = setTimeout(pollJob, delay);
+        }
+
+        async function pollJob() {
+            if (!currentJobId) return;
+            try {
+                const response = await fetch(`/api/request-stats/jobs/${encodeURIComponent(currentJobId)}`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                renderJob(data.job);
+                if (!TERMINAL_STATES.has(data.job.status)) schedulePoll();
+                else finishJob(data.job);
+            } catch (error) {
+                addNotice(`Failed to refresh scan progress: ${error.message || error}`, "error");
+                schedulePoll(1200);
+            }
+        }
+
+        function renderJob(job) {
+            byId("job-panel").hidden = false;
+            const mode = ({ cached: "using index", incremental: "indexing appended bytes", rebuild: "building full index", checking: "checking index" })[job.current_mode] || job.current_mode || job.status;
+            byId("job-title").textContent = job.current_file ? `${job.current_file} · ${mode}` : `Statistics job ${job.status}`;
+            const processedBytes = Math.max(job.bytes_processed || 0, job.current_file_bytes_processed || 0);
+            byId("job-meta").textContent = `${job.files_completed}/${job.files_total} files · ${formatBytes(processedBytes)} / ${formatBytes(job.bytes_total)} · ${job.cache_hits} cached · ${job.incremental_scans} incremental · ${job.rebuild_scans} rebuilt`;
+            const percent = job.bytes_total > 0 ? Math.min(100, (processedBytes / job.bytes_total) * 100) : 0;
+            const fill = byId("progress-fill");
+            fill.className = "progress-fill" + (job.bytes_total > 0 ? "" : " indeterminate");
+            fill.style.width = job.bytes_total > 0 ? `${percent}%` : "35%";
+            byId("cancel-btn").disabled = TERMINAL_STATES.has(job.status) || job.cancel_requested;
+        }
+
+        function finishJob(job) {
+            currentJobId = null;
+            byId("results").classList.remove("loading");
+            byId("cancel-btn").disabled = true;
+            updateSelectionSummary();
+            if (job.status === "completed") {
+                resultData = job.result;
+                renderResult();
+                byId("job-title").textContent = "Statistics ready";
+                byId("progress-fill").style.width = "100%";
+                loadFiles(true);
+            } else if (job.status === "cancelled") {
+                byId("job-title").textContent = "Scan cancelled — existing indexes were preserved";
+                addNotice("The scan was cancelled. Completed indexes remain available; an in-progress file kept its previous index.", "warning");
+            } else {
+                byId("job-title").textContent = "Scan failed";
+                addNotice(`Statistics job failed: ${job.error || "Unknown error"}`, "error");
+            }
+        }
+
+        async function cancelJob() {
+            if (!currentJobId) return;
+            byId("cancel-btn").disabled = true;
+            try {
+                await fetch(`/api/request-stats/jobs/${encodeURIComponent(currentJobId)}/cancel`, { method: "POST" });
+                schedulePoll(50);
+            } catch (error) {
+                addNotice(`Unable to cancel job: ${error.message || error}`, "error");
+            }
+        }
+
+        function currentGroup() {
+            if (!resultData) return null;
+            if (viewMode === "model" && selectedModel && resultData.by_model[selectedModel]) return resultData.by_model[selectedModel];
+            if (viewMode === "status_code" && selectedStatusCode && resultData.by_status_code[selectedStatusCode]) return resultData.by_status_code[selectedStatusCode];
+            return resultData.overall;
+        }
+
+        function currentViewValue() {
+            if (viewMode === "model") return selectedModel;
+            if (viewMode === "status_code") return selectedStatusCode;
+            return null;
+        }
+
+        function setView(mode) {
+            viewMode = mode;
+            byId("overall-view-btn").classList.toggle("active", mode === "overall");
+            byId("model-view-btn").classList.toggle("active", mode === "model");
+            byId("status-code-view-btn").classList.toggle("active", mode === "status_code");
+            byId("model-select").hidden = mode !== "model";
+            byId("status-code-select").hidden = mode !== "status_code";
+            closeMatches();
+            renderActiveSlice();
+        }
+
+        function renderResult() {
+            byId("results").hidden = false;
+            clearNotices();
+            const quality = resultData.quality || {};
+            const malformed = (quality.invalid_json_lines || 0) + (quality.non_object_lines || 0) + (quality.oversize_lines || 0);
+            if (malformed) addNotice(`${formatNumber(malformed)} malformed, non-object, or oversized line${malformed === 1 ? " was" : "s were"} skipped.`, "warning");
+            if (quality.partial_tail_bytes) addNotice(`${formatBytes(quality.partial_tail_bytes)} at a file tail was incomplete and will be retried after the line is finished.`, "warning");
+            for (const warning of resultData.warnings || []) addNotice(`${warning.file || "File"}: ${warning.message}`, "warning");
+            for (const skipped of resultData.skipped_files || []) addNotice(`${skipped.file}: ${skipped.message}`, "error");
+            if (resultData.model_overflow) addNotice("The model cardinality limit was reached; additional model identifiers were grouped under Other.", "warning");
+            if (resultData.contains_error_requests) addNotice("Distributions include all persisted attempts, including failed requests. Failed attempts commonly contribute zero usage tokens.");
+
+            const select = byId("model-select");
+            select.innerHTML = "";
+            for (const model of resultData.models_ordered || []) {
+                const option = document.createElement("option");
+                option.value = model;
+                option.textContent = model === "__other__" ? "Other" : model;
+                select.appendChild(option);
+            }
+            selectedModel = (resultData.models_ordered || [])[0] || null;
+            if (selectedModel) select.value = selectedModel;
+            if (!selectedModel && viewMode === "model") viewMode = "overall";
+            byId("model-view-btn").disabled = !selectedModel;
+
+            const statusSelect = byId("status-code-select");
+            statusSelect.innerHTML = "";
+            for (const code of resultData.status_codes_ordered || []) {
+                const option = document.createElement("option");
+                option.value = code;
+                option.textContent = code === "unknown" ? "Unknown" : code;
+                statusSelect.appendChild(option);
+            }
+            selectedStatusCode = (resultData.status_codes_ordered || [])[0] || null;
+            if (selectedStatusCode) statusSelect.value = selectedStatusCode;
+            if (!selectedStatusCode && viewMode === "status_code") viewMode = "overall";
+            byId("status-code-view-btn").disabled = !selectedStatusCode;
+
+            const modes = resultData.files.reduce((counts, file) => {
+                counts[file.mode] = (counts[file.mode] || 0) + 1;
+                return counts;
+            }, {});
+            byId("result-caption").textContent = `${formatNumber(resultData.overall.request_count)} requests · ${resultData.files.length} files · ${modes.cached || 0} cached / ${modes.incremental || 0} incremental / ${modes.rebuild || 0} rebuilt`;
+            renderTokenTabs();
+            renderModelTable();
+            renderStatusCodeTable();
+            closeMatches();
+            setView(viewMode);
+        }
+
+        function renderKpis(group) {
+            const metrics = group.metrics;
+            const items = [
+                ["Requests", group.request_count, "indexed records", "number"],
+                ["Average size", metrics.request_size.avg, `${formatNumber(metrics.request_size.missing + metrics.request_size.invalid)} unavailable`, "bytes"],
+                ["Average duration", metrics.duration_ms.avg, `${formatNumber(metrics.duration_ms.missing + metrics.duration_ms.invalid)} unavailable`, "duration"],
+                ["Input not cached", metrics.input_not_cached_tokens.sum, "billing token total", "number"],
+                ["Cache write", metrics.cache_write_tokens.sum, "billing token total", "number"],
+                ["Cache read", metrics.cache_read_tokens.sum, "billing token total", "number"],
+                ["Output", metrics.output_tokens.sum, "billing token total", "number"],
+                ["Total billed", metrics.total_billed_tokens.sum, "all billing token fields", "number"]
+            ];
+            const grid = byId("kpi-grid");
+            grid.innerHTML = "";
+            for (const [label, value, note, type] of items) {
+                const card = document.createElement("div");
+                card.className = "kpi";
+                const labelEl = document.createElement("div");
+                labelEl.className = "kpi-label";
+                labelEl.textContent = label;
+                const valueEl = document.createElement("div");
+                valueEl.className = "kpi-value";
+                valueEl.textContent = type === "bytes" ? formatBytes(value) : type === "duration" ? formatDuration(value) : formatCompact(value);
+                const noteEl = document.createElement("div");
+                noteEl.className = "kpi-note";
+                noteEl.textContent = note;
+                card.append(labelEl, valueEl, noteEl);
+                grid.appendChild(card);
+            }
+        }
+
+        function renderTokenTabs() {
+            const tabs = byId("token-tabs");
+            tabs.innerHTML = "";
+            for (const [key, label] of TOKEN_METRICS) {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "token-tab" + (key === tokenMetric ? " active" : "");
+                button.textContent = label;
+                button.addEventListener("click", () => {
+                    tokenMetric = key;
+                    renderTokenTabs();
+                    renderDistribution("token", currentGroup().metrics[tokenMetric]);
+                });
+                tabs.appendChild(button);
+            }
+        }
+
+        function renderActiveSlice() {
+            const group = currentGroup();
+            if (!group) return;
+            renderKpis(group);
+            renderDistribution("request-size", group.metrics.request_size);
+            renderDistribution("duration", group.metrics.duration_ms);
+            renderDistribution("token", group.metrics[tokenMetric]);
+        }
+
+        function bucketRange(metric, bucket) {
+            const upper = bucket.upper;
+            const lower = bucket.lower;
+            if (metric === "request-size") {
+                if (upper === null) return `${formatBytes(lower)}+`;
+                if (lower === upper) return formatBytes(lower);
+                return `${formatBytes(lower)} – ${formatBytes(upper)}`;
+            }
+            if (metric === "duration") {
+                if (upper === null) return `${formatDuration(lower)}+`;
+                return `${formatDuration(lower)} – ${formatDuration(upper)}`;
+            }
+            if (upper === null) return `${formatNumber(lower)}+`;
+            if (lower === upper) return formatNumber(lower);
+            return `${formatNumber(lower)} – ${formatNumber(upper)}`;
+        }
+
+        function renderDistribution(prefix, metricData) {
+            const chart = byId(`${prefix}-chart`);
+            const table = byId(`${prefix}-table`);
+            chart.innerHTML = "";
+            table.innerHTML = "";
+            const buckets = metricData.buckets || [];
+            const total = buckets.reduce((sum, bucket) => sum + bucket.count, 0);
+            if (!total) {
+                const empty = document.createElement("div");
+                empty.className = "chart-empty";
+                empty.textContent = "No valid values in this slice.";
+                chart.appendChild(empty);
+                const row = document.createElement("tr");
+                const cell = document.createElement("td");
+                cell.colSpan = 3;
+                cell.textContent = "No valid values.";
+                row.appendChild(cell);
+                table.appendChild(row);
+                return;
+            }
+
+            const maxCount = Math.max(...buckets.map((bucket) => bucket.count), 1);
+            const tickStep = Math.max(1, Math.ceil(maxCount / 4));
+            const yMax = Math.ceil(maxCount / tickStep) * tickStep;
+            const W = 920, H = 285;
+            const PAD = { top: 18, right: 16, bottom: 62, left: 58 };
+            const plotW = W - PAD.left - PAD.right;
+            const plotH = H - PAD.top - PAD.bottom;
+            const slot = plotW / buckets.length;
+            const barWidth = Math.max(4, Math.min(24, slot - 2));
+            const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+            svg.setAttribute("role", "img");
+            svg.setAttribute("aria-label", "Distribution histogram");
+
+            for (let value = 0; value <= yMax; value += tickStep) {
+                const y = PAD.top + plotH - (value / yMax) * plotH;
+                const line = document.createElementNS(svg.namespaceURI, "line");
+                line.setAttribute("x1", PAD.left);
+                line.setAttribute("x2", W - PAD.right);
+                line.setAttribute("y1", y);
+                line.setAttribute("y2", y);
+                line.setAttribute("stroke", "#eeeeee");
+                line.setAttribute("stroke-width", "1");
+                svg.appendChild(line);
+                const text = document.createElementNS(svg.namespaceURI, "text");
+                text.setAttribute("x", PAD.left - 8);
+                text.setAttribute("y", y + 4);
+                text.setAttribute("text-anchor", "end");
+                text.setAttribute("fill", "#888888");
+                text.setAttribute("font-size", "11");
+                text.textContent = formatCompact(value);
+                svg.appendChild(text);
+            }
+
+            const labelStep = Math.max(1, Math.ceil(buckets.length / 9));
+            buckets.forEach((bucket, index) => {
+                const height = (bucket.count / yMax) * plotH;
+                const x = PAD.left + index * slot + (slot - barWidth) / 2;
+                const y = PAD.top + plotH - height;
+                const rect = document.createElementNS(svg.namespaceURI, "rect");
+                rect.setAttribute("x", x);
+                rect.setAttribute("y", y);
+                rect.setAttribute("width", barWidth);
+                rect.setAttribute("height", Math.max(height, bucket.count ? 2 : 0));
+                rect.setAttribute("fill", "#667eea");
+                rect.setAttribute("rx", "4");
+                rect.setAttribute("tabindex", "0");
+                const label = bucketRange(prefix, bucket);
+                const show = (event) => showTooltip(event, label, bucket.count, total, rect);
+                const metricName = prefix === "request-size" ? "request_size" : prefix === "duration" ? "duration_ms" : tokenMetric;
+                const open = () => openMatches(metricName, bucket.index, label);
+                rect.setAttribute("role", "button");
+                rect.setAttribute("aria-label", `${label}: ${bucket.count} requests. Open matching requests.`);
+                rect.addEventListener("pointermove", show);
+                rect.addEventListener("pointerleave", hideTooltip);
+                rect.addEventListener("focus", show);
+                rect.addEventListener("blur", hideTooltip);
+                rect.addEventListener("click", open);
+                rect.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+                });
+                svg.appendChild(rect);
+
+                if (index % labelStep === 0) {
+                    const text = document.createElementNS(svg.namespaceURI, "text");
+                    const tx = PAD.left + index * slot + slot / 2;
+                    text.setAttribute("x", tx);
+                    text.setAttribute("y", H - 13);
+                    text.setAttribute("text-anchor", "end");
+                    text.setAttribute("transform", `rotate(-34 ${tx} ${H - 13})`);
+                    text.setAttribute("fill", "#888888");
+                    text.setAttribute("font-size", "10");
+                    text.textContent = label;
+                    svg.appendChild(text);
+                }
+
+                const row = document.createElement("tr");
+                const rangeCell = document.createElement("td");
+                rangeCell.textContent = label;
+                const countCell = document.createElement("td");
+                countCell.textContent = formatNumber(bucket.count);
+                const shareCell = document.createElement("td");
+                shareCell.textContent = `${formatNumber((bucket.count / total) * 100, 2)}%`;
+                row.append(rangeCell, countCell, shareCell);
+                table.appendChild(row);
+            });
+
+            const baseline = document.createElementNS(svg.namespaceURI, "line");
+            baseline.setAttribute("x1", PAD.left);
+            baseline.setAttribute("x2", W - PAD.right);
+            baseline.setAttribute("y1", PAD.top + plotH);
+            baseline.setAttribute("y2", PAD.top + plotH);
+            baseline.setAttribute("stroke", "#dddddd");
+            svg.appendChild(baseline);
+            chart.appendChild(svg);
+        }
+
+        function showTooltip(event, label, count, total, mark) {
+            const tooltip = byId("chart-tooltip");
+            tooltip.innerHTML = "";
+            const strong = document.createElement("strong");
+            strong.textContent = formatNumber(count);
+            const range = document.createElement("div");
+            range.textContent = label;
+            const share = document.createElement("div");
+            share.textContent = `${formatNumber((count / total) * 100, 2)}% of valid requests`;
+            tooltip.append(strong, range, share);
+            const rect = mark.getBoundingClientRect();
+            const x = event.clientX || rect.left + rect.width / 2;
+            const y = event.clientY || rect.top;
+            tooltip.style.left = `${Math.min(window.innerWidth - 190, x)}px`;
+            tooltip.style.top = `${Math.min(window.innerHeight - 110, y)}px`;
+            tooltip.style.opacity = "1";
+            mark.setAttribute("opacity", "0.74");
+        }
+
+        function hideTooltip(event) {
+            byId("chart-tooltip").style.opacity = "0";
+            if (event && event.currentTarget) event.currentTarget.setAttribute("opacity", "1");
+        }
+
+        function renderModelTable() {
+            const body = byId("model-table");
+            body.innerHTML = "";
+            const models = resultData.models_ordered || [];
+            for (const model of models) appendModelRow(body, model, resultData.by_model[model]);
+            if (!models.length) {
+                const row = document.createElement("tr");
+                const cell = document.createElement("td");
+                cell.colSpan = 9;
+                cell.textContent = "No indexed models.";
+                row.appendChild(cell);
+                body.appendChild(row);
+                return;
+            }
+            appendModelRow(body, "Sum", resultData.overall, true);
+        }
+
+        function appendModelRow(body, model, group, sum = false) {
+            const label = document.createElement("span");
+            label.className = "model-cell";
+            label.textContent = model === "__other__" ? "Other" : model;
+            appendComparisonRow(body, label, group, sum);
+        }
+
+        function statusCodeClass(code) {
+            if (code === "unknown") return "unknown";
+            if (code === "499") return "cancelled";
+            const n = Number(code);
+            if (n >= 200 && n < 300) return "success";
+            if (n >= 300 && n < 400) return "redirect";
+            if (n >= 400 && n < 500) return "client-error";
+            return "server-error";
+        }
+
+        function renderStatusCodeTable() {
+            const body = byId("status-code-table");
+            body.innerHTML = "";
+            const codes = resultData.status_codes_ordered || [];
+            for (const code of codes) {
+                const label = document.createElement("span");
+                label.className = `status-code ${statusCodeClass(code)}`;
+                label.textContent = code === "unknown" ? "Unknown" : code;
+                appendComparisonRow(body, label, resultData.by_status_code[code]);
+            }
+            if (!codes.length) {
+                const row = document.createElement("tr"); const cell = document.createElement("td");
+                cell.colSpan = 9; cell.textContent = "No indexed response codes."; row.appendChild(cell); body.appendChild(row); return;
+            }
+            const sumLabel = document.createElement("span"); sumLabel.textContent = "Sum";
+            appendComparisonRow(body, sumLabel, resultData.overall, true);
+        }
+
+        function appendComparisonRow(body, labelNode, group, sum = false) {
+            const row = document.createElement("tr");
+            if (sum) row.className = "sum-row";
+            const labelCell = document.createElement("td"); labelCell.appendChild(labelNode); row.appendChild(labelCell);
+            const values = [
+                formatNumber(group.request_count), formatBytes(group.metrics.request_size.avg), formatDuration(group.metrics.duration_ms.avg),
+                formatNumber(group.metrics.input_not_cached_tokens.sum), formatNumber(group.metrics.cache_write_tokens.sum),
+                formatNumber(group.metrics.cache_read_tokens.sum), formatNumber(group.metrics.output_tokens.sum),
+                formatNumber(group.metrics.total_billed_tokens.sum)
+            ];
+            for (const value of values) { const cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell); }
+            body.appendChild(row);
+        }
+
+        function closeMatches() {
+            activeMatchFilter = null;
+            byId("matching-requests-panel").hidden = true;
+        }
+
+        async function openMatches(metric, bucket, bucketLabel, page = 1) {
+            if (!resultData || !resultData.dataset_id) return;
+            activeMatchFilter = { metric, bucket, bucketLabel, view: viewMode, value: currentViewValue() };
+            matchesPage = page;
+            const panel = byId("matching-requests-panel"); panel.hidden = false;
+            byId("matching-requests-caption").textContent = `Loading ${bucketLabel}…`;
+            const params = new URLSearchParams({ metric, bucket: String(bucket), view: viewMode, page: String(page), per_page: "50" });
+            if (activeMatchFilter.value) params.set("value", activeMatchFilter.value);
+            try {
+                const response = await fetch(`/api/request-stats/datasets/${encodeURIComponent(resultData.dataset_id)}/requests?${params}`);
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                matchesTotalPages = data.total_pages;
+                renderMatches(data, bucketLabel);
+            } catch (error) {
+                byId("matching-requests-body").innerHTML = "";
+                byId("matching-requests-caption").textContent = error.message || String(error);
+            }
+            panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+
+        function renderMatches(data, bucketLabel) {
+            const body = byId("matching-requests-body"); body.innerHTML = "";
+            for (const item of data.items || []) {
+                const row = document.createElement("tr");
+                const timeCell = document.createElement("td"); const link = document.createElement("a");
+                link.className = "request-link"; link.href = item.detail_url; link.target = "_blank"; link.rel = "noopener";
+                link.textContent = item.timestamp ? new Date(item.timestamp * 1000).toLocaleString() : "Unknown time";
+                timeCell.appendChild(link); row.appendChild(timeCell);
+                const values = [item.effective_model || "unknown", item.endpoint || "—", item.status_code ?? "Unknown", formatDuration(item.duration_ms), formatBytes(item.request_size), formatNumber(item.total_billed_tokens), item.user_id || "anonymous", `${item.source_file}@${item.offset}`];
+                for (const value of values) { const cell = document.createElement("td"); cell.textContent = String(value); row.appendChild(cell); }
+                body.appendChild(row);
+            }
+            if (!(data.items || []).length) { const row = document.createElement("tr"); const cell = document.createElement("td"); cell.colSpan = 9; cell.textContent = "No requests match this bucket."; row.appendChild(cell); body.appendChild(row); }
+            byId("matching-requests-caption").textContent = `${formatNumber(data.total)} request${data.total === 1 ? "" : "s"} in ${bucketLabel}`;
+            byId("matches-page-summary").textContent = `Page ${data.page} of ${Math.max(data.total_pages, 1)}`;
+            byId("matches-prev-btn").disabled = data.page <= 1;
+            byId("matches-next-btn").disabled = data.page >= data.total_pages;
+        }
+
+        byId("refresh-files-btn").addEventListener("click", () => loadFiles(true));
+        byId("select-all-btn").addEventListener("click", () => {
+            const selectable = files.slice(0, MAX_SELECTED_FILES);
+            selectedFiles = new Set(selectable.map((file) => file.name));
+            renderFiles();
+            if (files.length > MAX_SELECTED_FILES) {
+                addNotice(`Selected the newest ${MAX_SELECTED_FILES} files; the server limits each job to ${MAX_SELECTED_FILES}.`, "warning");
+            }
+        });
+        byId("clear-selection-btn").addEventListener("click", () => { selectedFiles.clear(); renderFiles(); });
+        byId("generate-btn").addEventListener("click", startJob);
+        byId("cancel-btn").addEventListener("click", cancelJob);
+        byId("overall-view-btn").addEventListener("click", () => setView("overall"));
+        byId("model-view-btn").addEventListener("click", () => setView("model"));
+        byId("status-code-view-btn").addEventListener("click", () => setView("status_code"));
+        byId("model-select").addEventListener("change", (event) => { selectedModel = event.target.value; closeMatches(); renderActiveSlice(); });
+        byId("status-code-select").addEventListener("change", (event) => { selectedStatusCode = event.target.value; closeMatches(); renderActiveSlice(); });
+        byId("close-matches-btn").addEventListener("click", closeMatches);
+        byId("matches-prev-btn").addEventListener("click", () => { if (activeMatchFilter && matchesPage > 1) openMatches(activeMatchFilter.metric, activeMatchFilter.bucket, activeMatchFilter.bucketLabel, matchesPage - 1); });
+        byId("matches-next-btn").addEventListener("click", () => { if (activeMatchFilter && matchesPage < matchesTotalPages) openMatches(activeMatchFilter.metric, activeMatchFilter.bucket, activeMatchFilter.bucketLabel, matchesPage + 1); });
+
+        loadFiles(false);
+    </script>
+</body>
+</html>
