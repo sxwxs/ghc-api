@@ -265,6 +265,8 @@ class ConversionReport:
 class ResponsesWireProfile:
     name: str
     tools_in_input: bool
+    supports_native_web_search: bool
+    native_server_tools_in_input: bool
     supports_prompt_cache_breakpoint: bool
     supports_temperature: bool
     supports_top_p: bool
@@ -277,6 +279,8 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
     "public_responses": ResponsesWireProfile(
         name="public_responses",
         tools_in_input=False,
+        supports_native_web_search=True,
+        native_server_tools_in_input=False,
         supports_prompt_cache_breakpoint=True,
         supports_temperature=True,
         supports_top_p=True,
@@ -286,6 +290,10 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
     "copilot_responses_lite": ResponsesWireProfile(
         name="copilot_responses_lite",
         tools_in_input=True,
+        supports_native_web_search=True,
+        # The live backend accepts native server tools only in top-level tools;
+        # placing web_search inside additional_tools silently removes it.
+        native_server_tools_in_input=False,
         # The supplied dump proves prompt_cache_key but not explicit breakpoints.
         supports_prompt_cache_breakpoint=False,
         supports_temperature=False,
@@ -385,6 +393,7 @@ def prepare_replay_items_for_wire(
         "custom_tool_call": {
             "type", "call_id", "name", "input", "status", "namespace",
         },
+        "web_search_call": {"type", "id", "status", "action"},
     }
     projected: List[Dict[str, Any]] = []
     for item in copied:
@@ -435,7 +444,13 @@ class ResponsesToAnthropicResult:
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        allow_nan=False,
+    )
 
 
 def _data_url(media_type: str, data: str) -> str:
@@ -705,6 +720,14 @@ def _convert_system(
     profile: ResponsesWireProfile,
 ) -> None:
     if isinstance(system, str):
+        if system.startswith("x-anthropic-billing-header:"):
+            report.mark(
+                "/system",
+                PRESERVATION_SEMANTIC,
+                detail="Synthetic Anthropic billing metadata omitted from model input",
+                subtree=True,
+            )
+            return
         input_items.append({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": system}]})
         report.mark("/system", PRESERVATION_EXACT, f"/input/{len(input_items)-1}/content/0/text")
         return
@@ -718,7 +741,16 @@ def _convert_system(
         if not isinstance(block, dict) or block.get("type") != "text":
             report.mark(path, PRESERVATION_UNSUPPORTED, detail="Only system text blocks are supported", subtree=True)
             continue
-        part = {"type": "input_text", "text": str(block.get("text") or "")}
+        text = str(block.get("text") or "")
+        if text.startswith("x-anthropic-billing-header:"):
+            report.mark(
+                path,
+                PRESERVATION_SEMANTIC,
+                detail="Synthetic Anthropic billing metadata omitted from model input",
+                subtree=True,
+            )
+            continue
+        part = {"type": "input_text", "text": text}
         target = f"/input/{item_index}/content/{len(parts)}"
         parts.append(part)
         report.mark(path + "/type", PRESERVATION_SEMANTIC, target + "/type")
@@ -770,10 +802,21 @@ def _map_reasoning_effort(payload: Dict[str, Any], profile: ResponsesWireProfile
     return None
 
 
-def _convert_tool_choice(value: Any, name_codec: IdentifierCodec, report: ConversionReport) -> Any:
+def _convert_tool_choice(
+    value: Any,
+    name_codec: IdentifierCodec,
+    report: ConversionReport,
+    *,
+    has_native_web_search: bool = False,
+) -> Any:
     if isinstance(value, str):
-        report.mark("/tool_choice", PRESERVATION_EXACT, "/tool_choice")
-        return value
+        mapped = "required" if value == "any" else value
+        report.mark(
+            "/tool_choice",
+            PRESERVATION_EXACT if mapped == value else PRESERVATION_SEMANTIC,
+            "/tool_choice",
+        )
+        return mapped
     if not isinstance(value, dict):
         report.mark("/tool_choice", PRESERVATION_UNSUPPORTED, detail="tool_choice must be string or object", subtree=True)
         return "auto"
@@ -787,9 +830,13 @@ def _convert_tool_choice(value: Any, name_codec: IdentifierCodec, report: Conver
         result = "none"
     elif choice_type == "tool":
         original = str(value.get("name") or "")
-        encoded = name_codec.encode(original, "name")
-        result = {"type": "function", "name": encoded}
-        report.mark("/tool_choice/name", PRESERVATION_EXACT if encoded == original else PRESERVATION_SEMANTIC, "/tool_choice/name")
+        if original == "web_search" and has_native_web_search:
+            result = {"type": "web_search"}
+            report.mark("/tool_choice/name", PRESERVATION_SEMANTIC, "/tool_choice/type")
+        else:
+            encoded = name_codec.encode(original, "name")
+            result = {"type": "function", "name": encoded}
+            report.mark("/tool_choice/name", PRESERVATION_EXACT if encoded == original else PRESERVATION_SEMANTIC, "/tool_choice/name")
     else:
         result = "auto"
         report.mark("/tool_choice/type", PRESERVATION_UNSUPPORTED, detail=f"Unknown tool_choice type: {choice_type}")
@@ -798,48 +845,148 @@ def _convert_tool_choice(value: Any, name_codec: IdentifierCodec, report: Conver
     return result
 
 
+def _convert_web_search_tool(
+    tool: Dict[str, Any],
+    path: str,
+    target_base: str,
+    profile: ResponsesWireProfile,
+    report: ConversionReport,
+) -> Optional[Dict[str, Any]]:
+    if not profile.supports_native_web_search:
+        report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"{profile.name} has no native web search mapping", subtree=True)
+        return None
+
+    tool_type = str(tool.get("type") or "")
+    name = str(tool.get("name") or "")
+    if tool_type != "web_search_20250305" or name != "web_search":
+        report.mark(path, PRESERVATION_UNSUPPORTED, detail="Unsupported Anthropic web search tool variant", subtree=True)
+        return None
+
+    target: Dict[str, Any] = {"type": "web_search"}
+    report.mark(path + "/type", PRESERVATION_SEMANTIC, target_base + "/type")
+    report.mark(path + "/name", PRESERVATION_SEMANTIC, target_base + "/type")
+
+    allowed_domains = tool.get("allowed_domains")
+    blocked_domains = tool.get("blocked_domains")
+    if allowed_domains is not None and blocked_domains is not None:
+        report.mark(path + "/allowed_domains", PRESERVATION_UNSUPPORTED, detail="web search cannot combine allowed_domains and blocked_domains", subtree=True)
+        report.mark(path + "/blocked_domains", PRESERVATION_UNSUPPORTED, detail="web search cannot combine allowed_domains and blocked_domains", subtree=True)
+        raise AnthropicResponsesConversionError("Anthropic web search cannot combine allowed_domains and blocked_domains", report)
+    else:
+        domain_key = "allowed_domains" if allowed_domains is not None else "blocked_domains"
+        domains = allowed_domains if allowed_domains is not None else blocked_domains
+        if domains is not None:
+            if isinstance(domains, list) and all(isinstance(domain, str) for domain in domains):
+                target["filters"] = {domain_key: copy.deepcopy(domains)}
+                report.mark(path + "/" + domain_key, PRESERVATION_SEMANTIC, target_base + "/filters/" + domain_key, subtree=True)
+            else:
+                report.mark(path + "/" + domain_key, PRESERVATION_UNSUPPORTED, detail=f"{domain_key} must be a string array", subtree=True)
+                raise AnthropicResponsesConversionError(f"Anthropic web search {domain_key} must be a string array", report)
+
+    if "user_location" in tool:
+        location = tool["user_location"]
+        allowed_keys = {"type", "city", "region", "country", "timezone"}
+        if (
+            isinstance(location, dict)
+            and set(location).issubset(allowed_keys)
+            and location.get("type") == "approximate"
+            and any(
+                isinstance(location.get(key), str) and location.get(key)
+                for key in ("city", "region", "country", "timezone")
+            )
+            and all(
+                key == "type" or isinstance(value, str)
+                for key, value in location.items()
+            )
+        ):
+            target["user_location"] = copy.deepcopy(location)
+            report.mark(path + "/user_location", PRESERVATION_EXACT, target_base + "/user_location", subtree=True)
+        else:
+            report.mark(path + "/user_location", PRESERVATION_UNSUPPORTED, detail="user_location must be an approximate location object", subtree=True)
+            raise AnthropicResponsesConversionError("Anthropic web search user_location is invalid", report)
+
+    if "max_uses" in tool:
+        max_uses = tool["max_uses"]
+        if not isinstance(max_uses, int) or isinstance(max_uses, bool) or max_uses <= 0:
+            report.mark(path + "/max_uses", PRESERVATION_UNSUPPORTED, detail="max_uses must be a positive integer")
+            raise AnthropicResponsesConversionError("Anthropic web search max_uses must be a positive integer", report)
+        report.mark(path + "/max_uses", PRESERVATION_APPROXIMATION, detail="Responses web search has no equivalent per-request hard use cap")
+    for extension in ("provider", "cache_control", "defer_loading", "allowed_callers"):
+        if extension in tool:
+            disposition = PRESERVATION_UNSUPPORTED if extension == "provider" else PRESERVATION_SIDECAR
+            report.mark(path + "/" + extension, disposition, detail=f"Web search extension {extension} has no verified Responses mapping", subtree=True)
+    return target
+
+
 def _convert_tools(
     tools: Any,
     profile: ResponsesWireProfile,
     report: ConversionReport,
     name_codec: IdentifierCodec,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     if not isinstance(tools, list):
         report.mark("/tools", PRESERVATION_UNSUPPORTED, detail="tools must be an array", subtree=True)
-        return []
-    converted: List[Dict[str, Any]] = []
+        return [], []
+    function_tools: List[Dict[str, Any]] = []
+    server_tools: List[Dict[str, Any]] = []
     for index, tool in enumerate(tools):
         path = f"/tools/{index}"
         if not isinstance(tool, dict):
             report.mark(path, PRESERVATION_UNSUPPORTED, detail="tool definition must be an object", subtree=True)
             continue
-        # Anthropic server tools have a provider-specific `type` and may not
-        # include input_schema. They are not silently coerced to functions.
-        if tool.get("type") and tool.get("type") != "custom" and "input_schema" not in tool:
-            report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"Unsupported Anthropic server tool type: {tool.get('type')}", subtree=True)
+        tool_type = tool.get("type")
+        if isinstance(tool_type, str) and tool_type.startswith("web_search_"):
+            if "input_schema" in tool:
+                report.mark(path, PRESERVATION_UNSUPPORTED, detail="Anthropic web search tools cannot define input_schema", subtree=True)
+                raise AnthropicResponsesConversionError("Anthropic web search tools cannot define input_schema", report)
+            if profile.native_server_tools_in_input:
+                target_base = f"/input/0/tools/{len(server_tools)}"
+            else:
+                top_level_function_count = 0 if profile.tools_in_input else len(function_tools)
+                target_base = f"/tools/{top_level_function_count + len(server_tools)}"
+            converted_search = _convert_web_search_tool(
+                tool,
+                path,
+                target_base,
+                profile,
+                report,
+            )
+            if converted_search is not None:
+                server_tools.append(converted_search)
+            continue
+        # Other Anthropic server tools have a provider-specific `type` and may
+        # not include input_schema. They are not silently coerced to functions.
+        if tool_type and tool_type != "custom" and "input_schema" not in tool:
+            report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"Unsupported Anthropic server tool type: {tool_type}", subtree=True)
             continue
         original_name = str(tool.get("name") or "")
         encoded_name = name_codec.encode(original_name, "name")
+        strict = tool.get("strict", False)
+        if not isinstance(strict, bool):
+            report.mark(path + "/strict", PRESERVATION_UNSUPPORTED, detail="strict must be a boolean")
+            raise AnthropicResponsesConversionError("Anthropic tool strict must be a boolean", report)
         target: Dict[str, Any] = {
             "type": "function",
             "name": encoded_name,
             "description": str(tool.get("description") or ""),
             "parameters": copy.deepcopy(tool.get("input_schema") or {"type": "object", "properties": {}}),
-            "strict": False,
+            "strict": strict,
         }
-        converted.append(target)
-        target_base = f"/tools/{len(converted)-1}"
+        function_tools.append(target)
+        target_base = f"/tools/{len(function_tools)-1}"
         report.mark(path + "/name", PRESERVATION_EXACT if encoded_name == original_name else PRESERVATION_SEMANTIC, target_base + "/name")
         if "description" in tool:
             report.mark(path + "/description", PRESERVATION_EXACT, target_base + "/description")
         if "input_schema" in tool:
             report.mark(path + "/input_schema", PRESERVATION_EXACT, target_base + "/parameters", subtree=True)
+        if "strict" in tool:
+            report.mark(path + "/strict", PRESERVATION_EXACT, target_base + "/strict")
         if "type" in tool:
             report.mark(path + "/type", PRESERVATION_SEMANTIC, target_base + "/type")
         for extension in ("cache_control", "defer_loading", "allowed_callers"):
             if extension in tool:
                 report.mark(path + "/" + extension, PRESERVATION_SIDECAR, detail=f"Tool extension {extension} has no verified wire mapping", subtree=True)
-    return converted
+    return function_tools, server_tools
 
 
 def _mark_known_output_config(payload: Dict[str, Any], report: ConversionReport, responses: Dict[str, Any]) -> None:
@@ -851,8 +998,58 @@ def _mark_known_output_config(payload: Dict[str, Any], report: ConversionReport,
         if not any(record.source_path == "/output_config/effort" for record in report.records):
             report.mark("/output_config/effort", PRESERVATION_UNSUPPORTED, detail="No reasoning effort mapping was selected")
     if "format" in output_config:
-        responses.setdefault("text", {})["format"] = copy.deepcopy(output_config["format"])
-        report.mark("/output_config/format", PRESERVATION_SEMANTIC, "/text/format", subtree=True)
+        format_value = output_config["format"]
+        if not isinstance(format_value, dict):
+            report.mark("/output_config/format", PRESERVATION_UNSUPPORTED, detail="output_config.format must be an object", subtree=True)
+            raise AnthropicResponsesConversionError("Anthropic output_config.format must be an object", report)
+        format_type = format_value.get("type")
+        if format_type != "json_schema":
+            report.mark("/output_config/format/type", PRESERVATION_UNSUPPORTED, detail="Only json_schema output format is supported")
+            raise AnthropicResponsesConversionError("Unsupported Anthropic output_config.format type", report)
+        schema = format_value.get("schema")
+        if not isinstance(schema, dict):
+            report.mark("/output_config/format/schema", PRESERVATION_UNSUPPORTED, detail="json_schema format requires an object schema", subtree=True)
+            raise AnthropicResponsesConversionError("Anthropic json_schema output format requires an object schema", report)
+
+        normalized: Dict[str, Any] = {
+            "type": "json_schema",
+            "schema": copy.deepcopy(schema),
+        }
+        report.mark("/output_config/format/type", PRESERVATION_EXACT, "/text/format/type")
+        report.mark("/output_config/format/schema", PRESERVATION_EXACT, "/text/format/schema", subtree=True)
+
+        explicit_name = format_value.get("name")
+        if isinstance(explicit_name, str) and explicit_name and len(explicit_name) <= 64 and _IDENTIFIER_RE.fullmatch(explicit_name):
+            normalized["name"] = explicit_name
+            report.mark("/output_config/format/name", PRESERVATION_EXACT, "/text/format/name")
+        else:
+            digest_source = _canonical_json(schema)
+            normalized["name"] = "ghc_schema_" + hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
+            if "name" in format_value:
+                report.mark("/output_config/format/name", PRESERVATION_APPROXIMATION, "/text/format/name", "Invalid schema name replaced with a deterministic safe identifier")
+            else:
+                report.mark("/output_config/format", PRESERVATION_SEMANTIC, "/text/format/name", "Generated required Responses schema name from the canonical schema")
+
+        for key, expected_type in (("description", str), ("strict", bool)):
+            if key not in format_value:
+                continue
+            value = format_value[key]
+            if not isinstance(value, expected_type):
+                report.mark("/output_config/format/" + key, PRESERVATION_UNSUPPORTED, detail=f"json_schema {key} has an invalid type", subtree=True)
+                raise AnthropicResponsesConversionError(f"Anthropic json_schema output format {key} has an invalid type", report)
+            normalized[key] = copy.deepcopy(value)
+            report.mark("/output_config/format/" + key, PRESERVATION_EXACT, "/text/format/" + key, subtree=True)
+
+        allowed_keys = {"type", "name", "description", "schema", "strict"}
+        unknown_keys = [key for key in format_value if key not in allowed_keys]
+        if unknown_keys:
+            for key in unknown_keys:
+                report.mark("/output_config/format/" + _pointer_escape(str(key)), PRESERVATION_UNSUPPORTED, detail="Unknown json_schema format field", subtree=True)
+            raise AnthropicResponsesConversionError(
+                "Anthropic json_schema output format contains unsupported fields",
+                report,
+            )
+        responses.setdefault("text", {})["format"] = normalized
 
 
 def convert_anthropic_to_responses(
@@ -893,14 +1090,23 @@ def convert_anthropic_to_responses(
     if "system" in payload:
         _convert_system(payload["system"], input_items, report, profile)
 
-    tools = _convert_tools(payload.get("tools"), profile, report, name_codec) if "tools" in payload else []
-    if tools:
+    function_tools, server_tools = (
+        _convert_tools(payload.get("tools"), profile, report, name_codec)
+        if "tools" in payload else ([], [])
+    )
+    if function_tools:
         if profile.tools_in_input:
-            input_items.insert(0, {"type": "additional_tools", "role": "developer", "tools": tools})
+            input_items.insert(0, {"type": "additional_tools", "role": "developer", "tools": function_tools})
             # Existing target paths in records are descriptive only; the insert
             # does not alter preservation semantics.
         else:
-            responses["tools"] = tools
+            responses.setdefault("tools", []).extend(function_tools)
+    if server_tools:
+        if profile.native_server_tools_in_input:
+            input_items.insert(0, {"type": "additional_tools", "role": "developer", "tools": server_tools})
+        else:
+            responses.setdefault("tools", []).extend(server_tools)
+    tools = function_tools + server_tools
 
     replay_misses: List[int] = []
     messages = payload.get("messages")
@@ -941,8 +1147,32 @@ def convert_anthropic_to_responses(
         report.mark("/tools", PRESERVATION_EXACT, "/tools", subtree=True)
 
     tool_choice = payload.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "tool":
+        chosen_name = str(tool_choice.get("name") or "")
+        available_names = {
+            name_codec.decode(str(tool.get("name") or ""))
+            for tool in function_tools
+            if isinstance(tool, dict)
+        }
+        if server_tools:
+            available_names.add("web_search")
+        if chosen_name not in available_names:
+            report.mark(
+                "/tool_choice/name",
+                PRESERVATION_UNSUPPORTED,
+                detail="tool_choice names a tool that was not converted",
+            )
+            raise AnthropicResponsesConversionError(
+                "Anthropic tool_choice names an unavailable tool",
+                report,
+            )
     if tool_choice is not None:
-        responses["tool_choice"] = _convert_tool_choice(tool_choice, name_codec, report)
+        responses["tool_choice"] = _convert_tool_choice(
+            tool_choice,
+            name_codec,
+            report,
+            has_native_web_search=bool(server_tools),
+        )
         disable_parallel = tool_choice.get("disable_parallel_tool_use") if isinstance(tool_choice, dict) else None
         if disable_parallel is not None:
             responses["parallel_tool_calls"] = not bool(disable_parallel)
@@ -1188,16 +1418,21 @@ def _truncate_replay_items_at_stop(
 
 
 _KNOWN_RESPONSE_SIDECAR_FIELDS = {
-    "object", "created_at", "status", "background", "billing", "error",
+    "object", "created_at", "completed_at", "status", "background", "billing", "error",
+    "copilot_usage", "output_text",
     "incomplete_details", "instructions", "max_output_tokens", "max_tool_calls",
     "parallel_tool_calls", "previous_response_id", "prompt_cache_key",
     "prompt_cache_retention", "reasoning", "safety_identifier", "service_tier",
     "store", "temperature", "text", "tool_choice", "tools", "top_logprobs",
     "top_p", "truncation", "user", "metadata", "client_metadata",
+    "frequency_penalty", "presence_penalty", "moderation",
 }
 
 
-def _responses_usage_to_anthropic(usage: Any) -> Dict[str, Any]:
+def _responses_usage_to_anthropic(
+    usage: Any,
+    tool_usage: Any = None,
+) -> Dict[str, Any]:
     usage = usage if isinstance(usage, dict) else {}
     details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
     output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
@@ -1213,6 +1448,19 @@ def _responses_usage_to_anthropic(usage: Any) -> Dict[str, Any]:
     reasoning_tokens = int(output_details.get("reasoning_tokens") or 0)
     if reasoning_tokens:
         result["output_tokens_details"] = {"thinking_tokens": reasoning_tokens}
+    if isinstance(tool_usage, dict):
+        web_search = tool_usage.get("web_search")
+        if isinstance(web_search, dict):
+            raw_count = web_search.get("num_requests")
+            requests_count = (
+                raw_count
+                if isinstance(raw_count, int) and not isinstance(raw_count, bool)
+                else 0
+            )
+            if requests_count > 0:
+                result["server_tool_use"] = {
+                    "web_search_requests": requests_count,
+                }
     return result
 
 
@@ -1369,6 +1617,13 @@ def convert_responses_to_anthropic(
     report = ConversionReport(
         "responses_to_anthropic", sidecar_available=bool(sidecar_available)
     )
+    response_id_value = response.get("id")
+    if not isinstance(response_id_value, str) or not response_id_value:
+        report.mark("/id", PRESERVATION_UNSUPPORTED, detail="Responses body requires a non-empty string id")
+        raise AnthropicResponsesConversionError("Responses body requires a non-empty string id", report)
+    if not isinstance(response.get("output"), list):
+        report.mark("/output", PRESERVATION_UNSUPPORTED, detail="Responses output must be an array", subtree=True)
+        raise AnthropicResponsesConversionError("Responses output must be an array", report)
     name_codec = name_codec or IdentifierCodec()
     call_id_codec = call_id_codec or IdentifierCodec()
     content: List[Dict[str, Any]] = []
@@ -1421,6 +1676,8 @@ def convert_responses_to_anthropic(
                 for key in item:
                     if key not in {"type", "role", "phase", "content"}:
                         report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Output message metadata retained for replay", subtree=True)
+            elif item_type == "web_search_call":
+                report.mark(path, PRESERVATION_SIDECAR, detail="Native web search execution retained for replay/audit and omitted from visible Anthropic content", subtree=True)
             elif item_type in ("function_call", "custom_tool_call"):
                 has_tool_use = True
                 encoded_id = str(item.get("call_id") or item.get("id") or "")
@@ -1477,8 +1734,10 @@ def convert_responses_to_anthropic(
                         report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Tool-call metadata retained for replay", subtree=True)
             else:
                 report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"Unknown Responses output item type: {item_type}", subtree=True)
-    else:
-        report.mark("/output", PRESERVATION_UNSUPPORTED, detail="Responses output must be an array", subtree=True)
+                raise AnthropicResponsesConversionError(
+                    f"Responses output item type is not safely representable: {item_type}",
+                    report,
+                )
 
     active_stop_sequences = list(stop_sequences or [])
     content, matched_stop = _truncate_blocks_at_stop(
@@ -1545,12 +1804,57 @@ def convert_responses_to_anthropic(
         "content": content,
         "stop_reason": stop_reason,
         "stop_sequence": matched_stop,
-        "usage": _responses_usage_to_anthropic(response.get("usage")),
+        "usage": _responses_usage_to_anthropic(
+            response.get("usage"),
+            response.get("tool_usage"),
+        ),
     }
     visible = {"role": "assistant", "content": copy.deepcopy(content)}
 
     if "usage" in response:
         _mark_usage_preservation(response.get("usage"), report)
+    if "tool_usage" in response:
+        tool_usage = response.get("tool_usage")
+        if not isinstance(tool_usage, dict):
+            report.mark(
+                "/tool_usage",
+                PRESERVATION_UNSUPPORTED,
+                detail="Responses tool_usage must be an object",
+                subtree=True,
+            )
+        else:
+            web_search_usage = tool_usage.get("web_search")
+            if web_search_usage is not None:
+                requests_count = web_search_usage.get("num_requests") if isinstance(web_search_usage, dict) else None
+                if isinstance(requests_count, int) and not isinstance(requests_count, bool) and requests_count >= 0:
+                    report.mark(
+                        "/tool_usage/web_search/num_requests",
+                        PRESERVATION_SEMANTIC,
+                        "/usage/server_tool_use/web_search_requests",
+                    )
+                    for key in web_search_usage:
+                        if key != "num_requests":
+                            report.mark(
+                                "/tool_usage/web_search/" + _pointer_escape(str(key)),
+                                PRESERVATION_SIDECAR,
+                                detail="Unprojected web search usage retained in audit sidecar",
+                                subtree=True,
+                            )
+                else:
+                    report.mark(
+                        "/tool_usage/web_search",
+                        PRESERVATION_UNSUPPORTED,
+                        detail="Responses web search usage must contain a non-negative integer num_requests",
+                        subtree=True,
+                    )
+            for key in tool_usage:
+                if key != "web_search":
+                    report.mark(
+                        "/tool_usage/" + _pointer_escape(str(key)),
+                        PRESERVATION_SIDECAR,
+                        detail="Unprojected Responses tool usage retained in audit sidecar",
+                        subtree=True,
+                    )
     for key in ("id", "model", "output"):
         if key in response and not any(record.source_path == "/" + key or record.source_path.startswith("/" + key + "/") for record in report.records):
             report.mark(

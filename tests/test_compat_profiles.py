@@ -73,6 +73,10 @@ def known_responses_items():
         "reasoning": {
             "type": "reasoning", "summary": [], "encrypted_content": private,
         },
+        "web_search_call": {
+            "type": "web_search_call", "id": private, "status": "completed",
+            "action": {"type": "search", "query": private, "queries": [private]},
+        },
     }
 
 
@@ -127,6 +131,14 @@ def known_responses_events():
             "type": "response.output_text.done", **common_content,
             "text": private, "logprobs": [],
         },
+        "response.output_text.annotation.added": {
+            "type": "response.output_text.annotation.added", **common_content,
+            "annotation_index": 0,
+            "annotation": {
+                "type": "url_citation", "start_index": 0, "end_index": 1,
+                "title": private, "url": "https://example.invalid/private",
+            },
+        },
         "response.function_call_arguments.delta": {
             "type": "response.function_call_arguments.delta", **common_delta,
             "delta": private,
@@ -175,6 +187,15 @@ def known_responses_events():
             "type": "response.reasoning_text.done", **common_content,
             "text": private,
         },
+        "response.web_search_call.in_progress": {
+            "type": "response.web_search_call.in_progress", **common_delta,
+        },
+        "response.web_search_call.searching": {
+            "type": "response.web_search_call.searching", **common_delta,
+        },
+        "response.web_search_call.completed": {
+            "type": "response.web_search_call.completed", **common_delta,
+        },
         "response.completed": {
             "type": "response.completed", "sequence_number": sequence,
             "response": {},
@@ -213,6 +234,16 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
                 self.assertEqual(audit.warnings, [])
                 self.assertTrue(audit.allowed)
                 self.assertFalse(audit.should_fail)
+
+    def test_current_cli_web_search_betas_are_known(self):
+        headers = known_headers()
+        headers["Anthropic-Beta"] += (
+            ",effort-2025-11-24,mid-conversation-system-2026-04-07"
+        )
+        self.assertEqual(
+            audit_anthropic_request(headers, known_payload()).warnings,
+            [],
+        )
 
     def test_flask_headers_are_accepted(self):
         app = Flask(__name__)
@@ -450,13 +481,42 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
                 },
                 "output_config": {
                     "effort": "high",
-                    "format": {"type": "json_schema", "private": "opaque"},
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object", "private": "opaque"},
+                    },
                 },
                 "service_tier": "auto",
             }
         )
         audit = audit_anthropic_request(known_headers(), payload)
         self.assertEqual(audit.warnings, [])
+
+    def test_web_search_tool_and_output_config_are_shape_audited_without_values(self):
+        secret = "PRIVATE-WEB-SEARCH-VALUE"
+        payload = known_payload()
+        payload["tools"] = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 3,
+            "allowed_domains": [secret],
+            "user_location": {"type": "approximate", "country": "US"},
+        }]
+        payload["output_config"] = {
+            "format": {
+                "type": "json_schema",
+                "schema": {"type": "object", "properties": {secret: {"type": "string"}}},
+            }
+        }
+        self.assertEqual(audit_anthropic_request(known_headers(), payload).warnings, [])
+
+        payload["tools"][0]["blocked_domains"] = [secret]
+        audit = audit_anthropic_request(known_headers(), payload)
+        self.assertTrue(audit.should_fail)
+        self.assertIn("tool.web_search_conflicting_domains", {
+            warning["code"] for warning in audit.warnings
+        })
+        self.assertNotIn(secret, json.dumps(audit.warnings))
 
     def test_content_block_variants_and_nested_tool_result_are_known(self):
         payload = known_payload()
@@ -632,6 +692,24 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
             with self.subTest(item_type=item_type):
                 self.assertEqual(audit_responses_item(item).warnings, [])
 
+    def test_in_progress_web_search_item_does_not_require_action(self):
+        item = {
+            "type": "web_search_call",
+            "id": "search_1",
+            "status": "in_progress",
+        }
+        self.assertEqual(audit_responses_item(item).warnings, [])
+        event = {
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": item,
+        }
+        self.assertEqual(
+            audit_responses_event(event, mode=MODE_LOSSLESS_REQUIRED).warnings,
+            [],
+        )
+
     def test_every_event_type_reports_each_missing_required_field(self):
         private = "PRIVATE-REQUIRED-VALUE"
         for event_type, complete in known_responses_events().items():
@@ -673,7 +751,10 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
     def test_every_item_type_reports_each_missing_required_field(self):
         private = "PRIVATE-REQUIRED-VALUE"
         for item_type, complete in known_responses_items().items():
-            for field in sorted(set(complete) - {"type"}):
+            required_fields = set(complete) - {"type"}
+            if item_type == "web_search_call":
+                required_fields.discard("action")
+            for field in sorted(required_fields):
                 item = dict(complete)
                 item.pop(field)
                 compatibility = audit_responses_item(item)

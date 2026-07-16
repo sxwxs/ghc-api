@@ -22,6 +22,7 @@ class StopSequenceScannerTests(unittest.TestCase):
 
 class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
     def translator(self, **kwargs):
+        kwargs.setdefault("wire_profile", "copilot_responses_lite")
         return ResponsesAnthropicEventTranslator(original_model="claude-opus-4.8", **kwargs)
 
     def test_reasoning_text_usage_and_lifecycle(self):
@@ -52,6 +53,202 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertFalse(any("encrypted" in str(event) for _, event in output))
         self.assertEqual(output[-2][1]["usage"]["input_tokens"], 8)
         self.assertEqual(translator.terminal_result.replay_items[0]["encrypted_content"], "x")
+
+    def test_web_search_lifecycle_is_sidecar_only_and_final_text_streams(self):
+        translator = self.translator(sidecar_available=True)
+        search_added = {
+            "type": "web_search_call",
+            "id": "opaque-search-added",
+            "status": "in_progress",
+        }
+        search_done = {
+            "type": "web_search_call",
+            "id": "opaque-search-done",
+            "status": "completed",
+            "action": {
+                "type": "search",
+                "query": "private query",
+                "queries": ["private query"],
+            },
+        }
+        message = {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "content": [{
+                "type": "output_text",
+                "text": "search answer",
+                "annotations": [{
+                    "type": "url_citation",
+                    "start_index": 0,
+                    "end_index": 6,
+                    "title": "private title",
+                    "url": "https://example.invalid/private",
+                }],
+            }],
+        }
+        sequence = [
+            ("response.created", {"response": {"id": "resp_search", "model": "gpt"}}),
+            ("response.output_item.added", {"output_index": 0, "item": search_added}),
+            ("response.web_search_call.in_progress", {"output_index": 0, "item_id": "opaque-search-progress"}),
+            ("response.web_search_call.searching", {"output_index": 0, "item_id": "opaque-search-searching"}),
+            ("response.web_search_call.completed", {"output_index": 0, "item_id": "opaque-search-completed"}),
+            ("response.output_item.done", {"output_index": 0, "item": search_done}),
+            ("response.output_item.added", {"output_index": 1, "item": {**message, "id": "opaque-message-added", "content": []}}),
+            ("response.output_text.delta", {"output_index": 1, "content_index": 0, "delta": "search answer"}),
+            ("response.output_text.annotation.added", {
+                "output_index": 1,
+                "content_index": 0,
+                "item_id": "opaque-annotation-event",
+                "annotation_index": 0,
+                "annotation": message["content"][0]["annotations"][0],
+            }),
+            ("response.output_item.done", {"output_index": 1, "item": {**message, "id": "opaque-message-done"}}),
+            ("response.completed", {"response": {
+                "id": "resp_search",
+                "model": "gpt",
+                "status": "completed",
+                "output": [search_done, message],
+                "usage": {},
+                "tool_usage": {"web_search": {"num_requests": 1}},
+            }}),
+        ]
+        output = []
+        for name, event in sequence:
+            output.extend(translator.process(name, event))
+        self.assertEqual(event_types(output), [
+            "message_start", "content_block_start", "content_block_delta",
+            "content_block_stop", "message_delta", "message_stop",
+        ])
+        self.assertNotIn("private query", str(output))
+        self.assertFalse(any(
+            event.get("content_block", {}).get("type") in (
+                "server_tool_use", "web_search_tool_result",
+            )
+            for _, event in output
+        ))
+        self.assertEqual(translator.terminal_result.response["content"], [
+            {"type": "text", "text": "search answer"}
+        ])
+        self.assertEqual(translator.terminal_result.report.unaccounted_paths, [])
+
+    def test_web_search_lifecycle_uses_output_index_identity_and_rejects_unclosed_item(self):
+        translator = self.translator(sidecar_available=True)
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "web_search_call", "id": "opaque-added", "status": "in_progress"},
+        })
+        self.assertEqual(translator.process(
+            "response.web_search_call.in_progress",
+            {"output_index": 0, "item_id": "opaque-in-progress"},
+        ), [])
+        self.assertEqual(translator.process(
+            "response.web_search_call.searching",
+            {"output_index": 0, "item_id": "opaque-searching"},
+        ), [])
+        self.assertEqual(translator.process(
+            "response.web_search_call.completed",
+            {"output_index": 0, "item_id": "opaque-completed"},
+        ), [])
+
+        translator = self.translator(sidecar_available=True)
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "web_search_call", "id": "search_1", "status": "in_progress"},
+        })
+        output = translator.process("response.completed", {"response": {
+            "id": "resp_search",
+            "model": "gpt",
+            "status": "completed",
+            "output": [],
+            "usage": {},
+        }})
+        self.assertIn("error", event_types(output))
+        self.assertNotIn("message_stop", event_types(output))
+
+    def test_public_profile_rejects_web_search_id_mismatch(self):
+        translator = ResponsesAnthropicEventTranslator(
+            original_model="claude-opus-4.8",
+            wire_profile="public_responses",
+            sidecar_available=True,
+        )
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "web_search_call", "id": "search_1", "status": "in_progress"},
+        })
+        output = translator.process("response.web_search_call.searching", {
+            "output_index": 0,
+            "item_id": "search_2",
+        })
+        self.assertEqual(event_types(output), ["error"])
+        self.assertEqual(
+            translator.compatibility_warnings[-1]["code"],
+            "responses.web_search_id_mismatch",
+        )
+
+    def test_web_search_and_annotation_lifecycle_order_is_validated(self):
+        translator = self.translator(sidecar_available=True)
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "web_search_call", "id": "search_1", "status": "in_progress"},
+        })
+        self.assertEqual(translator.process(
+            "response.web_search_call.completed",
+            {"output_index": 0, "item_id": "search_1"},
+        ), [])
+        output = translator.process(
+            "response.web_search_call.searching",
+            {"output_index": 0, "item_id": "search_1"},
+        )
+        self.assertEqual(event_types(output), ["error"])
+        self.assertEqual(
+            translator.compatibility_warnings[-1]["code"],
+            "responses.web_search_status_regression",
+        )
+
+        translator = self.translator(sidecar_available=True)
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "id": "message_1",
+                "role": "assistant",
+                "content": [],
+            },
+        })
+        output = translator.process("response.output_text.annotation.added", {
+            "output_index": 1,
+            "content_index": 0,
+            "item_id": "wrong",
+            "annotation_index": 0,
+            "annotation": {"type": "url_citation"},
+        })
+        self.assertEqual(event_types(output), ["error"])
+        self.assertEqual(
+            translator.compatibility_warnings[-1]["code"],
+            "responses.annotation_without_message",
+        )
+
+        translator = self.translator(sidecar_available=True)
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "id": "message_1",
+                "role": "assistant",
+                "content": [],
+            },
+        })
+        self.assertEqual(translator.process(
+            "response.output_text.annotation.added",
+            {
+                "output_index": 0,
+                "content_index": 1,
+                "item_id": "message_1",
+                "annotation_index": 0,
+                "annotation": {"type": "url_citation"},
+            },
+        ), [])
 
     def test_function_call_waits_for_done_name_and_hydrates_arguments(self):
         translator = self.translator()
@@ -411,6 +608,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             translator.compatibility_warnings[-1]["code"],
             "responses.replay_persistence_failed",
         )
+        self.assertIsNone(translator.terminal_result)
 
     def test_terminal_output_repairs_missing_delta(self):
         translator = self.translator()

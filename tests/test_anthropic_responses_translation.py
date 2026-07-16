@@ -72,6 +72,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                     "required": ["path"],
                     "additionalProperties": False,
                 },
+                "strict": True,
                 "cache_control": {"type": "ephemeral"},
             }],
             "metadata": {"user_id": '{"session_id":"session-test"}'},
@@ -102,7 +103,183 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertTrue(result.payload["parallel_tool_calls"])
         schema = result.payload["input"][0]["tools"][0]["parameters"]
         self.assertIn("$schema", schema)
+        self.assertTrue(result.payload["input"][0]["tools"][0]["strict"])
         self.assertIn("prompt_cache_key", result.payload)
+
+    def test_billing_system_block_is_omitted_without_other_prompt_rewrites(self):
+        payload = {
+            "model": "gpt-test",
+            "system": [
+                {
+                    "type": "text",
+                    "text": "x-anthropic-billing-header: cc_version=test; cc_entrypoint=cli;",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "type": "text",
+                    "text": "keep this system text",
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {"type": "text", "text": "prefix x-anthropic-billing-header: is ordinary text"},
+            ],
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        result = convert_anthropic_to_responses(
+            payload,
+            wire_profile="public_responses",
+            sidecar_available=True,
+        )
+        system_item = result.payload["input"][0]
+        self.assertEqual(
+            [part["text"] for part in system_item["content"]],
+            [
+                "keep this system text",
+                "prefix x-anthropic-billing-header: is ordinary text",
+            ],
+        )
+        self.assertEqual(
+            system_item["content"][0]["prompt_cache_breakpoint"],
+            {"mode": "explicit"},
+        )
+        self.assertEqual(result.report.unaccounted_paths, [])
+        string_only = convert_anthropic_to_responses({
+            "model": "gpt-test",
+            "system": "x-anthropic-billing-header: cc_version=test;",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        self.assertEqual(
+            [item["role"] for item in string_only.payload["input"]],
+            ["user"],
+        )
+        billing_record = next(
+            record for record in result.report.records
+            if record.source_path == "/system/0"
+        )
+        self.assertTrue(billing_record.subtree)
+        self.assertEqual(billing_record.disposition, "semantic_encoding")
+
+    def test_anthropic_web_search_maps_to_native_responses_tool(self):
+        payload = {
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "search"}],
+            "tools": [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3,
+                "allowed_domains": ["python.org"],
+                "user_location": {"type": "approximate", "country": "US"},
+            }],
+            "tool_choice": {"type": "tool", "name": "web_search"},
+        }
+        for profile in ("public_responses", "copilot_responses_lite"):
+            with self.subTest(profile=profile):
+                result = convert_anthropic_to_responses(
+                    payload,
+                    wire_profile=profile,
+                    sidecar_available=True,
+                )
+                self.assertEqual(result.payload["tools"], [{
+                    "type": "web_search",
+                    "filters": {"allowed_domains": ["python.org"]},
+                    "user_location": {"type": "approximate", "country": "US"},
+                }])
+                self.assertEqual(result.payload["tool_choice"], {"type": "web_search"})
+                self.assertFalse(any(
+                    item.get("type") == "additional_tools"
+                    for item in result.payload["input"]
+                ))
+                self.assertEqual(result.report.unaccounted_paths, [])
+                self.assertTrue(any(
+                    record.source_path == "/tools/0/max_uses"
+                    and record.disposition == "approximation"
+                    for record in result.report.records
+                ))
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(
+                payload,
+                wire_profile="copilot_responses_lite",
+                mode=MODE_LOSSLESS_REQUIRED,
+                sidecar_available=True,
+            )
+        malformed = copy.deepcopy(payload)
+        malformed["tools"][0]["input_schema"] = {"type": "object"}
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(malformed)
+        malformed = copy.deepcopy(payload)
+        malformed["tools"][0]["type"] = "web_search_20990101"
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(malformed)
+        malformed = copy.deepcopy(payload)
+        malformed["tools"][0]["max_uses"] = -1
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(malformed)
+        malformed = copy.deepcopy(payload)
+        malformed["tools"][0]["allowed_domains"] = "python.org"
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(malformed)
+        malformed = copy.deepcopy(payload)
+        malformed["tools"][0]["user_location"]["future"] = "private"
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(malformed)
+
+    def test_json_schema_format_gets_deterministic_required_name(self):
+        schema = {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        }
+        payload = {
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}},
+        }
+        first = convert_anthropic_to_responses(payload)
+        second = convert_anthropic_to_responses(copy.deepcopy(payload))
+        self.assertEqual(first.payload["text"]["format"]["schema"], schema)
+        self.assertRegex(
+            first.payload["text"]["format"]["name"],
+            r"^ghc_schema_[0-9a-f]{16}$",
+        )
+        self.assertEqual(
+            first.payload["text"]["format"]["name"],
+            second.payload["text"]["format"]["name"],
+        )
+        reordered = copy.deepcopy(payload)
+        reordered["output_config"]["format"]["schema"] = {
+            "additionalProperties": False,
+            "required": ["title"],
+            "properties": {"title": {"type": "string"}},
+            "type": "object",
+        }
+        self.assertEqual(
+            first.payload["text"]["format"]["name"],
+            convert_anthropic_to_responses(reordered).payload["text"]["format"]["name"],
+        )
+        self.assertEqual(first.report.unaccounted_paths, [])
+
+    def test_json_schema_format_preserves_explicit_fields_and_rejects_bad_schema(self):
+        payload = {
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "output_config": {"format": {
+                "type": "json_schema",
+                "name": "response_shape",
+                "description": "Return a response shape",
+                "schema": {"type": "object", "properties": {}},
+                "strict": False,
+            }},
+        }
+        result = convert_anthropic_to_responses(payload)
+        self.assertEqual(result.payload["text"]["format"], payload["output_config"]["format"])
+        malformed = copy.deepcopy(payload)
+        malformed["output_config"]["format"]["schema"] = "not-an-object"
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(malformed)
+        extended = copy.deepcopy(payload)
+        extended["output_config"]["format"]["future"] = "unsupported"
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(extended)
 
     def test_missing_or_non_array_messages_is_always_rejected(self):
         invalid_payloads = (
@@ -139,6 +316,81 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         content = result.payload["input"][0]["content"]
         self.assertEqual([part["type"] for part in content], ["input_image", "input_image", "input_file", "input_text"])
         self.assertEqual(result.report.unaccounted_paths, [])
+
+    def test_web_search_call_is_sidecar_only_and_tool_usage_is_accounted(self):
+        result = convert_responses_to_anthropic(
+            {
+                "id": "resp_search",
+                "model": "gpt-5.6-sol",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "id": "search_1",
+                        "status": "completed",
+                        "action": {
+                            "type": "search",
+                            "query": "private query",
+                            "queries": ["private query"],
+                        },
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "search answer",
+                            "annotations": [],
+                        }],
+                    },
+                ],
+                "usage": {},
+                "tool_usage": {"web_search": {"num_requests": 1}},
+            },
+            original_model="gpt-5.6-sol",
+            sidecar_available=True,
+        )
+        self.assertEqual(result.response["content"], [{"type": "text", "text": "search answer"}])
+        self.assertEqual(result.response["stop_reason"], "end_turn")
+        self.assertEqual(
+            result.response["usage"]["server_tool_use"],
+            {"web_search_requests": 1},
+        )
+        self.assertEqual(result.replay_items[0]["type"], "web_search_call")
+        self.assertEqual(result.report.unaccounted_paths, [])
+
+        other_usage = convert_responses_to_anthropic(
+            {
+                "id": "resp_other_usage",
+                "model": "gpt-test",
+                "status": "completed",
+                "output": [],
+                "usage": {},
+                "tool_usage": {"image_gen": {"total_tokens": 1}},
+            },
+            original_model="gpt-test",
+            sidecar_available=True,
+        )
+        self.assertEqual(other_usage.report.unaccounted_paths, [])
+        self.assertNotIn("server_tool_use", other_usage.response["usage"])
+
+    def test_terminal_response_requires_id_output_and_supported_items(self):
+        base = {
+            "id": "resp_valid",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [],
+            "usage": {},
+        }
+        for mutation in (
+            lambda value: value.pop("id"),
+            lambda value: value.pop("output"),
+            lambda value: value.update({"output": [{"type": "agent_message"}]}),
+        ):
+            payload = copy.deepcopy(base)
+            mutation(payload)
+            with self.assertRaises(AnthropicResponsesConversionError):
+                convert_responses_to_anthropic(payload, original_model="gpt-test")
 
     def test_tool_result_error_is_explicit_approximation(self):
         payload = {

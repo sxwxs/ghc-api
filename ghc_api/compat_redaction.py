@@ -46,6 +46,13 @@ def _redact_reasoning_item(item: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _redact_web_search_call(item: Dict[str, Any]) -> Dict[str, Any]:
+    result = copy.deepcopy(item)
+    if "action" in result:
+        result["action"] = redacted_value(result["action"], "web search request details")
+    return result
+
+
 def redact_responses_value_for_cache(value: Any) -> Any:
     """Redact hidden state while retaining known Responses protocol shape."""
 
@@ -57,20 +64,28 @@ def redact_responses_value_for_cache(value: Any) -> Any:
     value_type = value.get("type")
     if value_type == "reasoning":
         return _redact_reasoning_item(value)
+    if value_type == "web_search_call":
+        return _redact_web_search_call(value)
 
     result: Dict[str, Any] = {}
     for key, item in value.items():
         if key in ("encrypted_content", "signature"):
             result[key] = redacted_value(item, "opaque model state")
+        elif key == "annotations" and isinstance(item, list):
+            result[key] = redacted_value(item, "web search citation details")
         elif key == "output" and isinstance(item, list):
             result[key] = [
                 _redact_reasoning_item(part)
                 if isinstance(part, dict) and part.get("type") == "reasoning"
+                else _redact_web_search_call(part)
+                if isinstance(part, dict) and part.get("type") == "web_search_call"
                 else redact_responses_value_for_cache(part)
                 for part in item
             ]
         elif key == "item" and isinstance(item, dict) and item.get("type") == "reasoning":
             result[key] = _redact_reasoning_item(item)
+        elif key == "item" and isinstance(item, dict) and item.get("type") == "web_search_call":
+            result[key] = _redact_web_search_call(item)
         else:
             result[key] = redact_responses_value_for_cache(item)
     return result
@@ -85,6 +100,16 @@ def redact_responses_event_for_cache(event: Any) -> Any:
         result = redacted_value(event, "unknown, invalid, or drifted Responses event")
         if isinstance(event_type, str):
             result["type"] = event_type
+        return result
+
+    if isinstance(event, dict) and event.get("type") == "response.output_text.annotation.added":
+        result = {
+            key: copy.deepcopy(item)
+            for key, item in event.items()
+            if key in {"type", "sequence_number", "output_index", "content_index", "item_id", "annotation_index"}
+        }
+        if "annotation" in event:
+            result["annotation"] = redacted_value(event["annotation"], "web search citation details")
         return result
 
     if isinstance(event, dict) and str(event.get("type") or "").startswith(

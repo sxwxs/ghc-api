@@ -107,6 +107,8 @@ KNOWN_ANTHROPIC_BETAS = frozenset(
         "context-1m-2025-08-07",
         "context-management-2025-06-27",
         "interleaved-thinking-2025-05-14",
+        "effort-2025-11-24",
+        "mid-conversation-system-2026-04-07",
         "prompt-caching-scope-2026-01-05",
         "redact-thinking-2026-02-12",
         "thinking-token-count-2026-05-13",
@@ -116,9 +118,19 @@ KNOWN_ANTHROPIC_BETAS = frozenset(
 # two observed normalised sets as profiles rather than requiring every known
 # token on every request.
 _BASE_ANTHROPIC_BETAS = KNOWN_ANTHROPIC_BETAS - {"context-1m-2025-08-07"}
-KNOWN_ANTHROPIC_BETA_SETS = frozenset(
-    (tuple(sorted(_BASE_ANTHROPIC_BETAS)), tuple(sorted(KNOWN_ANTHROPIC_BETAS)))
-)
+_LEGACY_ANTHROPIC_BETAS = KNOWN_ANTHROPIC_BETAS - {
+    "effort-2025-11-24",
+    "mid-conversation-system-2026-04-07",
+}
+_LEGACY_BASE_ANTHROPIC_BETAS = _LEGACY_ANTHROPIC_BETAS - {
+    "context-1m-2025-08-07"
+}
+KNOWN_ANTHROPIC_BETA_SETS = frozenset((
+    tuple(sorted(_BASE_ANTHROPIC_BETAS)),
+    tuple(sorted(KNOWN_ANTHROPIC_BETAS)),
+    tuple(sorted(_LEGACY_BASE_ANTHROPIC_BETAS)),
+    tuple(sorted(_LEGACY_ANTHROPIC_BETAS)),
+))
 
 # These are the request keys understood by the compatibility converter.  The
 # two captured Claude Code versions use a subset; keeping converter-supported
@@ -192,8 +204,9 @@ _SOURCE_REQUIRED_FIELDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
 }
 
 _TOOL_FIELDS = {
-    "name", "description", "input_schema", "type", "cache_control",
-    "defer_loading", "allowed_callers", "metadata",
+    "name", "description", "input_schema", "strict", "type", "cache_control",
+    "defer_loading", "allowed_callers", "metadata", "max_uses",
+    "allowed_domains", "blocked_domains", "user_location", "provider",
 }
 
 # Event names accepted by the Responses SSE state machine.  Includes the
@@ -210,6 +223,7 @@ KNOWN_RESPONSES_EVENT_TYPES = frozenset(
         "response.content_part.done",
         "response.output_text.delta",
         "response.output_text.done",
+        "response.output_text.annotation.added",
         "response.function_call_arguments.delta",
         "response.function_call_arguments.done",
         "response.custom_tool_call_input.delta",
@@ -222,6 +236,9 @@ KNOWN_RESPONSES_EVENT_TYPES = frozenset(
         "response.reasoning_summary_text.done",
         "response.reasoning_text.delta",
         "response.reasoning_text.done",
+        "response.web_search_call.in_progress",
+        "response.web_search_call.searching",
+        "response.web_search_call.completed",
         "response.completed",
         "response.incomplete",
         "response.failed",
@@ -243,6 +260,7 @@ KNOWN_RESPONSES_ITEM_TYPES = frozenset(
         "function_call_output",
         "message",
         "reasoning",
+        "web_search_call",
     )
 )
 
@@ -267,6 +285,10 @@ _RESPONSES_EVENT_FIELDS: Dict[str, Set[str]] = {
         "type", "sequence_number", "output_index", "content_index", "item_id",
         "text", "logprobs",
     },
+    "response.output_text.annotation.added": {
+        "type", "sequence_number", "output_index", "content_index", "item_id",
+        "annotation_index", "annotation",
+    },
     "response.function_call_arguments.delta": {
         "type", "sequence_number", "output_index", "item_id", "delta", "obfuscation"
     },
@@ -278,6 +300,15 @@ _RESPONSES_EVENT_FIELDS: Dict[str, Set[str]] = {
     },
     "response.custom_tool_call_input.done": {
         "type", "sequence_number", "output_index", "item_id", "input"
+    },
+    "response.web_search_call.in_progress": {
+        "type", "sequence_number", "output_index", "item_id"
+    },
+    "response.web_search_call.searching": {
+        "type", "sequence_number", "output_index", "item_id"
+    },
+    "response.web_search_call.completed": {
+        "type", "sequence_number", "output_index", "item_id"
     },
     "response.refusal.delta": {
         "type", "sequence_number", "output_index", "content_index", "item_id", "delta"
@@ -318,6 +349,7 @@ _RESPONSES_ITEM_FIELDS: Dict[str, Set[str]] = {
     "function_call_output": {"type", "id", "call_id", "output", "status"},
     "message": {"type", "id", "role", "content", "phase", "status"},
     "reasoning": {"type", "id", "summary", "content", "encrypted_content", "status"},
+    "web_search_call": {"type", "id", "status", "action"},
 }
 
 _RESPONSES_CONTENT_PART_FIELDS: Dict[str, Set[str]] = {
@@ -352,6 +384,8 @@ _RESPONSES_EVENT_FIELD_TYPES: Dict[str, Tuple[str, ...]] = {
     "obfuscation": ("string",),
     "refusal": ("string",),
     "logprobs": ("array",),
+    "annotation_index": ("integer",),
+    "annotation": ("object",),
     "item": ("object",),
     "part": ("object",),
     "response": ("object",),
@@ -414,6 +448,14 @@ _RESPONSES_EVENT_REQUIRED_FIELDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "text": ("string",),
         "logprobs": ("array",),
     },
+    "response.output_text.annotation.added": {
+        "sequence_number": ("integer",),
+        "output_index": ("integer",),
+        "content_index": ("integer",),
+        "item_id": ("string",),
+        "annotation_index": ("integer",),
+        "annotation": ("object",),
+    },
     "response.function_call_arguments.delta": {
         "sequence_number": ("integer",),
         "output_index": ("integer",),
@@ -437,6 +479,21 @@ _RESPONSES_EVENT_REQUIRED_FIELDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
         "output_index": ("integer",),
         "item_id": ("string",),
         "input": ("string",),
+    },
+    "response.web_search_call.in_progress": {
+        "sequence_number": ("integer",),
+        "output_index": ("integer",),
+        "item_id": ("string",),
+    },
+    "response.web_search_call.searching": {
+        "sequence_number": ("integer",),
+        "output_index": ("integer",),
+        "item_id": ("string",),
+    },
+    "response.web_search_call.completed": {
+        "sequence_number": ("integer",),
+        "output_index": ("integer",),
+        "item_id": ("string",),
     },
     "response.refusal.delta": {
         "sequence_number": ("integer",),
@@ -549,6 +606,10 @@ _RESPONSES_ITEM_REQUIRED_FIELDS: Dict[str, Dict[str, Tuple[str, ...]]] = {
     "reasoning": {
         "summary": ("array",),
         "encrypted_content": ("string",),
+    },
+    "web_search_call": {
+        "id": ("string",),
+        "status": ("string",),
     },
 }
 
@@ -1161,6 +1222,60 @@ def _baseline_tool_hashes(manifest: Any, cli_version: Optional[str]) -> Dict[str
     return result
 
 
+def _audit_web_search_tool(tool: Mapping, path: str, collector: _WarningCollector) -> None:
+    allowed_fields = {
+        "type", "name", "max_uses", "allowed_domains", "blocked_domains",
+        "user_location", "cache_control", "allowed_callers", "provider",
+    }
+    _unknown_fields(tool, allowed_fields, path, collector, "tool.unknown_field")
+    _require_fields(
+        tool,
+        {"type": ("string",), "name": ("string",)},
+        path,
+        collector,
+        "tool.missing_required_field",
+    )
+    if "type" in tool and _check_type(tool["type"], ("string",), _join_path(path, "type"), collector):
+        _check_enum(tool["type"], ("web_search_20250305",), _join_path(path, "type"), collector, "tool.unknown_type")
+    if "name" in tool and _check_type(tool["name"], ("string",), _join_path(path, "name"), collector):
+        _check_enum(tool["name"], ("web_search",), _join_path(path, "name"), collector, "tool.unknown_name")
+    if "max_uses" in tool:
+        _check_type(tool["max_uses"], ("integer",), _join_path(path, "max_uses"), collector)
+    for key in ("allowed_domains", "blocked_domains"):
+        if key not in tool:
+            continue
+        if _check_type(tool[key], ("array",), _join_path(path, key), collector):
+            for index, domain in enumerate(tool[key]):
+                _check_type(domain, ("string",), _join_path(_join_path(path, key), index), collector)
+    if "allowed_domains" in tool and "blocked_domains" in tool:
+        collector.add(
+            "tool.web_search_conflicting_domains",
+            path,
+            "object",
+            ("allowed_domains_or_blocked_domains",),
+            fail_always=True,
+        )
+    if "user_location" in tool:
+        location_path = _join_path(path, "user_location")
+        location = tool["user_location"]
+        if _check_type(location, ("object",), location_path, collector):
+            _unknown_fields(location, {"type", "city", "region", "country", "timezone"}, location_path, collector, "tool.unknown_field")
+            _require_fields(location, {"type": ("string",)}, location_path, collector, "tool.missing_required_field")
+            if "type" in location and _check_type(location["type"], ("string",), _join_path(location_path, "type"), collector):
+                _check_enum(location["type"], ("approximate",), _join_path(location_path, "type"), collector)
+            for key in ("city", "region", "country", "timezone"):
+                if key in location:
+                    _check_type(location[key], ("string",), _join_path(location_path, key), collector)
+            if not any(key in location for key in ("city", "region", "country", "timezone")):
+                collector.add("tool.web_search_location_missing_value", location_path, "object", ("location_field",), fail_always=True)
+    if "cache_control" in tool and isinstance(tool["cache_control"], Mapping):
+        _audit_cache_control(tool["cache_control"], _join_path(path, "cache_control"), collector)
+    if "allowed_callers" in tool:
+        _check_type(tool["allowed_callers"], ("array",), _join_path(path, "allowed_callers"), collector)
+    if "provider" in tool:
+        _check_type(tool["provider"], ("string", "object"), _join_path(path, "provider"), collector)
+
+
 def _audit_tools(
     value: Any,
     collector: _WarningCollector,
@@ -1174,6 +1289,10 @@ def _audit_tools(
         path = f"/tools/{index}"
         if not _check_type(tool, ("object",), path, collector, "tool.invalid_type"):
             continue
+        tool_type = tool.get("type")
+        if isinstance(tool_type, str) and tool_type.startswith("web_search_"):
+            _audit_web_search_tool(tool, path, collector)
+            continue
         _require_fields(
             tool,
             {"name": ("string",), "input_schema": ("object",)},
@@ -1186,6 +1305,7 @@ def _audit_tools(
             ("name", ("string",)),
             ("description", ("string",)),
             ("input_schema", ("object",)),
+            ("strict", ("boolean",)),
             ("metadata", ("object",)),
             ("cache_control", ("object",)),
             ("defer_loading", ("boolean",)),
@@ -1227,7 +1347,31 @@ def _audit_output_config(value: Any, collector: _WarningCollector) -> None:
                 "/output_config/effort",
                 collector,
             )
-    # output_config.format is schema-like and therefore opaque.
+    if "format" in value:
+        format_path = "/output_config/format"
+        format_value = value["format"]
+        if not _check_type(format_value, ("object",), format_path, collector):
+            return
+        _unknown_fields(
+            format_value,
+            {"type", "name", "description", "schema", "strict"},
+            format_path,
+            collector,
+            "output_config.format_unknown_field",
+        )
+        _require_fields(
+            format_value,
+            {"type": ("string",), "schema": ("object",)},
+            format_path,
+            collector,
+            "output_config.format_missing_field",
+        )
+        if "type" in format_value and _check_type(format_value["type"], ("string",), format_path + "/type", collector):
+            _check_enum(format_value["type"], ("json_schema",), format_path + "/type", collector, "output_config.format_unknown_type")
+        for key, expected in (("name", ("string",)), ("description", ("string",)), ("schema", ("object",)), ("strict", ("boolean",))):
+            if key in format_value:
+                _check_type(format_value[key], expected, format_path + "/" + key, collector)
+        # schema is opaque: never recurse into property names or descriptions.
 
 
 def _audit_request_payload(
@@ -1417,6 +1561,27 @@ def _audit_responses_item_into(
         collector,
         "responses.unknown_item_field",
     )
+    if item_type == "web_search_call" and "action" in item:
+        action_path = _join_path(path, "action")
+        action = item["action"]
+        if _check_type(action, ("object",), action_path, collector, "responses.invalid_web_search_action"):
+            _unknown_fields(action, {"type", "query", "queries", "url", "pattern", "domains", "sources", "ref_id"}, action_path, collector, "responses.unknown_web_search_action_field")
+            _require_fields(action, {"type": ("string",)}, action_path, collector, "responses.missing_web_search_action_field")
+            if "type" in action and _check_type(action["type"], ("string",), _join_path(action_path, "type"), collector):
+                _check_enum(action["type"], ("search", "open_page", "find_in_page"), _join_path(action_path, "type"), collector, "responses.unknown_web_search_action_type")
+            if "query" in action:
+                _check_type(action["query"], ("string",), _join_path(action_path, "query"), collector)
+            if "queries" in action and _check_type(action["queries"], ("array",), _join_path(action_path, "queries"), collector):
+                for index, query in enumerate(action["queries"]):
+                    _check_type(query, ("string",), _join_path(_join_path(action_path, "queries"), index), collector)
+            for key in ("url", "pattern", "ref_id"):
+                if key in action:
+                    _check_type(action[key], ("string",), _join_path(action_path, key), collector)
+            if "domains" in action and _check_type(action["domains"], ("array",), _join_path(action_path, "domains"), collector):
+                for index, domain in enumerate(action["domains"]):
+                    _check_type(domain, ("string",), _join_path(_join_path(action_path, "domains"), index), collector)
+            if "sources" in action:
+                _check_type(action["sources"], ("array",), _join_path(action_path, "sources"), collector)
     for content_key in ("content", "summary"):
         content = item.get(content_key)
         if not isinstance(content, list):

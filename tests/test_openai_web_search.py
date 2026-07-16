@@ -23,6 +23,21 @@ class ResponsesWebSearchToolTest(unittest.TestCase):
             ],
         )
 
+    def test_keeps_web_search_and_legacy_preview_for_gpt_5_6_sol(self):
+        payload = {
+            "tools": [
+                {"type": "web_search"},
+                {"type": "web_search_preview"},
+            ]
+        }
+
+        _filter_responses_web_search_tools(payload, "gpt-5.6-sol", "req-sol")
+
+        self.assertEqual(payload["tools"], [
+            {"type": "web_search"},
+            {"type": "web_search_preview"},
+        ])
+
     def test_removes_web_search_for_non_gpt_responses_models(self):
         payload = {
             "tools": [

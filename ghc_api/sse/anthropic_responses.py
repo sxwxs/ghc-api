@@ -101,6 +101,8 @@ class _OutputState:
     arguments: str = ""
     arguments_forwarded: int = 0
     arguments_complete: bool = False
+    web_search_stage: int = 0
+    annotation_indices: set = field(default_factory=set)
     scanner: Optional[StopSequenceScanner] = None
 
 
@@ -116,6 +118,10 @@ class ResponsesAnthropicEventTranslator:
         "response.reasoning_summary_text.done",
         "response.reasoning_text.delta",
         "response.reasoning_text.done",
+        "response.output_text.annotation.added",
+        "response.web_search_call.in_progress",
+        "response.web_search_call.searching",
+        "response.web_search_call.completed",
         "keepalive",
     }
 
@@ -128,6 +134,7 @@ class ResponsesAnthropicEventTranslator:
         stop_sequences: Optional[Sequence[str]] = None,
         mode: str = MODE_COMPATIBILITY,
         sidecar_available: bool = False,
+        wire_profile: str = "public_responses",
         on_completed: Optional[
             Callable[[ResponsesToAnthropicResult], Optional[str]]
         ] = None,
@@ -138,6 +145,8 @@ class ResponsesAnthropicEventTranslator:
         self.stop_sequences = list(stop_sequences or [])
         self.mode = mode
         self.sidecar_available = bool(sidecar_available)
+        self.wire_profile = wire_profile
+        self.stable_item_ids = wire_profile != "copilot_responses_lite"
         self.on_completed = on_completed
 
         self.message_started = False
@@ -223,6 +232,14 @@ class ResponsesAnthropicEventTranslator:
                 )
 
         effective_type = incoming_type or state.item_type
+        if effective_type == "web_search_call" and self.stable_item_ids:
+            incoming_id = item.get("id")
+            existing_id = state.item.get("id") if isinstance(state.item, dict) else None
+            if incoming_id is not None and existing_id is not None and str(incoming_id) != str(existing_id):
+                return (
+                    "responses.web_search_id_mutation",
+                    f"/output/{state.output_index}/id",
+                )
         if effective_type in ("function_call", "custom_tool_call"):
             incoming_call_id = item.get("call_id")
             if incoming_call_id is not None:
@@ -368,7 +385,7 @@ class ResponsesAnthropicEventTranslator:
         })]
 
     def _state_ready(self, state: _OutputState) -> bool:
-        if state.item_type == "reasoning":
+        if state.item_type in ("reasoning", "web_search_call"):
             return True
         if state.item_type == "message":
             return bool(state.text) or state.done
@@ -388,10 +405,15 @@ class ResponsesAnthropicEventTranslator:
             state = self.states[self.next_output_index]
             if not self._state_ready(state):
                 break
-            if state.item_type == "reasoning":
+            if state.item_type in ("reasoning", "web_search_call"):
                 if not state.done:
                     break
-                self.report.mark(f"/output/{state.output_index}", PRESERVATION_SIDECAR, detail="Reasoning item buffered for replay", subtree=True)
+                detail = (
+                    "Reasoning item buffered for replay"
+                    if state.item_type == "reasoning"
+                    else "Native web search execution buffered for replay/audit"
+                )
+                self.report.mark(f"/output/{state.output_index}", PRESERVATION_SIDECAR, detail=detail, subtree=True)
                 state.closed = True
                 self.next_output_index += 1
                 continue
@@ -504,7 +526,10 @@ class ResponsesAnthropicEventTranslator:
         if self.message_stopped:
             return events
         # Any remaining unknown/missing index is a fatal lifecycle drift.
-        remaining = [index for index, state in self.states.items() if not state.closed and state.item_type != "reasoning"]
+        remaining = [
+            index for index, state in self.states.items()
+            if not state.closed and state.item_type != "reasoning"
+        ]
         if remaining:
             events.extend(self._protocol_error("responses.unclosed_output_item", f"/output/{min(remaining)}"))
             return events
@@ -537,6 +562,7 @@ class ResponsesAnthropicEventTranslator:
                 if self.mode == MODE_LOSSLESS_REQUIRED:
                     persistence_error = "Reasoning replay state could not be persisted"
         if persistence_error:
+            self.terminal_result = None
             events.extend(self._protocol_error(
                 "responses.replay_persistence_failed", "/response"
             ))
@@ -561,6 +587,7 @@ class ResponsesAnthropicEventTranslator:
             self.response_model = str(response.get("model") or self.original_model)
             return self._start_message()
         if event_type in self._NO_CONTENT_EVENTS:
+            state = None
             if "output_index" in event:
                 try:
                     output_index = int(event["output_index"])
@@ -572,6 +599,66 @@ class ResponsesAnthropicEventTranslator:
                         "responses.event_after_closed_output_item",
                         f"/output/{state.output_index}",
                     )
+            if event_type == "response.output_text.annotation.added":
+                if state is None or state.item_type != "message":
+                    return self._protocol_error(
+                        "responses.annotation_without_message",
+                        f"/events/{event_type}",
+                    )
+                if self.stable_item_ids:
+                    expected_id = str(state.item.get("id") or "")
+                    item_id = str(event.get("item_id") or "")
+                    if expected_id and item_id != expected_id:
+                        return self._protocol_error(
+                            "responses.annotation_item_id_mismatch",
+                            f"/output/{state.output_index}/id",
+                        )
+                content_index = event.get("content_index")
+                annotation_index = event.get("annotation_index")
+                if (
+                    not isinstance(content_index, int)
+                    or isinstance(content_index, bool)
+                    or content_index < 0
+                    or not isinstance(annotation_index, int)
+                    or isinstance(annotation_index, bool)
+                    or annotation_index < 0
+                ):
+                    return self._protocol_error(
+                        "responses.invalid_annotation_index",
+                        f"/output/{state.output_index}/content",
+                    )
+                annotation_key = (content_index, annotation_index)
+                if annotation_key in state.annotation_indices:
+                    return self._protocol_error(
+                        "responses.duplicate_annotation",
+                        f"/output/{state.output_index}/content/{content_index}/annotations/{annotation_index}",
+                    )
+                state.annotation_indices.add(annotation_key)
+            if event_type.startswith("response.web_search_call."):
+                if state is None or state.item_type != "web_search_call":
+                    return self._protocol_error(
+                        "responses.web_search_lifecycle_without_item",
+                        f"/events/{event_type}",
+                    )
+                if self.stable_item_ids:
+                    expected_id = str(state.item.get("id") or "")
+                    item_id = str(event.get("item_id") or "")
+                    if expected_id and item_id != expected_id:
+                        return self._protocol_error(
+                            "responses.web_search_id_mismatch",
+                            f"/output/{state.output_index}/id",
+                        )
+                stage = {
+                    "response.web_search_call.in_progress": 1,
+                    "response.web_search_call.searching": 2,
+                    "response.web_search_call.completed": 3,
+                }[event_type]
+                if stage <= state.web_search_stage:
+                    return self._protocol_error(
+                        "responses.web_search_status_regression",
+                        f"/output/{state.output_index}/status",
+                    )
+                state.web_search_stage = stage
             self.report.mark("/events", PRESERVATION_SIDECAR, detail=f"Known lifecycle event {event_type}")
             return []
         if event_type == "response.output_item.added":
@@ -585,7 +672,7 @@ class ResponsesAnthropicEventTranslator:
             drift = self._merge_item(state, item)
             if drift is not None:
                 return self._protocol_error(*drift)
-            if state.item_type not in ("reasoning", "message", "function_call", "custom_tool_call"):
+            if state.item_type not in ("reasoning", "message", "function_call", "custom_tool_call", "web_search_call"):
                 return self._protocol_error("responses.unknown_output_item", f"/output/{state.output_index}")
             return self._drain()
         if event_type == "response.output_item.done":
@@ -812,6 +899,7 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
             stop_sequences=conversion.stop_sequences,
             mode=mode,
             sidecar_available=sidecar_available,
+            wire_profile=conversion.wire_profile,
             on_completed=on_completed,
         )
         self._compatibility_warnings = list(compatibility_warnings or [])
@@ -865,8 +953,15 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         return result
 
     def forward_event(self, event_type: str, event: Dict[str, Any], raw_data: str) -> Iterator[Tuple[str, str]]:
+        payload_type = str(event.get("type") or "")
+        if event_type and payload_type and event_type != payload_type:
+            for out_type, out_event in self.translator._protocol_error(
+                "responses.event_type_mismatch", "/events/type"
+            ):
+                yield out_type, _json(out_event)
+            return
         audit_value = event
-        if event_type and not event.get("type"):
+        if event_type and not payload_type:
             audit_value = {**event, "type": event_type}
         audit = audit_responses_event(audit_value, mode=self._mode)
         for warning in audit.warnings:

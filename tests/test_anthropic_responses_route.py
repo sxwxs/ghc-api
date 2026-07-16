@@ -428,6 +428,86 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("request", cached["conversion_report"])
         self.assertIn("response", cached["conversion_report"])
 
+    def test_nonstream_converts_web_search_billing_and_structured_output(self):
+        upstream_body = self._terminal_response()
+        upstream_body["output"] = [
+            {
+                "type": "web_search_call",
+                "id": "search_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "private query"},
+            },
+            *upstream_body["output"],
+        ]
+        upstream_body["tool_usage"] = {"web_search": {"num_requests": 1}}
+        payload = {
+            "model": "gpt-5.6-sol",
+            "system": [
+                {"type": "text", "text": "x-anthropic-billing-header: cc_version=test;"},
+                {"type": "text", "text": "keep this system prompt"},
+            ],
+            "messages": [{"role": "user", "content": "search"}],
+            "max_tokens": 64,
+            "tools": [{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "allowed_domains": ["python.org"],
+            }],
+            "output_config": {"format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                    "additionalProperties": False,
+                },
+            }},
+            "stream": False,
+        }
+        with mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=_FakeResponse(upstream_body),
+        ) as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=payload,
+                headers={"user-agent": "claude-cli/2.1.207"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = post.call_args.kwargs["json"]
+        self.assertEqual(forwarded["tools"], [{
+            "type": "web_search",
+            "filters": {"allowed_domains": ["python.org"]},
+        }])
+        self.assertEqual(
+            forwarded["input"][0]["content"],
+            [{"type": "input_text", "text": "keep this system prompt"}],
+        )
+        self.assertNotIn("x-anthropic-billing-header", json.dumps(forwarded))
+        self.assertRegex(
+            forwarded["text"]["format"]["name"],
+            r"^ghc_schema_[0-9a-f]{16}$",
+        )
+        cached = next(iter(self.cache.cache.values()))
+        self.assertNotIn("private query", json.dumps(cached["upstream_response_body"]))
+
+    def test_malformed_json_schema_is_rejected_before_upstream(self):
+        payload = self._request_payload(stream=False)
+        payload["output_config"] = {
+            "format": {"type": "json_schema", "schema": "not-an-object"}
+        }
+        with mock.patch.object(anthropic_module.requests, "post") as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=payload,
+                headers={"user-agent": "claude-cli/2.1.207"},
+            )
+        self.assertEqual(response.status_code, 400)
+        post.assert_not_called()
+        self.assertIn("object schema", response.get_json()["error"]["message"])
+
     def test_compatibility_never_creates_plaintext_replay_without_key(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             replay_path = os.path.join(temp_dir, "must-not-exist.sqlite3")
