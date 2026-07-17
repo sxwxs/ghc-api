@@ -40,6 +40,6 @@ setup(
     },
     include_package_data=True,
     package_data={
-        "ghc_api": ["templates/*"],
+        "ghc_api": ["templates/*", "static/*"],
     },
 )
