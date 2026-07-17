@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ghc-api logo">
+  <defs>
+    <linearGradient id="surface" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#126bff"/>
+      <stop offset="1" stop-color="#0754d8"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="18" fill="url(#surface)"/>
+  <rect x="3" y="3" width="58" height="58" rx="15" fill="none" stroke="#5f9bff"/>
+  <text x="14" y="40" fill="#f4f8ff" font-family="monospace" font-size="19" font-weight="800">g</text>
+  <path d="M29 32h7" fill="none" stroke="#8de8f2" stroke-width="2"/>
+  <path d="m34 28 4 4-4 4" fill="none" stroke="#8de8f2" stroke-width="2"/>
+  <text x="41" y="40" fill="#f4f8ff" font-family="monospace" font-size="19" font-weight="800">a</text>
+</svg>
