@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import re
 import statistics
@@ -13,7 +14,11 @@ from pathlib import Path
 
 _NUMBER_PATTERN = br"-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 _DURATION_RE = re.compile(br'"duration"\s*:\s*(' + _NUMBER_PATTERN + br"|null)")
-_TIMESTAMP_RE = re.compile(br'"timestamp"\s*:\s*(' + _NUMBER_PATTERN + br")")
+_TIMESTAMP_RE = re.compile(
+    br'"timestamp"\s*:\s*('
+    + _NUMBER_PATTERN
+    + br'|"(?:\\.|[^"\\])*")'
+)
 _INTERVAL_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([smhd]?)$", re.IGNORECASE)
 
 
@@ -31,6 +36,36 @@ def parse_interval(value: str) -> float:
     if seconds <= 0:
         raise argparse.ArgumentTypeError("interval must be greater than 0")
     return seconds
+
+
+def parse_timestamp(raw_value: bytes) -> float | None:
+    """Normalize a numeric or ISO-8601 JSON timestamp to Unix seconds."""
+    try:
+        value = json.loads(raw_value)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            timestamp = float(text)
+        except ValueError:
+            try:
+                timestamp = datetime.fromisoformat(
+                    text.replace("Z", "+00:00")
+                ).timestamp()
+            except (ValueError, OverflowError):
+                return None
+    else:
+        return None
+
+    return timestamp if math.isfinite(timestamp) else None
 
 
 def percentile(sorted_values: list[float], percent: float) -> float:
@@ -89,8 +124,8 @@ def analyze(
                 if timestamp_match is None:
                     missing_timestamp += 1
                     continue
-                timestamp = float(timestamp_match.group(1))
-                if not math.isfinite(timestamp):
+                timestamp = parse_timestamp(timestamp_match.group(1))
+                if timestamp is None:
                     missing_timestamp += 1
                     continue
                 bucket_start = math.floor(timestamp / interval_seconds) * interval_seconds

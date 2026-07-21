@@ -1,3 +1,5 @@
+import json
+
 import requests
 
 r = requests.post(
@@ -12,7 +14,10 @@ r = requests.post(
 )
 
 print(r.status_code)
-print(r.text)
+try:
+    print(json.dumps(r.json(), ensure_ascii=False, indent=2))
+except ValueError:
+    print(r.text)
 
 # Messages API
 

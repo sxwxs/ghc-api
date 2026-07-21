@@ -1,5 +1,6 @@
-import requests
 import json
+
+import requests
 
 r = requests.post(
     "http://localhost:8313/v1/messages",
@@ -30,4 +31,7 @@ r = requests.post(
 )
 
 print(r.status_code)
-print(json.loads(r.text))
+try:
+    print(json.dumps(r.json(), ensure_ascii=False, indent=2))
+except ValueError:
+    print(r.text)
