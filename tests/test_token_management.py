@@ -6,7 +6,7 @@ from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 from ghc_api.api_helpers import refresh_copilot_token
-from ghc_api.app import create_app
+from ghc_api.app import create_app, initialize_app
 from ghc_api.state import state
 from ghc_api.token_manager import (
     delete_github_token_file,
@@ -82,6 +82,56 @@ class CopilotRefreshStatusTests(unittest.TestCase):
         self.assertIn("temporary GitHub service issue", message)
         self.assertIn("ghc-api --delete-github-token", message)
         self.assertIn("ghc-api --github-device-login", message)
+
+
+class ApplicationInitializationTests(unittest.TestCase):
+    def setUp(self):
+        self.saved = {
+            name: getattr(state, name)
+            for name in (
+                "github_token",
+                "github_token_source",
+                "copilot_token",
+                "token_expires_at",
+                "token_refresh_last_attempt_at",
+                "token_refresh_last_success_at",
+                "token_refresh_last_succeeded",
+                "token_refresh_last_error",
+                "token_usage_reporter_started",
+            )
+        }
+        state.github_token_source = "unconfigured"
+        state.copilot_token = None
+        state.token_expires_at = 0
+        state.token_usage_reporter_started = False
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(state, name, value)
+
+    @patch("ghc_api.token_usage_reporter.start_token_usage_reporter")
+    @patch("ghc_api.token_manager.get_github_token", return_value="github-token")
+    @patch("ghc_api.api_helpers.requests.get")
+    def test_startup_survives_github_502(self, get, _get_github_token, start_reporter):
+        get.return_value = Mock(
+            ok=False,
+            status_code=502,
+            text="<!DOCTYPE html>" + ("GitHub Unicorn error " * 100),
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            initialize_app()
+
+        message = output.getvalue()
+        self.assertIn("Copilot token refresh failed", message)
+        self.assertIn("temporary GitHub service issue", message)
+        self.assertIn("ghc-api --delete-github-token", message)
+        self.assertIn("ghc-api --github-device-login", message)
+        self.assertIn("token initialization is incomplete", message)
+        self.assertIn("response truncated", state.token_refresh_last_error)
+        self.assertFalse(state.token_refresh_last_succeeded)
+        start_reporter.assert_called_once_with()
 
 
 class TokenManagerRouteTests(unittest.TestCase):

@@ -101,9 +101,11 @@ def initialize_app() -> None:
     if state.github_token_source == "unconfigured":
         state.github_token_source = "file"
 
+    token_initialized = False
     try:
         refresh_copilot_token()
         fetch_models()
+        token_initialized = True
     except Exception as exc:
         # Keep the dashboard available so an operator can inspect refresh state
         # or replace the GitHub token through Device Flow.
@@ -113,4 +115,7 @@ def initialize_app() -> None:
         start_token_usage_reporter()
         state.token_usage_reporter_started = True
 
-    print("Application initialized successfully")
+    if token_initialized:
+        print("Application initialized successfully")
+    else:
+        print("Application started, but token initialization is incomplete. Use the manager UI or the commands above to recover.")

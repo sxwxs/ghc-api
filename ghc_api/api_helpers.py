@@ -72,8 +72,12 @@ def refresh_copilot_token(force: bool = False) -> None:
                 timeout=30,
             )
             if not response.ok:
+                response_text = (response.text or "").strip()
+                if len(response_text) > 500:
+                    response_text = response_text[:500] + "... (response truncated)"
+                detail = f" {response_text}" if response_text else ""
                 raise RuntimeError(
-                    f"Failed to get Copilot token: {response.status_code} {response.text}"
+                    f"Failed to get Copilot token: HTTP {response.status_code}.{detail}"
                 )
 
             data = response.json()
