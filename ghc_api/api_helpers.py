@@ -10,6 +10,7 @@ import requests
 
 from .config import GITHUB_API_BASE_URL, chat_completions_model_support
 from .state import state
+from .utils import log_upstream_error
 
 
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
@@ -64,10 +65,12 @@ def refresh_copilot_token(force: bool = False) -> None:
 
         attempted_at = time.time()
         state.token_refresh_last_attempt_at = attempted_at
+        token_endpoint = f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token"
+        response = None
         print("Refreshing Copilot token...")
         try:
             response = requests.get(
-                f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token",
+                token_endpoint,
                 headers=get_github_headers(),
                 timeout=30,
             )
@@ -90,7 +93,16 @@ def refresh_copilot_token(force: bool = False) -> None:
         except Exception as exc:
             state.token_refresh_last_succeeded = False
             state.token_refresh_last_error = str(exc)
+            error_logged = log_upstream_error(
+                operation="copilot_token_refresh",
+                endpoint=token_endpoint,
+                status_code=response.status_code if response is not None else None,
+                response_body=response.text if response is not None else "",
+                error=str(exc),
+            )
             print("\nCopilot token refresh failed.")
+            if error_logged:
+                print("The upstream error response was written to error.log in the ghc-api config directory.")
             print("This may be caused by a temporary GitHub service issue; retrying later may resolve it.")
             print("If the problem persists, clear the locally saved GitHub token and sign in again:")
             print("  ghc-api --delete-github-token")

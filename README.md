@@ -143,6 +143,8 @@ ghc-api --github-device-login
 
 The Code Agent Manager shows the latest Copilot token refresh attempt/result and can start a new Device Flow. The UI displays GitHub's short user code and verification URL; the secret device code and resulting access token remain server-side. If `GITHUB_TOKEN` is set, deleting the local file does not remove that environment variable, and it will take priority again after restart.
 
+Copilot token refresh failures are appended as structured JSON lines to `error.log` in the ghc-api config directory. The upstream response body is retained for debugging up to 64 KiB; authentication headers and tokens are not logged.
+
 ### Config Sync and OneDrive
 
 `ghc-api` can manage and sync these files:
