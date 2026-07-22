@@ -17,10 +17,8 @@ _TOKEN_URL = "https://github.com/login/oauth/access_token"
 
 
 def get_token_file_path() -> str:
-    """Get the path to the token file."""
-    config_dir = get_config_dir()
-    os.makedirs(config_dir, exist_ok=True)
-    return os.path.join(config_dir, "github_token.txt")
+    """Get the path to the token file without modifying the filesystem."""
+    return os.path.join(get_config_dir(), "github_token.txt")
 
 
 def load_github_token_from_file() -> Optional[str]:
@@ -42,6 +40,7 @@ def save_github_token_to_file(token: str) -> bool:
     """Save a GitHub token to github_token.txt in the config directory."""
     token_file_path = get_token_file_path()
     try:
+        os.makedirs(os.path.dirname(token_file_path), exist_ok=True)
         with open(token_file_path, "w", encoding="utf-8") as f:
             f.write(token)
         print(f"Saved GitHub token to {token_file_path}")
@@ -67,7 +66,7 @@ def delete_github_token_file() -> bool:
 
 
 def request_github_device_code() -> Dict[str, Any]:
-    """Start GitHub Device Flow and return its non-secret display details."""
+    """Start Device Flow and return internal details, including secret device_code."""
     response = requests.post(
         _DEVICE_CODE_URL,
         data={
@@ -93,7 +92,7 @@ def request_github_device_code() -> Dict[str, Any]:
     }
 
 
-def poll_github_device_flow(device: Dict[str, Any], progress=None) -> Optional[str]:
+def poll_github_device_flow(device: Dict[str, Any], progress=None) -> str:
     """Poll GitHub until Device Flow succeeds, fails, or expires."""
     interval = int(device.get("interval", 5))
     expires_in = int(device.get("expires_in", 900))
@@ -196,10 +195,31 @@ class GitHubDeviceFlowManager:
 
     def start(self) -> Dict[str, Any]:
         with self._lock:
-            if self._session.get("status") == "pending" and time.time() < self._session.get("expires_at", 0):
+            status = self._session.get("status")
+            if status == "starting":
+                return self._public_status_locked()
+            if status == "pending" and time.time() < self._session.get("expires_at", 0):
                 return self._public_status_locked()
 
-        device = request_github_device_code()
+            starting_session: Dict[str, Any] = {
+                "status": "starting",
+                "started_at": time.time(),
+                "error": None,
+            }
+            self._session = starting_session
+
+        try:
+            device = request_github_device_code()
+        except Exception as exc:
+            with self._lock:
+                if self._session is starting_session:
+                    self._session.update({
+                        "status": "error",
+                        "completed_at": time.time(),
+                        "error": str(exc),
+                    })
+            raise
+
         now = time.time()
         session = {
             **device,
@@ -209,6 +229,8 @@ class GitHubDeviceFlowManager:
             "error": None,
         }
         with self._lock:
+            if self._session is not starting_session:
+                return self._public_status_locked()
             self._session = session
             public = self._public_status_locked()
         threading.Thread(target=self._complete, args=(session,), daemon=True).start()
@@ -262,18 +284,23 @@ github_device_flow_manager = GitHubDeviceFlowManager()
 
 def get_github_token() -> Optional[str]:
     """Get GitHub token from environment, local file, or interactive Device Flow."""
+    from .state import state
+
     token = os.environ.get("GITHUB_TOKEN", "").strip()
     if token:
         print("Using GitHub token from GITHUB_TOKEN environment variable")
+        state.github_token_source = "environment"
         return token
 
     token = load_github_token_from_file()
     if token:
+        state.github_token_source = "file"
         return token
 
     print("\nNo GitHub token found. Starting GitHub Device Flow authentication...")
     token = authenticate_github_device_flow()
     if token:
         save_github_token_to_file(token)
+        state.github_token_source = "device_flow"
         return token
     return None

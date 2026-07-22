@@ -3,13 +3,16 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from threading import Event, Thread
 from unittest.mock import Mock, patch
 
 from ghc_api.api_helpers import refresh_copilot_token
 from ghc_api.app import create_app, initialize_app
 from ghc_api.state import state
 from ghc_api.token_manager import (
+    GitHubDeviceFlowManager,
     delete_github_token_file,
+    get_github_token,
     get_token_file_path,
     github_device_flow_manager,
     save_github_token_to_file,
@@ -26,6 +29,69 @@ class TokenFileTests(unittest.TestCase):
             self.assertTrue(delete_github_token_file())
             self.assertFalse(os.path.exists(get_token_file_path()))
             self.assertTrue(delete_github_token_file())
+
+    def test_get_token_file_path_does_not_create_config_directory(self):
+        with tempfile.TemporaryDirectory() as parent:
+            config_dir = os.path.join(parent, "missing-config-dir")
+            with patch("ghc_api.token_manager.get_config_dir", return_value=config_dir):
+                self.assertEqual(
+                    get_token_file_path(),
+                    os.path.join(config_dir, "github_token.txt"),
+                )
+            self.assertFalse(os.path.exists(config_dir))
+
+    def test_interactive_login_records_device_flow_source(self):
+        previous_source = state.github_token_source
+        try:
+            state.github_token_source = "unconfigured"
+            with patch.dict(os.environ, {"GITHUB_TOKEN": ""}), patch(
+                "ghc_api.token_manager.load_github_token_from_file", return_value=None
+            ), patch(
+                "ghc_api.token_manager.authenticate_github_device_flow",
+                return_value="github-token",
+            ), patch(
+                "ghc_api.token_manager.save_github_token_to_file", return_value=True
+            ):
+                self.assertEqual(get_github_token(), "github-token")
+            self.assertEqual(state.github_token_source, "device_flow")
+        finally:
+            state.github_token_source = previous_source
+
+
+class DeviceFlowManagerTests(unittest.TestCase):
+    def test_concurrent_start_requests_create_only_one_device_flow(self):
+        manager = GitHubDeviceFlowManager()
+        request_started = Event()
+        release_request = Event()
+
+        def request_device_code():
+            request_started.set()
+            self.assertTrue(release_request.wait(timeout=2))
+            return {
+                "device_code": "secret",
+                "user_code": "ABCD-1234",
+                "verification_uri": "https://github.com/login/device",
+                "expires_in": 900,
+                "interval": 5,
+            }
+
+        with patch(
+            "ghc_api.token_manager.request_github_device_code",
+            side_effect=request_device_code,
+        ) as request_mock, patch.object(manager, "_complete"):
+            first = Thread(target=manager.start)
+            first.start()
+            self.assertTrue(request_started.wait(timeout=2))
+
+            concurrent_status = manager.start()
+            self.assertEqual(concurrent_status["status"], "starting")
+
+            release_request.set()
+            first.join(timeout=2)
+            self.assertFalse(first.is_alive())
+
+        self.assertEqual(request_mock.call_count, 1)
+        self.assertEqual(manager.status()["status"], "pending")
 
 
 class CopilotRefreshStatusTests(unittest.TestCase):
@@ -169,7 +235,10 @@ class TokenManagerRouteTests(unittest.TestCase):
                 "verification_uri": "https://github.com/login/device",
             }
         try:
-            response = self.client.get("/api/config-manager/token-status")
+            with tempfile.TemporaryDirectory() as directory, patch(
+                "ghc_api.token_manager.get_config_dir", return_value=directory
+            ):
+                response = self.client.get("/api/config-manager/token-status")
             self.assertEqual(response.status_code, 200)
             flow = response.get_json()["device_flow"]
             self.assertNotIn("device_code", flow)

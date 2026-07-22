@@ -900,6 +900,18 @@
             };
         }
 
+        let deviceFlowPollTimer = null;
+
+        function updateDeviceFlowPolling(flow) {
+            const shouldPoll = flow && (flow.status === "starting" || flow.status === "pending");
+            if (shouldPoll && deviceFlowPollTimer === null) {
+                deviceFlowPollTimer = setInterval(refreshTokenStatus, 3000);
+            } else if (!shouldPoll && deviceFlowPollTimer !== null) {
+                clearInterval(deviceFlowPollTimer);
+                deviceFlowPollTimer = null;
+            }
+        }
+
         function renderTokenStatus(data) {
             const githubConfigured = booleanStatus(data.github_token_configured);
             const localFileExists = booleanStatus(data.local_token_file_exists);
@@ -927,6 +939,7 @@
         }
 
         function renderDeviceFlow(flow) {
+            updateDeviceFlowPolling(flow);
             const panel = document.getElementById("device-login-panel");
             const message = document.getElementById("device-login-message");
             if (!flow || flow.status === "idle") {
@@ -934,13 +947,13 @@
                 return;
             }
             panel.style.display = "block";
-            if (flow.verification_uri) {
-                const link = document.getElementById("device-verification-link");
-                link.href = flow.verification_uri;
-                link.textContent = flow.verification_uri;
-            }
+            const link = document.getElementById("device-verification-link");
+            link.href = flow.verification_uri || "#";
+            link.textContent = flow.verification_uri || "";
             document.getElementById("device-user-code").textContent = flow.user_code || "";
-            if (flow.status === "pending") {
+            if (flow.status === "starting") {
+                message.textContent = "Requesting a device code from GitHub...";
+            } else if (flow.status === "pending") {
                 message.textContent = "Waiting for authorization. This page will update automatically.";
             } else if (flow.status === "success") {
                 message.textContent = flow.message || "GitHub login completed.";
@@ -967,7 +980,12 @@
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Failed to start GitHub Device Flow");
                 renderDeviceFlow(data);
-                setStatus("Device code created. Complete authorization in GitHub.", "success");
+                setStatus(
+                    data.status === "starting"
+                        ? "GitHub Device Flow is starting..."
+                        : "Device code created. Complete authorization in GitHub.",
+                    "success"
+                );
             } catch (error) {
                 setStatus(error.message || String(error), "error");
             }
@@ -1062,7 +1080,6 @@
         }
 
         refreshAll();
-        setInterval(refreshTokenStatus, 3000);
         setInterval(refreshAll, 30000);
     </script>
 </body>
