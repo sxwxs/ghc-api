@@ -121,6 +121,17 @@ class TokenManagerRouteTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Config Hash Overview", response.data)
 
+    def test_token_status_is_a_table_at_the_bottom_of_manager_page(self):
+        response = self.client.get("/code-agent-manager")
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn('class="token-status-table"', html)
+        self.assertIn('class="btn danger"', html)
+        self.assertGreater(
+            html.index("GitHub / Copilot Token Status"),
+            html.index("Code Agent Configuration and Tools"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

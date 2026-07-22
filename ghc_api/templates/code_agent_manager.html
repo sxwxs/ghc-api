@@ -114,6 +114,39 @@
             background: #3f4857;
         }
 
+        .btn.danger {
+            background: #c62828;
+        }
+
+        .btn.danger:hover {
+            background: #a91f1f;
+        }
+
+        .token-status-table td:first-child {
+            width: 260px;
+            color: #555;
+            font-weight: 600;
+            background: #fafafa;
+        }
+
+        .token-status-table td:last-child {
+            word-break: break-word;
+        }
+
+        .status-value-success {
+            color: #2e7d32;
+            font-weight: 700;
+        }
+
+        .status-value-error {
+            color: #c62828;
+            font-weight: 700;
+        }
+
+        .status-value-muted {
+            color: #777;
+        }
+
         .status-line {
             min-height: 1.2rem;
             font-size: 0.875rem;
@@ -246,26 +279,6 @@
     </nav>
 
     <div class="container">
-        <div class="page-intro">
-            Monitor GitHub/Copilot authentication, token usage, and registered users.
-            <a href="/code-agent-manager/config">Open Actions, Sync Status, Software Versions, and Config Hash Overview</a>.
-        </div>
-
-        <div class="section">
-            <h2>GitHub / Copilot Token Status</h2>
-            <div class="manager-actions">
-                <button class="btn" type="button" onclick="startGithubDeviceLogin()">Sign in again with GitHub Device Code</button>
-                <button class="btn secondary" type="button" onclick="refreshTokenStatus()">Refresh Status</button>
-            </div>
-            <div class="status-line" id="status-line"></div>
-            <div class="status-block" id="token-status-details">Loading...</div>
-            <div id="device-login-panel" style="display:none; margin-top:0.8rem; padding:1rem; border:1px solid #c5cae9; border-radius:8px; background:#f5f7ff;">
-                <div>Open <a id="device-verification-link" href="#" target="_blank" rel="noopener noreferrer"></a> and enter:</div>
-                <div id="device-user-code" style="font:700 1.8rem ui-monospace,monospace; letter-spacing:0.14em; margin:0.45rem 0;"></div>
-                <div id="device-login-message" style="font-size:0.875rem;"></div>
-            </div>
-        </div>
-
         <div class="section">
             <h2>Token Usage Overview</h2>
             <div class="token-controls">
@@ -326,6 +339,44 @@
                     </thead>
                     <tbody id="users-admin-body"></tbody>
                 </table>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Code Agent Configuration and Tools</h2>
+            <p style="margin-bottom:0.75rem; color:#555;">
+                Monitor GitHub/Copilot authentication, token usage, and registered users here.
+                Actions, Sync Status, Software Versions, and Config Hash Overview are available on a separate page.
+            </p>
+            <a class="btn" style="display:inline-block; text-decoration:none;" href="/code-agent-manager/config">Open Configuration and Tools</a>
+        </div>
+
+        <div class="section">
+            <h2>GitHub / Copilot Token Status</h2>
+            <div class="manager-actions">
+                <button class="btn danger" type="button" onclick="startGithubDeviceLogin()">Sign in again with GitHub Device Code</button>
+                <button class="btn secondary" type="button" onclick="refreshTokenStatus()">Refresh Status</button>
+            </div>
+            <div class="status-line" id="status-line"></div>
+            <div class="table-wrap" style="max-height:none;">
+                <table class="token-status-table">
+                    <tbody>
+                        <tr><td>GitHub token configured</td><td id="github-token-configured">Loading...</td></tr>
+                        <tr><td>GitHub token source</td><td id="github-token-source">-</td></tr>
+                        <tr><td>Local token file exists</td><td id="local-token-file-exists">-</td></tr>
+                        <tr><td>Copilot token configured</td><td id="copilot-token-configured">-</td></tr>
+                        <tr><td>Copilot token expires</td><td id="copilot-token-expires">-</td></tr>
+                        <tr><td>Last refresh attempt</td><td id="last-refresh-attempt">-</td></tr>
+                        <tr><td>Last refresh result</td><td id="last-refresh-result">-</td></tr>
+                        <tr><td>Last successful refresh</td><td id="last-refresh-success">-</td></tr>
+                        <tr><td>Last refresh error</td><td id="last-refresh-error">-</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div id="device-login-panel" style="display:none; margin-top:0.8rem; padding:1rem; border:1px solid #c5cae9; border-radius:8px; background:#f5f7ff;">
+                <div>Open <a id="device-verification-link" href="#" target="_blank" rel="noopener noreferrer"></a> and enter:</div>
+                <div id="device-user-code" style="font:700 1.8rem ui-monospace,monospace; letter-spacing:0.14em; margin:0.45rem 0;"></div>
+                <div id="device-login-message" style="font-size:0.875rem;"></div>
             </div>
         </div>
     </div>
@@ -836,22 +887,42 @@
             return value ? new Date(value * 1000).toLocaleString() : "Never";
         }
 
+        function setTokenStatusValue(id, value, className = "") {
+            const element = document.getElementById(id);
+            element.textContent = value;
+            element.className = className;
+        }
+
+        function booleanStatus(value) {
+            return {
+                text: value ? "Yes" : "No",
+                className: value ? "status-value-success" : "status-value-error"
+            };
+        }
+
         function renderTokenStatus(data) {
-            const details = document.getElementById("token-status-details");
+            const githubConfigured = booleanStatus(data.github_token_configured);
+            const localFileExists = booleanStatus(data.local_token_file_exists);
+            const copilotConfigured = booleanStatus(data.copilot_token_configured);
             const refreshResult = data.last_refresh_succeeded === null
-                ? "Not attempted"
-                : (data.last_refresh_succeeded ? "SUCCESS" : "FAILED");
-            details.textContent = [
-                "GitHub token configured: " + data.github_token_configured,
-                "GitHub token source: " + (data.github_token_source || "unknown"),
-                "Local token file exists: " + data.local_token_file_exists,
-                "Copilot token configured: " + data.copilot_token_configured,
-                "Copilot token expires: " + formatTimestamp(data.copilot_token_expires_at),
-                "Last refresh attempt: " + formatTimestamp(data.last_refresh_attempt_at),
-                "Last refresh result: " + refreshResult,
-                "Last successful refresh: " + formatTimestamp(data.last_refresh_success_at),
-                "Last refresh error: " + (data.last_refresh_error || "-")
-            ].join("\n");
+                ? { text: "Not attempted", className: "status-value-muted" }
+                : (data.last_refresh_succeeded
+                    ? { text: "SUCCESS", className: "status-value-success" }
+                    : { text: "FAILED", className: "status-value-error" });
+
+            setTokenStatusValue("github-token-configured", githubConfigured.text, githubConfigured.className);
+            setTokenStatusValue("github-token-source", data.github_token_source || "unknown");
+            setTokenStatusValue("local-token-file-exists", localFileExists.text, localFileExists.className);
+            setTokenStatusValue("copilot-token-configured", copilotConfigured.text, copilotConfigured.className);
+            setTokenStatusValue("copilot-token-expires", formatTimestamp(data.copilot_token_expires_at));
+            setTokenStatusValue("last-refresh-attempt", formatTimestamp(data.last_refresh_attempt_at));
+            setTokenStatusValue("last-refresh-result", refreshResult.text, refreshResult.className);
+            setTokenStatusValue("last-refresh-success", formatTimestamp(data.last_refresh_success_at));
+            setTokenStatusValue(
+                "last-refresh-error",
+                data.last_refresh_error || "-",
+                data.last_refresh_error ? "status-value-error" : "status-value-muted"
+            );
             renderDeviceFlow(data.device_flow || { status: "idle" });
         }
 
