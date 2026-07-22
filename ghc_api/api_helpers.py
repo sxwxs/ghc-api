@@ -63,8 +63,7 @@ def refresh_copilot_token(force: bool = False) -> None:
         if not force and state.copilot_token and time.time() < state.token_expires_at - 60:
             return
 
-        attempted_at = time.time()
-        state.token_refresh_last_attempt_at = attempted_at
+        state.token_refresh_last_attempt_at = time.time()
         token_endpoint = f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token"
         response = None
         print("Refreshing Copilot token...")

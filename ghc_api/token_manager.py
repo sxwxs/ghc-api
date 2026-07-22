@@ -77,7 +77,13 @@ def request_github_device_code() -> Dict[str, Any]:
         timeout=30,
     )
     if not response.ok:
-        raise RuntimeError(f"Failed to get device code: {response.status_code} {response.text}")
+        response_text = (response.text or "").strip()
+        if len(response_text) > 500:
+            response_text = response_text[:500] + "... (response truncated)"
+        detail = f" {response_text}" if response_text else ""
+        raise RuntimeError(
+            f"Failed to get device code: HTTP {response.status_code}.{detail}"
+        )
 
     data = response.json()
     required = ("device_code", "user_code", "verification_uri")
@@ -196,7 +202,7 @@ class GitHubDeviceFlowManager:
     def start(self) -> Dict[str, Any]:
         with self._lock:
             status = self._session.get("status")
-            if status == "starting":
+            if status in {"starting", "completing"}:
                 return self._public_status_locked()
             if status == "pending" and time.time() < self._session.get("expires_at", 0):
                 return self._public_status_locked()
@@ -239,7 +245,12 @@ class GitHubDeviceFlowManager:
     def _complete(self, session: Dict[str, Any]) -> None:
         try:
             token = poll_github_device_flow(session)
-            if not token or not save_github_token_to_file(token):
+            with self._lock:
+                if self._session is not session:
+                    return
+                self._session["status"] = "completing"
+
+            if not save_github_token_to_file(token):
                 raise RuntimeError("Authorization succeeded, but the token file could not be saved")
 
             from .api_helpers import fetch_models, refresh_copilot_token

@@ -15,6 +15,7 @@ from ghc_api.token_manager import (
     get_github_token,
     get_token_file_path,
     github_device_flow_manager,
+    request_github_device_code,
     save_github_token_to_file,
 )
 
@@ -58,6 +59,20 @@ class TokenFileTests(unittest.TestCase):
             state.github_token_source = previous_source
 
 
+class DeviceFlowRequestTests(unittest.TestCase):
+    @patch("ghc_api.token_manager.requests.post")
+    def test_device_code_error_response_is_truncated(self, post):
+        post.return_value = Mock(ok=False, status_code=502, text="x" * 1000)
+
+        with self.assertRaises(RuntimeError) as caught:
+            request_github_device_code()
+
+        message = str(caught.exception)
+        self.assertIn("HTTP 502", message)
+        self.assertIn("response truncated", message)
+        self.assertNotIn("x" * 501, message)
+
+
 class DeviceFlowManagerTests(unittest.TestCase):
     def test_concurrent_start_requests_create_only_one_device_flow(self):
         manager = GitHubDeviceFlowManager()
@@ -92,6 +107,32 @@ class DeviceFlowManagerTests(unittest.TestCase):
 
         self.assertEqual(request_mock.call_count, 1)
         self.assertEqual(manager.status()["status"], "pending")
+
+    def test_stale_session_cannot_save_or_activate_its_token(self):
+        manager = GitHubDeviceFlowManager()
+        stale_session = {"status": "pending", "device_code": "old-secret"}
+        replacement_session = {"status": "pending", "device_code": "new-secret"}
+        manager._session = replacement_session
+
+        with patch(
+            "ghc_api.token_manager.poll_github_device_flow", return_value="old-token"
+        ), patch("ghc_api.token_manager.save_github_token_to_file") as save_token:
+            manager._complete(stale_session)
+
+        save_token.assert_not_called()
+        self.assertIs(manager._session, replacement_session)
+
+    def test_completing_session_cannot_be_replaced(self):
+        manager = GitHubDeviceFlowManager()
+        completing_session = {"status": "completing"}
+        manager._session = completing_session
+
+        with patch("ghc_api.token_manager.request_github_device_code") as request_code:
+            status = manager.start()
+
+        request_code.assert_not_called()
+        self.assertEqual(status["status"], "completing")
+        self.assertIs(manager._session, completing_session)
 
 
 class CopilotRefreshStatusTests(unittest.TestCase):
@@ -258,6 +299,9 @@ class TokenManagerRouteTests(unittest.TestCase):
         html = response.get_data(as_text=True)
         self.assertIn('class="token-status-table"', html)
         self.assertIn('class="btn danger"', html)
+        self.assertNotIn("refreshConfigManagerStatus", html)
+        self.assertNotIn("refreshSoftwareVersions", html)
+        self.assertNotIn("refreshConfigHashOverview", html)
         self.assertGreater(
             html.index("GitHub / Copilot Token Status"),
             html.index("Code Agent Configuration and Tools"),

@@ -384,7 +384,6 @@
     <script>
         let tokenUsageOverviewData = { machines: [], rows: [] };
         let tokenUsageSelectedMachines = new Set();
-        let configHashOverviewData = { shared_hash: null, machines: [] };
 
         function formatNumber(value) {
             return (value || 0).toLocaleString();
@@ -394,83 +393,6 @@
             const statusLine = document.getElementById("status-line");
             statusLine.className = "status-line" + (className ? " " + className : "");
             statusLine.textContent = message;
-        }
-
-        async function fetchConfigManagerStatus() {
-            const response = await fetch("/api/config-manager/status");
-            if (!response.ok) {
-                throw new Error("HTTP " + response.status);
-            }
-            return response.json();
-        }
-
-        function renderConfigManagerStatus(status, extraMessage = "") {
-            const details = document.getElementById("config-manager-details");
-            const lines = [];
-            const onedriveLabel = status.onedrive_access_disabled ? "DISABLED BY CONFIG" : (status.onedrive_path || "NOT FOUND");
-            lines.push("OneDrive: " + onedriveLabel);
-            lines.push("Sync Root: " + (status.sync_root || "N/A"));
-            lines.push("Agent Root: " + (status.agent_root || "N/A"));
-            lines.push("Has Sync Files: " + status.has_sync_files);
-            lines.push("Has Differences: " + status.has_differences);
-            if (status.hash_paths) {
-                lines.push("Hash(sync): " + (status.hash_paths.config_sync_hash || "N/A"));
-                lines.push("Hash(agent): " + (status.hash_paths.agent_hash || "N/A"));
-            }
-            if (status.hash_refreshed && status.hash_refreshed.length > 0) {
-                lines.push("Hash refreshed: " + status.hash_refreshed.join(", "));
-            }
-            if (status.hash_errors && status.hash_errors.length > 0) {
-                lines.push("Hash errors: " + status.hash_errors.join(" | "));
-            }
-            lines.push("");
-            for (const [name, file] of Object.entries(status.files || {})) {
-                lines.push("[" + name + "]");
-                lines.push("  local: " + file.local_path + " (" + (file.local_exists ? "exists" : "missing") + ")");
-                lines.push("  sync:  " + (file.sync_path || "N/A") + " (" + (file.sync_exists ? "exists" : "missing") + ")");
-                lines.push("  different: " + file.different);
-                lines.push("");
-            }
-            details.textContent = lines.join("\n").trim();
-            if (extraMessage) {
-                setStatus(extraMessage, "success");
-            }
-        }
-
-        async function refreshConfigManagerStatus(extraMessage = "") {
-            try {
-                const status = await fetchConfigManagerStatus();
-                renderConfigManagerStatus(status, extraMessage);
-            } catch (error) {
-                setStatus("Failed to load config status: " + (error.message || error), "error");
-            }
-        }
-
-        async function runConfigManagerAction(apiPath, successMessage) {
-            setStatus("Running...");
-            try {
-                const response = await fetch(apiPath, { method: "POST" });
-                const result = await response.json();
-                if (!response.ok || !result.ok) {
-                    throw new Error(result.error || ("Request failed (" + response.status + ")"));
-                }
-                await refreshConfigManagerStatus(successMessage);
-                await refreshConfigHashOverview();
-            } catch (error) {
-                setStatus(error.message || String(error), "error");
-            }
-        }
-
-        async function installCodeAgents() {
-            await runConfigManagerAction("/api/config-manager/install-tools", "Tools install finished.");
-        }
-
-        async function syncConfigToOneDrive() {
-            await runConfigManagerAction("/api/config-manager/sync-to-onedrive", "Config synced to OneDrive.");
-        }
-
-        async function syncConfigFromOneDrive() {
-            await runConfigManagerAction("/api/config-manager/sync-from-onedrive", "Config copied to local machine.");
         }
 
         async function fetchTokenUsageOverview(rangeKey) {
@@ -500,48 +422,6 @@
                 }
             }
             return data;
-        }
-
-        async function fetchSoftwareVersions() {
-            const response = await fetch("/api/config-manager/software-versions");
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || ("Failed to load software versions (" + response.status + ")"));
-            }
-            return data;
-        }
-
-        function renderSoftwareVersionsTable(data) {
-            const tbody = document.getElementById("software-versions-body");
-            tbody.innerHTML = "";
-
-            for (const tool of (data.tools || [])) {
-                const tr = document.createElement("tr");
-                const statusClass = tool.installed ? "software-installed" : "software-missing";
-                const statusText = tool.installed ? "Installed" : "Not installed";
-                tr.innerHTML = `
-                    <td>${tool.name || "-"}</td>
-                    <td class="${statusClass}">${statusText}</td>
-                    <td>${tool.version || "-"}</td>
-                    <td>${tool.command || "-"}</td>
-                `;
-                tbody.appendChild(tr);
-            }
-
-            if ((data.tools || []).length === 0) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"4\">No software data available.</td>";
-                tbody.appendChild(tr);
-            }
-        }
-
-        async function refreshSoftwareVersions() {
-            try {
-                const data = await fetchSoftwareVersions();
-                renderSoftwareVersionsTable(data);
-            } catch (error) {
-                setStatus("Failed to load software versions: " + (error.message || error), "error");
-            }
         }
 
         function renderMachineFilters(machines, resetSelection = false) {
@@ -825,64 +705,6 @@
             await refreshTokenUsageOverview(true);
         }
 
-        async function fetchConfigHashOverview() {
-            const response = await fetch("/api/config-manager/config-hashes");
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || ("Failed to load config hash overview (" + response.status + ")"));
-            }
-            return data;
-        }
-
-        function renderConfigHashOverviewTable() {
-            const tbody = document.getElementById("config-hash-body");
-            tbody.innerHTML = "";
-
-            const shared = configHashOverviewData.shared_hash || {};
-            const sharedLabel = configHashOverviewData.onedrive_access_disabled
-                ? "OneDrive Shared (disabled by config)"
-                : "OneDrive Shared (configSync)";
-            const sharedRow = document.createElement("tr");
-            sharedRow.className = "shared-row";
-            sharedRow.innerHTML = `
-                <td>${sharedLabel}</td>
-                <td>${shared.hash || "-"}</td>
-                <td>${shared.created_at ? new Date(shared.created_at).toLocaleString() : "-"}</td>
-                <td>${shared.path || "-"}</td>
-            `;
-            tbody.appendChild(sharedRow);
-
-            for (const machineRow of (configHashOverviewData.machines || [])) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `
-                    <td>${machineRow.machine || "-"}</td>
-                    <td>${machineRow.hash || "-"}</td>
-                    <td>${machineRow.created_at ? new Date(machineRow.created_at).toLocaleString() : "-"}</td>
-                    <td>${machineRow.path || "-"}</td>
-                `;
-                tbody.appendChild(tr);
-            }
-
-            if ((configHashOverviewData.machines || []).length === 0) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"4\">" + (
-                    configHashOverviewData.onedrive_access_disabled
-                        ? "OneDrive access is disabled by config."
-                        : "No machine hash files found."
-                ) + "</td>";
-                tbody.appendChild(tr);
-            }
-        }
-
-        async function refreshConfigHashOverview() {
-            try {
-                configHashOverviewData = await fetchConfigHashOverview();
-                renderConfigHashOverviewTable();
-            } catch (error) {
-                setStatus("Failed to load config hash overview: " + (error.message || error), "error");
-            }
-        }
-
         function formatTimestamp(value) {
             return value ? new Date(value * 1000).toLocaleString() : "Never";
         }
@@ -903,7 +725,7 @@
         let deviceFlowPollTimer = null;
 
         function updateDeviceFlowPolling(flow) {
-            const shouldPoll = flow && (flow.status === "starting" || flow.status === "pending");
+            const shouldPoll = flow && ["starting", "pending", "completing"].includes(flow.status);
             if (shouldPoll && deviceFlowPollTimer === null) {
                 deviceFlowPollTimer = setInterval(refreshTokenStatus, 3000);
             } else if (!shouldPoll && deviceFlowPollTimer !== null) {
@@ -955,6 +777,8 @@
                 message.textContent = "Requesting a device code from GitHub...";
             } else if (flow.status === "pending") {
                 message.textContent = "Waiting for authorization. This page will update automatically.";
+            } else if (flow.status === "completing") {
+                message.textContent = "Authorization completed. Refreshing Copilot credentials...";
             } else if (flow.status === "success") {
                 message.textContent = flow.message || "GitHub login completed.";
             } else {
@@ -980,12 +804,12 @@
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.error || "Failed to start GitHub Device Flow");
                 renderDeviceFlow(data);
-                setStatus(
-                    data.status === "starting"
-                        ? "GitHub Device Flow is starting..."
-                        : "Device code created. Complete authorization in GitHub.",
-                    "success"
-                );
+                const statusMessage = data.status === "starting"
+                    ? "GitHub Device Flow is starting..."
+                    : (data.status === "completing"
+                        ? "GitHub authorization is being finalized..."
+                        : "Device code created. Complete authorization in GitHub.");
+                setStatus(statusMessage, "success");
             } catch (error) {
                 setStatus(error.message || String(error), "error");
             }
