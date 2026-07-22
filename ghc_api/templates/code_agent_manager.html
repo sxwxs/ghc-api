@@ -247,39 +247,22 @@
 
     <div class="container">
         <div class="page-intro">
-            This page provides a full-size view of code agent config sync status, token usage, and config hash overview.
+            Monitor GitHub/Copilot authentication, token usage, and registered users.
+            <a href="/code-agent-manager/config">Open Actions, Sync Status, Software Versions, and Config Hash Overview</a>.
         </div>
 
         <div class="section">
-            <h2>Actions</h2>
+            <h2>GitHub / Copilot Token Status</h2>
             <div class="manager-actions">
-                <button class="btn" type="button" onclick="installCodeAgents()">Install/Update Tools</button>
-                <button class="btn" type="button" onclick="syncConfigToOneDrive()">Sync Local to OneDrive</button>
-                <button class="btn" type="button" onclick="syncConfigFromOneDrive()">Sync OneDrive to Local</button>
-                <button class="btn secondary" type="button" onclick="refreshAll()">Refresh All</button>
+                <button class="btn" type="button" onclick="startGithubDeviceLogin()">Sign in again with GitHub Device Code</button>
+                <button class="btn secondary" type="button" onclick="refreshTokenStatus()">Refresh Status</button>
             </div>
             <div class="status-line" id="status-line"></div>
-        </div>
-
-        <div class="section">
-            <h2>Sync Status</h2>
-            <div class="status-block" id="config-manager-details">Loading...</div>
-        </div>
-
-        <div class="section">
-            <h2>Software Versions</h2>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Software</th>
-                            <th>Status</th>
-                            <th>Version</th>
-                            <th>Command</th>
-                        </tr>
-                    </thead>
-                    <tbody id="software-versions-body"></tbody>
-                </table>
+            <div class="status-block" id="token-status-details">Loading...</div>
+            <div id="device-login-panel" style="display:none; margin-top:0.8rem; padding:1rem; border:1px solid #c5cae9; border-radius:8px; background:#f5f7ff;">
+                <div>Open <a id="device-verification-link" href="#" target="_blank" rel="noopener noreferrer"></a> and enter:</div>
+                <div id="device-user-code" style="font:700 1.8rem ui-monospace,monospace; letter-spacing:0.14em; margin:0.45rem 0;"></div>
+                <div id="device-login-message" style="font-size:0.875rem;"></div>
             </div>
         </div>
 
@@ -291,7 +274,7 @@
                     <option value="all">All</option>
                     <option value="hour">Last 1h</option>
                     <option value="day">Last 24h</option>
-                    <option value="week">Last 7d</option>
+                    <option value="week" selected>Last 7d</option>
                     <option value="month">Last 30d</option>
                 </select>
                 <label for="token-usage-user" style="margin-left:1rem;">User</label>
@@ -342,23 +325,6 @@
                         </tr>
                     </thead>
                     <tbody id="users-admin-body"></tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="section">
-            <h2>Config Hash Overview</h2>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Machine</th>
-                            <th>Hash</th>
-                            <th>Created At</th>
-                            <th>Path</th>
-                        </tr>
-                    </thead>
-                    <tbody id="config-hash-body"></tbody>
                 </table>
             </div>
         </div>
@@ -866,12 +832,79 @@
             }
         }
 
+        function formatTimestamp(value) {
+            return value ? new Date(value * 1000).toLocaleString() : "Never";
+        }
+
+        function renderTokenStatus(data) {
+            const details = document.getElementById("token-status-details");
+            const refreshResult = data.last_refresh_succeeded === null
+                ? "Not attempted"
+                : (data.last_refresh_succeeded ? "SUCCESS" : "FAILED");
+            details.textContent = [
+                "GitHub token configured: " + data.github_token_configured,
+                "GitHub token source: " + (data.github_token_source || "unknown"),
+                "Local token file exists: " + data.local_token_file_exists,
+                "Copilot token configured: " + data.copilot_token_configured,
+                "Copilot token expires: " + formatTimestamp(data.copilot_token_expires_at),
+                "Last refresh attempt: " + formatTimestamp(data.last_refresh_attempt_at),
+                "Last refresh result: " + refreshResult,
+                "Last successful refresh: " + formatTimestamp(data.last_refresh_success_at),
+                "Last refresh error: " + (data.last_refresh_error || "-")
+            ].join("\n");
+            renderDeviceFlow(data.device_flow || { status: "idle" });
+        }
+
+        function renderDeviceFlow(flow) {
+            const panel = document.getElementById("device-login-panel");
+            const message = document.getElementById("device-login-message");
+            if (!flow || flow.status === "idle") {
+                panel.style.display = "none";
+                return;
+            }
+            panel.style.display = "block";
+            if (flow.verification_uri) {
+                const link = document.getElementById("device-verification-link");
+                link.href = flow.verification_uri;
+                link.textContent = flow.verification_uri;
+            }
+            document.getElementById("device-user-code").textContent = flow.user_code || "";
+            if (flow.status === "pending") {
+                message.textContent = "Waiting for authorization. This page will update automatically.";
+            } else if (flow.status === "success") {
+                message.textContent = flow.message || "GitHub login completed.";
+            } else {
+                message.textContent = flow.error || "GitHub login failed.";
+            }
+        }
+
+        async function refreshTokenStatus() {
+            try {
+                const response = await fetch("/api/config-manager/token-status");
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Failed to load token status");
+                renderTokenStatus(data);
+            } catch (error) {
+                setStatus(error.message || String(error), "error");
+            }
+        }
+
+        async function startGithubDeviceLogin() {
+            setStatus("Starting GitHub Device Flow...");
+            try {
+                const response = await fetch("/api/config-manager/github-device-login", { method: "POST" });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Failed to start GitHub Device Flow");
+                renderDeviceFlow(data);
+                setStatus("Device code created. Complete authorization in GitHub.", "success");
+            } catch (error) {
+                setStatus(error.message || String(error), "error");
+            }
+        }
+
         async function refreshAll() {
-            setStatus("");
-            await refreshConfigManagerStatus();
-            await refreshSoftwareVersions();
+            await refreshTokenStatus();
             await refreshTokenUsageOverview(false);
-            await refreshConfigHashOverview();
             await loadUsersAdmin();
         }
 
@@ -958,6 +991,7 @@
         }
 
         refreshAll();
+        setInterval(refreshTokenStatus, 3000);
         setInterval(refreshAll, 30000);
     </script>
 </body>

@@ -56,27 +56,37 @@ def get_copilot_headers(enable_vision: bool = False) -> Dict[str, str]:
     return headers
 
 
-def refresh_copilot_token() -> None:
-    """Refresh the Copilot token from GitHub"""
+def refresh_copilot_token(force: bool = False) -> None:
+    """Refresh the Copilot token from GitHub and record the latest outcome."""
     with state.token_lock:
-        # Check if token is still valid
-        if state.copilot_token and time.time() < state.token_expires_at - 60:
+        if not force and state.copilot_token and time.time() < state.token_expires_at - 60:
             return
 
+        attempted_at = time.time()
+        state.token_refresh_last_attempt_at = attempted_at
         print("Refreshing Copilot token...")
-        response = requests.get(
-            f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token",
-            headers=get_github_headers(),
-            timeout=30,
-        )
+        try:
+            response = requests.get(
+                f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token",
+                headers=get_github_headers(),
+                timeout=30,
+            )
+            if not response.ok:
+                raise RuntimeError(
+                    f"Failed to get Copilot token: {response.status_code} {response.text}"
+                )
 
-        if not response.ok:
-            raise Exception(f"Failed to get Copilot token: {response.status_code} {response.text}")
-
-        data = response.json()
-        state.copilot_token = data["token"]
-        state.token_expires_at = time.time() + data.get("refresh_in", 1800)
-        print("Copilot token refreshed successfully")
+            data = response.json()
+            state.copilot_token = data["token"]
+            state.token_expires_at = time.time() + data.get("refresh_in", 1800)
+            state.token_refresh_last_succeeded = True
+            state.token_refresh_last_success_at = time.time()
+            state.token_refresh_last_error = None
+            print("Copilot token refreshed successfully")
+        except Exception as exc:
+            state.token_refresh_last_succeeded = False
+            state.token_refresh_last_error = str(exc)
+            raise
 
 
 def fetch_models() -> None:

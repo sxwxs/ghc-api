@@ -57,7 +57,9 @@ By default, the server will start on `http://localhost:8313`.
 - `-p PORT` or `--port PORT`: Specify the port to listen on (default: 8313)
 - `-a ADDRESS` or `--address ADDRESS`: Specify the address to listen on (default: localhost)
 - `-c` or `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.15`)
+- `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
+- `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.21`)
 - `--help`: Show help message
 
 ### Configuration
@@ -131,6 +133,15 @@ The application follows this priority for getting the GitHub token:
 1. `GITHUB_TOKEN` environment variable
 2. Token file at `~/.ghc-api/github_token.txt`
 3. Interactive GitHub Device Flow authentication
+
+To discard only the local token file, or explicitly sign in again without starting the server:
+
+```bash
+ghc-api --delete-github-token
+ghc-api --github-device-login
+```
+
+The Code Agent Manager shows the latest Copilot token refresh attempt/result and can start a new Device Flow. The UI displays GitHub's short user code and verification URL; the secret device code and resulting access token remain server-side. If `GITHUB_TOKEN` is set, deleting the local file does not remove that environment variable, and it will take priority again after restart.
 
 ### Config Sync and OneDrive
 
