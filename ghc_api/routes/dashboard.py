@@ -3,6 +3,7 @@ Dashboard and API monitoring routes
 """
 
 import json
+import os
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -22,6 +23,10 @@ from ..config_sync import (
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
 from ..token_usage_reporter import get_token_usage_overview
+from ..token_manager import (
+    get_token_file_path,
+    github_device_flow_manager,
+)
 from ..request_file_stats import (
     MAX_BUCKET_PAGE_SIZE,
     MAX_DETAIL_LINE_BYTES,
@@ -121,8 +126,14 @@ def chat_page():
 
 @dashboard_bp.route("/code-agent-manager", methods=["GET"])
 def code_agent_manager_page():
-    """Serve the code agent manager page"""
+    """Serve the code agent manager page."""
     return render_template("code_agent_manager.html")
+
+
+@dashboard_bp.route("/code-agent-manager/config", methods=["GET"])
+def code_agent_manager_config_page():
+    """Serve code-agent installation and config-sync details."""
+    return render_template("code_agent_manager_config.html")
 
 
 @dashboard_bp.route("/request-stats", methods=["GET"])
@@ -269,6 +280,32 @@ def api_runtime_config_update():
     })
 
 
+@dashboard_bp.route("/api/config-manager/token-status", methods=["GET"])
+def api_config_manager_token_status():
+    """Return Copilot refresh state and the active web Device Flow session."""
+    return jsonify({
+        "github_token_configured": bool(state.github_token),
+        "github_token_source": state.github_token_source,
+        "local_token_file_exists": os.path.exists(get_token_file_path()),
+        "copilot_token_configured": bool(state.copilot_token),
+        "copilot_token_expires_at": state.token_expires_at or None,
+        "last_refresh_attempt_at": state.token_refresh_last_attempt_at,
+        "last_refresh_success_at": state.token_refresh_last_success_at,
+        "last_refresh_succeeded": state.token_refresh_last_succeeded,
+        "last_refresh_error": state.token_refresh_last_error,
+        "device_flow": github_device_flow_manager.status(),
+    })
+
+
+@dashboard_bp.route("/api/config-manager/github-device-login", methods=["POST"])
+def api_config_manager_github_device_login():
+    """Start a non-blocking GitHub Device Flow session for the manager UI."""
+    try:
+        return jsonify(github_device_flow_manager.start()), 202
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 502
+
+
 @dashboard_bp.route("/api/config-manager/status", methods=["GET"])
 def api_config_manager_status():
     """Get OneDrive sync and local config diff status."""
@@ -302,7 +339,7 @@ def api_config_manager_sync_from_onedrive():
 @dashboard_bp.route("/api/config-manager/token-usage", methods=["GET"])
 def api_config_manager_token_usage():
     """Get token usage overview grouped by machine, model, and (optionally) user."""
-    range_key = request.args.get("range", "all")
+    range_key = request.args.get("range", "week")
     if range_key not in {"all", "hour", "day", "week", "month"}:
         return jsonify({"error": "Invalid range. Use: all, hour, day, week, month"}), 400
     user_filter = _user_filter_from_request()

@@ -10,6 +10,7 @@ import requests
 
 from .config import GITHUB_API_BASE_URL, chat_completions_model_support
 from .state import state
+from .utils import log_upstream_error
 
 
 CHAT_COMPLETIONS_ENDPOINT = "/v1/chat/completions"
@@ -56,27 +57,56 @@ def get_copilot_headers(enable_vision: bool = False) -> Dict[str, str]:
     return headers
 
 
-def refresh_copilot_token() -> None:
-    """Refresh the Copilot token from GitHub"""
+def refresh_copilot_token(force: bool = False) -> None:
+    """Refresh the Copilot token from GitHub and record the latest outcome."""
     with state.token_lock:
-        # Check if token is still valid
-        if state.copilot_token and time.time() < state.token_expires_at - 60:
+        if not force and state.copilot_token and time.time() < state.token_expires_at - 60:
             return
 
+        state.token_refresh_last_attempt_at = time.time()
+        token_endpoint = f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token"
+        response = None
         print("Refreshing Copilot token...")
-        response = requests.get(
-            f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token",
-            headers=get_github_headers(),
-            timeout=30,
-        )
+        try:
+            response = requests.get(
+                token_endpoint,
+                headers=get_github_headers(),
+                timeout=30,
+            )
+            if not response.ok:
+                response_text = (response.text or "").strip()
+                if len(response_text) > 500:
+                    response_text = response_text[:500] + "... (response truncated)"
+                detail = f" {response_text}" if response_text else ""
+                raise RuntimeError(
+                    f"Failed to get Copilot token: HTTP {response.status_code}.{detail}"
+                )
 
-        if not response.ok:
-            raise Exception(f"Failed to get Copilot token: {response.status_code} {response.text}")
-
-        data = response.json()
-        state.copilot_token = data["token"]
-        state.token_expires_at = time.time() + data.get("refresh_in", 1800)
-        print("Copilot token refreshed successfully")
+            data = response.json()
+            state.copilot_token = data["token"]
+            state.token_expires_at = time.time() + data.get("refresh_in", 1800)
+            state.token_refresh_last_succeeded = True
+            state.token_refresh_last_success_at = time.time()
+            state.token_refresh_last_error = None
+            print("Copilot token refreshed successfully")
+        except Exception as exc:
+            state.token_refresh_last_succeeded = False
+            state.token_refresh_last_error = str(exc)
+            error_logged = log_upstream_error(
+                operation="copilot_token_refresh",
+                endpoint=token_endpoint,
+                status_code=response.status_code if response is not None else None,
+                response_body=response.text if response is not None else "",
+                error=str(exc),
+            )
+            print("\nCopilot token refresh failed.")
+            if error_logged:
+                print("The upstream error response was written to error.log in the ghc-api config directory.")
+            print("This may be caused by a temporary GitHub service issue; retrying later may resolve it.")
+            print("If the problem persists, clear the locally saved GitHub token and sign in again:")
+            print("  ghc-api --delete-github-token")
+            print("  ghc-api --github-device-login")
+            raise
 
 
 def fetch_models() -> None:

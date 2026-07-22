@@ -22,7 +22,12 @@ from .config import (
 from .config_sync import print_sync_diff_status
 from .generate_config import generate_config_file
 from .state import state
-from .token_manager import get_config_dir
+from .token_manager import (
+    authenticate_github_device_flow,
+    delete_github_token_file,
+    get_config_dir,
+    save_github_token_to_file,
+)
 from .utils import print_model_mappings, print_available_models
 
 
@@ -38,6 +43,15 @@ def main():
     parser.add_argument('-p', '--port', type=int, help='Port to listen on')
     parser.add_argument('-a', '--address', type=str, help='Address to listen on')
     parser.add_argument('-c', '--config', action='store_true', help='Generate a YAML config file')
+    token_actions = parser.add_mutually_exclusive_group()
+    token_actions.add_argument(
+        '--delete-github-token', action='store_true',
+        help='Delete the locally saved GitHub token file and exit',
+    )
+    token_actions.add_argument(
+        '--github-device-login', action='store_true',
+        help='Run GitHub Device Flow, replace the locally saved token, and exit',
+    )
     parser.add_argument('--enable-auth', dest='enable_auth', action='store_true', default=None,
                         help='Require an approved user token on LLM API endpoints (overrides config)')
     parser.add_argument('--no-enable-auth', dest='enable_auth', action='store_false',
@@ -48,6 +62,16 @@ def main():
 
     if args.config:
         generate_config_file()
+        return
+    if args.delete_github_token:
+        delete_github_token_file()
+        return
+    if args.github_device_login:
+        token = authenticate_github_device_flow()
+        if token:
+            save_github_token_to_file(token)
+        else:
+            print("GitHub Device Flow login failed; the existing token file was not changed.")
         return
 
     # Load config from file if it exists
