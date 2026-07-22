@@ -1,6 +1,8 @@
+import io
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import Mock, patch
 
 from ghc_api.api_helpers import refresh_copilot_token
@@ -70,11 +72,16 @@ class CopilotRefreshStatusTests(unittest.TestCase):
     def test_http_failure_is_recorded(self, get):
         get.return_value = Mock(ok=False, status_code=502, text="bad gateway")
 
-        with self.assertRaises(RuntimeError):
+        output = io.StringIO()
+        with redirect_stdout(output), self.assertRaises(RuntimeError):
             refresh_copilot_token(force=True)
 
         self.assertFalse(state.token_refresh_last_succeeded)
         self.assertIn("502", state.token_refresh_last_error)
+        message = output.getvalue()
+        self.assertIn("temporary GitHub service issue", message)
+        self.assertIn("ghc-api --delete-github-token", message)
+        self.assertIn("ghc-api --github-device-login", message)
 
 
 class TokenManagerRouteTests(unittest.TestCase):

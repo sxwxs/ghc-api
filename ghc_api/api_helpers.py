@@ -86,6 +86,11 @@ def refresh_copilot_token(force: bool = False) -> None:
         except Exception as exc:
             state.token_refresh_last_succeeded = False
             state.token_refresh_last_error = str(exc)
+            print("\nCopilot token refresh failed.")
+            print("This may be caused by a temporary GitHub service issue; retrying later may resolve it.")
+            print("If the problem persists, clear the locally saved GitHub token and sign in again:")
+            print("  ghc-api --delete-github-token")
+            print("  ghc-api --github-device-login")
             raise
 
 
