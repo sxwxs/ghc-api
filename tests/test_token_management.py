@@ -302,6 +302,8 @@ class TokenManagerRouteTests(unittest.TestCase):
         self.assertNotIn("refreshConfigManagerStatus", html)
         self.assertNotIn("refreshSoftwareVersions", html)
         self.assertNotIn("refreshConfigHashOverview", html)
+        self.assertIn('url.protocol === "https:"', html)
+        self.assertIn('url.hostname === "github.com"', html)
         self.assertGreater(
             html.index("GitHub / Copilot Token Status"),
             html.index("Code Agent Configuration and Tools"),

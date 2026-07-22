@@ -760,6 +760,17 @@
             renderDeviceFlow(data.device_flow || { status: "idle" });
         }
 
+        function safeGithubVerificationUrl(value) {
+            try {
+                const url = new URL(value);
+                return url.protocol === "https:" && url.hostname === "github.com"
+                    ? url.href
+                    : "";
+            } catch (_error) {
+                return "";
+            }
+        }
+
         function renderDeviceFlow(flow) {
             updateDeviceFlowPolling(flow);
             const panel = document.getElementById("device-login-panel");
@@ -770,8 +781,10 @@
             }
             panel.style.display = "block";
             const link = document.getElementById("device-verification-link");
-            link.href = flow.verification_uri || "#";
-            link.textContent = flow.verification_uri || "";
+            const verificationUrl = safeGithubVerificationUrl(flow.verification_uri);
+            link.href = verificationUrl || "#";
+            link.textContent = verificationUrl;
+            link.style.display = verificationUrl ? "" : "none";
             document.getElementById("device-user-code").textContent = flow.user_code || "";
             if (flow.status === "starting") {
                 message.textContent = "Requesting a device code from GitHub...";

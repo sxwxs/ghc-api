@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from typing import Optional, get_type_hints
 from unittest import mock
 
 from ghc_api import utils
@@ -36,6 +37,10 @@ class GetClientIpTests(unittest.TestCase):
 
 
 class LogErrorRequestTests(unittest.TestCase):
+    def test_upstream_status_code_type_allows_none(self):
+        hints = get_type_hints(utils.log_upstream_error)
+        self.assertEqual(hints["status_code"], Optional[int])
+
     def test_error_log_has_unix_timestamp_and_client_ip(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(utils, "get_config_dir", return_value=tmp):

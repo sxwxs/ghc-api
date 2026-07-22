@@ -3,7 +3,7 @@ import json
 import os
 import platform
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 from .config import model_mappings
@@ -50,7 +50,7 @@ def log_error_request(endpoint: str, request_body: dict, response_body: str, sta
 def log_upstream_error(
     operation: str,
     endpoint: str,
-    status_code: int = None,
+    status_code: Optional[int] = None,
     response_body: str = "",
     error: str = "",
     max_response_chars: int = 65536,
