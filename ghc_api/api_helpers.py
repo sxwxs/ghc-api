@@ -260,7 +260,33 @@ def supports_responses_api(model_id: str) -> bool:
         return False
 
     supported_endpoints = model.get("supported_endpoints", [])
-    return "/responses" in supported_endpoints
+    return "/responses" in supported_endpoints or "/v1/responses" in supported_endpoints
+
+
+def anthropic_responses_wire_profile(model_id: str) -> str:
+    """Resolve the configured wire profile for a Responses-backed model."""
+    configured = getattr(state, "anthropic_responses_model_profiles", {}) or {}
+    if isinstance(configured, dict):
+        exact = configured.get(model_id)
+        if isinstance(exact, str) and exact:
+            return exact
+        # A trailing '*' denotes a prefix rule without adding another config
+        # structure solely for this small capability map.
+        prefix_matches = [
+            (pattern[:-1], profile)
+            for pattern, profile in configured.items()
+            if (
+                isinstance(pattern, str)
+                and pattern.endswith("*")
+                and model_id.startswith(pattern[:-1])
+                and isinstance(profile, str)
+                and profile
+            )
+        ]
+        if prefix_matches:
+            # Most-specific prefix wins regardless of YAML/dict insertion order.
+            return max(prefix_matches, key=lambda item: len(item[0]))[1]
+    return getattr(state, "anthropic_responses_wire_profile", "copilot_responses_lite")
 
 
 def supported_reasoning_efforts(model_id: str) -> set:

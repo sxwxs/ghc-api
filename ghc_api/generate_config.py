@@ -161,6 +161,55 @@ disable_onedrive_access: true
 # Disabled by default; when off the upstream stream is forwarded untouched.
 enable_tool_call_recovery: false
 
+# Anthropic Messages -> OpenAI Responses Compatibility
+# ----------------------------------------------------
+# Allows Claude Code and other Anthropic /messages clients to use models that
+# Copilot exposes only through /responses. Conversion is selected only for a
+# Responses-only model; native /messages support remains preferred.
+#
+# Modes:
+#   - compatibility: continue when an exact representation is unavailable and
+#                    surface a compatibility warning for every approximation.
+#   - lossless_required: fail before calling upstream if any accepted field
+#                        cannot be represented without loss.
+anthropic_responses_compat_enabled: true
+anthropic_responses_compat_mode: compatibility
+
+# Default Responses request dialect, plus optional per-model overrides.
+# Supported profiles: public_responses, copilot_responses_lite.
+anthropic_responses_wire_profile: copilot_responses_lite
+anthropic_responses_model_profiles:
+  gpt-5.6-sol: copilot_responses_lite
+
+# Stateful reasoning replay
+# -------------------------
+# Responses reasoning items cannot be represented as Claude thinking
+# signatures. The replay database preserves the complete upstream output and
+# restores it on later tool/result turns. It also holds full request/response
+# audit snapshots that must not be truncated by the dashboard cache. An empty
+# path uses the application's default SQLite location.
+anthropic_responses_replay_path: ""
+
+# Replay records expire after this many seconds. Quotas count live encrypted
+# logical row bytes transactionally; they do not depend on SQLite/WAL file size.
+anthropic_responses_replay_ttl_seconds: 86400
+anthropic_responses_replay_max_bytes: 1073741824
+anthropic_responses_replay_max_tenant_bytes: 268435456
+anthropic_responses_replay_max_record_bytes: 67108864
+
+# Name of the environment variable containing a urlsafe-base64 Fernet key.
+# The config file stores only the variable name, never the encryption key.
+# Full replay/audit snapshots are never written in plaintext. If the variable
+# is empty or missing, compatibility mode continues with explicit warnings and
+# no durable replay; lossless_required fails closed.
+anthropic_responses_replay_encryption_key_env: GHC_REPLAY_ENCRYPTION_KEY
+
+# Require a stable authenticated tenant identity before replaying model state.
+# Set trusted_single_user only for a genuinely private, single-user deployment;
+# it explicitly treats anonymous traffic as one trusted tenant.
+anthropic_responses_replay_require_trusted_tenant: true
+anthropic_responses_replay_trusted_single_user: false
+
 # Session File Flush Interval
 # ---------------------------
 # How often (in seconds) buffered session updates are flushed to disk.

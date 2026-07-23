@@ -45,6 +45,29 @@ class State:
         # forwarded untouched (see ghc_api/tool_call_recovery.py).
         self.enable_tool_call_recovery: bool = False
 
+        # Anthropic Messages -> OpenAI Responses compatibility. The route only
+        # selects this path for models whose Copilot metadata advertises
+        # /responses but not /messages.
+        self.anthropic_responses_compat_enabled: bool = True
+        self.anthropic_responses_compat_mode: str = "compatibility"
+        self.anthropic_responses_wire_profile: str = "copilot_responses_lite"
+        self.anthropic_responses_model_profiles: Dict[str, str] = {
+            "gpt-5.6-sol": "copilot_responses_lite",
+        }
+
+        # Stateful encrypted-reasoning replay. Empty path resolves to a SQLite
+        # file in the ghc-api config directory. Compatibility mode may operate
+        # with warnings when identity/encryption is unavailable; lossless mode
+        # fails closed.
+        self.anthropic_responses_replay_path: str = ""
+        self.anthropic_responses_replay_ttl_seconds: int = 86400
+        self.anthropic_responses_replay_max_bytes: int = 1024 * 1024 * 1024
+        self.anthropic_responses_replay_max_tenant_bytes: int = 256 * 1024 * 1024
+        self.anthropic_responses_replay_max_record_bytes: int = 64 * 1024 * 1024
+        self.anthropic_responses_replay_encryption_key_env: str = "GHC_REPLAY_ENCRYPTION_KEY"
+        self.anthropic_responses_replay_require_trusted_tenant: bool = True
+        self.anthropic_responses_replay_trusted_single_user: bool = False
+
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
 

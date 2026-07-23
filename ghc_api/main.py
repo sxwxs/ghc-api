@@ -11,6 +11,7 @@ import os
 import yaml
 
 from . import __version__
+from .anthropic_responses import VALID_MODES, WIRE_PROFILES
 from .app import create_app, initialize_app
 from .config import (
     DEBUG,
@@ -35,6 +36,125 @@ def load_config(config_path: str) -> dict:
     """Load configuration from YAML file"""
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f) or {}
+
+
+def _config_bool(value, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def _config_positive_int(value, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValueError(f"{name} must be an integer > 0")
+    return value
+
+
+def apply_anthropic_responses_config(config: dict) -> None:
+    """Validate and apply the Responses-backed Messages settings."""
+    proposed_total = _config_positive_int(
+        config.get(
+            'anthropic_responses_replay_max_bytes',
+            state.anthropic_responses_replay_max_bytes,
+        ),
+        'anthropic_responses_replay_max_bytes',
+    )
+    proposed_tenant = _config_positive_int(
+        config.get(
+            'anthropic_responses_replay_max_tenant_bytes',
+            state.anthropic_responses_replay_max_tenant_bytes,
+        ),
+        'anthropic_responses_replay_max_tenant_bytes',
+    )
+    proposed_record = _config_positive_int(
+        config.get(
+            'anthropic_responses_replay_max_record_bytes',
+            state.anthropic_responses_replay_max_record_bytes,
+        ),
+        'anthropic_responses_replay_max_record_bytes',
+    )
+    if proposed_record > proposed_tenant:
+        raise ValueError(
+            "anthropic_responses_replay_max_record_bytes must not exceed "
+            "anthropic_responses_replay_max_tenant_bytes"
+        )
+    if proposed_tenant > proposed_total:
+        raise ValueError(
+            "anthropic_responses_replay_max_tenant_bytes must not exceed "
+            "anthropic_responses_replay_max_bytes"
+        )
+    if 'anthropic_responses_compat_enabled' in config:
+        state.anthropic_responses_compat_enabled = _config_bool(
+            config['anthropic_responses_compat_enabled'],
+            'anthropic_responses_compat_enabled',
+        )
+    if 'anthropic_responses_compat_mode' in config:
+        mode = config['anthropic_responses_compat_mode']
+        if not isinstance(mode, str) or mode not in VALID_MODES:
+            raise ValueError(
+                "anthropic_responses_compat_mode must be compatibility or lossless_required"
+            )
+        state.anthropic_responses_compat_mode = mode
+    if 'anthropic_responses_wire_profile' in config:
+        profile = config['anthropic_responses_wire_profile']
+        if not isinstance(profile, str) or profile not in WIRE_PROFILES:
+            raise ValueError(
+                "anthropic_responses_wire_profile must be a registered wire profile"
+            )
+        state.anthropic_responses_wire_profile = profile
+    if 'anthropic_responses_model_profiles' in config:
+        profiles = config['anthropic_responses_model_profiles']
+        if not isinstance(profiles, dict):
+            raise ValueError(
+                "anthropic_responses_model_profiles must be a string-to-string mapping"
+            )
+        for model, profile in profiles.items():
+            if (
+                not isinstance(model, str) or not model.strip()
+                or not isinstance(profile, str) or profile not in WIRE_PROFILES
+            ):
+                raise ValueError(
+                    "anthropic_responses_model_profiles contains an invalid model/profile"
+                )
+        state.anthropic_responses_model_profiles = dict(profiles)
+    if 'anthropic_responses_replay_path' in config:
+        value = config['anthropic_responses_replay_path']
+        if not isinstance(value, str):
+            raise ValueError("anthropic_responses_replay_path must be a string")
+        state.anthropic_responses_replay_path = value
+    if 'anthropic_responses_replay_ttl_seconds' in config:
+        state.anthropic_responses_replay_ttl_seconds = _config_positive_int(
+            config['anthropic_responses_replay_ttl_seconds'],
+            'anthropic_responses_replay_ttl_seconds',
+        )
+    if 'anthropic_responses_replay_max_bytes' in config:
+        state.anthropic_responses_replay_max_bytes = _config_positive_int(
+            config['anthropic_responses_replay_max_bytes'],
+            'anthropic_responses_replay_max_bytes',
+        )
+    if 'anthropic_responses_replay_max_tenant_bytes' in config:
+        state.anthropic_responses_replay_max_tenant_bytes = _config_positive_int(
+            config['anthropic_responses_replay_max_tenant_bytes'],
+            'anthropic_responses_replay_max_tenant_bytes',
+        )
+    if 'anthropic_responses_replay_max_record_bytes' in config:
+        state.anthropic_responses_replay_max_record_bytes = _config_positive_int(
+            config['anthropic_responses_replay_max_record_bytes'],
+            'anthropic_responses_replay_max_record_bytes',
+        )
+    if 'anthropic_responses_replay_encryption_key_env' in config:
+        value = config['anthropic_responses_replay_encryption_key_env']
+        if not isinstance(value, str):
+            raise ValueError(
+                "anthropic_responses_replay_encryption_key_env must be a string"
+            )
+        state.anthropic_responses_replay_encryption_key_env = value
+    for key in (
+        'anthropic_responses_replay_require_trusted_tenant',
+        'anthropic_responses_replay_trusted_single_user',
+    ):
+        if key in config:
+            setattr(state, key, _config_bool(config[key], key))
 
 
 def main():
@@ -127,6 +247,7 @@ def main():
             state.disable_onedrive_access = bool(config['disable_onedrive_access'])
         if 'enable_tool_call_recovery' in config:
             state.enable_tool_call_recovery = bool(config['enable_tool_call_recovery'])
+        apply_anthropic_responses_config(config)
         if 'session_flush_interval' in config:
             state.session_flush_interval = int(config['session_flush_interval'])
 
@@ -168,6 +289,10 @@ def main():
 
     except Exception as e:
         print(f"Error loading config file: {e}")
+        # Never fall back from a requested lossless policy to the more
+        # permissive in-memory defaults after a validation error.
+        state.anthropic_responses_compat_enabled = False
+        print("[AnthropicResponsesCompat] Disabled because configuration validation failed")
         # Use default mappings on error
         model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
         chat_completions_model_support.load_from_config({

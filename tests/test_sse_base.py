@@ -49,7 +49,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._cache_patch.stop()
 
-    def _make_handler(self, lines, status_code=200):
+    def _make_handler(self, lines, status_code=200, **kwargs):
         return AnthropicDirectStreamHandler(
             response=_FakeResponse(lines, status_code=status_code),
             request_id="req-1",
@@ -62,6 +62,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
             request_headers={},
             client_ip="1.2.3.4",
             user_id="anonymous",
+            **kwargs,
         )
 
     def test_passthrough_forwards_every_data_line_verbatim(self):
@@ -145,6 +146,15 @@ class SSEBasePassthroughTest(unittest.TestCase):
         entry = self.cache.get_request("req-1")
         self.assertEqual(entry["status_code"], 499)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+        self.assertEqual(entry["raw_events"], [message_start])
+        # request_count means terminal request attempts, not successful
+        # responses.  A 499 is retained once for diagnostics and statistics.
+        self.assertEqual(self.cache.request_count, 1)
+        self.assertEqual(self.cache.model_stats["claude-opus-4"]["request_count"], 1)
+        self.assertEqual(self.cache.endpoint_stats["/v1/messages"]["request_count"], 1)
+        self.assertEqual(self.cache.user_totals["anonymous"]["request_count"], 1)
+        handler._complete_cache()
+        self.assertEqual(self.cache.request_count, 1)
 
     def test_read_timeout_sets_504_and_completes_cache(self):
         lines = [
@@ -156,6 +166,44 @@ class SSEBasePassthroughTest(unittest.TestCase):
         # complete_request stores the chosen status_code; STATE_ERROR because >= 400.
         self.assertEqual(entry["status_code"], 504)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+
+    def test_raw_capture_limit_bounds_memory_without_truncating_client_stream(self):
+        first = json.dumps({"type": "ping", "value": "first"})
+        second = json.dumps({"type": "ping", "value": "second"})
+        handler = self._make_handler(
+            [f"data: {first}".encode(), f"data: {second}".encode()],
+            max_raw_capture_bytes=len(first.encode("utf-8")),
+        )
+
+        output = "".join(handler._generate())
+
+        self.assertIn(first, output)
+        self.assertIn(second, output)
+        self.assertTrue(handler.raw_capture_truncated)
+        self.assertEqual(handler.raw_events, [first])
+        entry = self.cache.get_request("req-1")
+        self.assertEqual(
+            entry["response_size"],
+            len(first.encode("utf-8")) + len(second.encode("utf-8")),
+        )
+
+    def test_raw_capture_limit_counts_both_retained_stream_views(self):
+        payload = json.dumps({"type": "ping", "value": "fixture"})
+        wire_line = f"data: {payload}"
+        retained_bytes = len(wire_line.encode("utf-8")) + len(payload.encode("utf-8"))
+        handler = self._make_handler(
+            [wire_line.encode("utf-8")],
+            max_raw_capture_bytes=retained_bytes,
+        )
+        handler.capture_raw_sse_lines = True
+
+        output = "".join(handler._generate())
+
+        self.assertIn(payload, output)
+        self.assertFalse(handler.raw_capture_truncated)
+        self.assertEqual(handler.raw_sse_lines, [wire_line])
+        self.assertEqual(handler.raw_events, [payload])
+        self.assertEqual(handler.raw_capture_bytes, retained_bytes)
 
 
 class OpenAIResponsesPassthroughTest(unittest.TestCase):
