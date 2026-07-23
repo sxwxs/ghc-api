@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import math
 import re
 import statistics
+import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,11 @@ _TIMESTAMP_RE = re.compile(
     br'"timestamp"\s*:\s*('
     + _NUMBER_PATTERN
     + br'|"(?:\\.|[^"\\])*")'
+)
+_JSON_STRING_OR_NULL_PATTERN = br'("(?:\\.|[^"\\])*"|null)'
+_MODEL_RE = re.compile(br'"model"\s*:\s*' + _JSON_STRING_OR_NULL_PATTERN)
+_TRANSLATED_MODEL_RE = re.compile(
+    br'"translated_model"\s*:\s*' + _JSON_STRING_OR_NULL_PATTERN
 )
 _INTERVAL_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*([smhd]?)$", re.IGNORECASE)
 
@@ -68,6 +75,27 @@ def parse_timestamp(raw_value: bytes) -> float | None:
     return timestamp if math.isfinite(timestamp) else None
 
 
+def parse_model(line: bytes, end: int) -> str:
+    """Return the effective top-level model preceding the duration field."""
+    for field, pattern in (
+        (b'"translated_model"', _TRANSLATED_MODEL_RE),
+        (b'"model"', _MODEL_RE),
+    ):
+        index = line.rfind(field, 0, end)
+        if index < 0:
+            continue
+        match = pattern.match(line, index)
+        if match is None or match.group(1) == b"null":
+            continue
+        try:
+            value = json.loads(match.group(1))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "unknown"
+
+
 def percentile(sorted_values: list[float], percent: float) -> float:
     """Calculate a percentile using NumPy-style linear interpolation."""
     if not sorted_values:
@@ -83,11 +111,37 @@ def percentile(sorted_values: list[float], percent: float) -> float:
     return sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
 
 
+def expand_paths(patterns: list[str]) -> list[Path]:
+    """Expand file paths and glob patterns, returning unique regular files."""
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    unmatched: list[str] = []
+
+    for pattern in patterns:
+        matches = sorted(Path(match) for match in glob.glob(pattern, recursive=True))
+        files = [path for path in matches if path.is_file()]
+        if not files:
+            unmatched.append(pattern)
+            continue
+        for path in files:
+            normalized = path.resolve()
+            if normalized not in seen:
+                seen.add(normalized)
+                paths.append(path)
+
+    if unmatched:
+        raise ValueError(f"no files matched: {', '.join(unmatched)}")
+    return paths
+
+
 def analyze(
     path: Path, interval_seconds: float | None = None
-) -> tuple[list[float], dict[float, list[float]], int, int, int]:
+) -> tuple[
+    list[float], dict[float, list[float]], dict[str, list[float]], int, int, int
+]:
     durations: list[float] = []
     buckets: dict[float, list[float]] = defaultdict(list)
+    model_durations: dict[str, list[float]] = defaultdict(list)
     missing_or_null = 0
     invalid = 0
     missing_timestamp = 0
@@ -117,7 +171,9 @@ def analyze(
                 continue
 
             durations.append(value)
-            if interval_seconds is not None:
+            if interval_seconds is None:
+                model_durations[parse_model(line, index)].append(value)
+            else:
                 # The Unix timestamp is near the start of the line, so scan
                 # only the first 1 KiB.
                 timestamp_match = _TIMESTAMP_RE.search(line, 0, min(len(line), 1024))
@@ -131,7 +187,54 @@ def analyze(
                 bucket_start = math.floor(timestamp / interval_seconds) * interval_seconds
                 buckets[bucket_start].append(value)
 
-    return durations, buckets, missing_or_null, invalid, missing_timestamp
+    return (
+        durations,
+        buckets,
+        model_durations,
+        missing_or_null,
+        invalid,
+        missing_timestamp,
+    )
+
+
+def analyze_paths(
+    paths: list[Path], interval_seconds: float | None = None
+) -> tuple[
+    list[float], dict[float, list[float]], dict[str, list[float]], int, int, int
+]:
+    durations: list[float] = []
+    buckets: dict[float, list[float]] = defaultdict(list)
+    model_durations: dict[str, list[float]] = defaultdict(list)
+    missing_or_null = 0
+    invalid = 0
+    missing_timestamp = 0
+
+    for path in paths:
+        (
+            file_durations,
+            file_buckets,
+            file_model_durations,
+            file_missing_or_null,
+            file_invalid,
+            file_missing_timestamp,
+        ) = analyze(path, interval_seconds)
+        durations.extend(file_durations)
+        for start, values in file_buckets.items():
+            buckets[start].extend(values)
+        for model, values in file_model_durations.items():
+            model_durations[model].extend(values)
+        missing_or_null += file_missing_or_null
+        invalid += file_invalid
+        missing_timestamp += file_missing_timestamp
+
+    return (
+        durations,
+        buckets,
+        model_durations,
+        missing_or_null,
+        invalid,
+        missing_timestamp,
+    )
 
 
 def print_stats(values: list[float]) -> None:
@@ -140,17 +243,84 @@ def print_stats(values: list[float]) -> None:
     print(f"P50: {percentile(values, 50):.3f} seconds")
     print(f"P90: {percentile(values, 90):.3f} seconds")
     print(f"P99: {percentile(values, 99):.3f} seconds")
+    print(f"P999: {percentile(values, 99.9):.3f} seconds")
+
+
+def print_model_stats_tsv(
+    model_durations: dict[str, list[float]],
+    path: Path | None = None,
+    print_header: bool = True,
+) -> None:
+    if print_header:
+        prefix = "File\t" if path is not None else ""
+        print(f"{prefix}Model\tRequests\tAvg/sec\tP50/sec\tP90/sec\tP99/sec\tP999/sec")
+    for model, values in sorted(model_durations.items()):
+        values.sort()
+        file_prefix = f"{path}\t" if path is not None else ""
+        print(
+            f"{file_prefix}{model}\t{len(values)}\t"
+            f"{statistics.fmean(values):.3f}\t"
+            f"{percentile(values, 50):.3f}\t{percentile(values, 90):.3f}\t"
+            f"{percentile(values, 99):.3f}\t{percentile(values, 99.9):.3f}"
+        )
 
 
 def format_utc(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def print_interval_stats(
+    paths: list[Path],
+    result: tuple[
+        list[float], dict[float, list[float]], dict[str, list[float]], int, int, int
+    ],
+    interval_seconds: float,
+) -> None:
+    durations, buckets, _, missing_or_null, invalid, missing_timestamp = result
+    if len(paths) == 1:
+        print(f"File: {paths[0]}")
+    else:
+        print(f"Files: {len(paths):,}")
+    print(f"Valid requests: {len(durations):,}")
+    print(f"Missing or null: {missing_or_null:,}")
+    print(f"Invalid values: {invalid:,}")
+    print(f"Missing or invalid timestamps: {missing_timestamp:,}")
+    print(f"Interval: {interval_seconds:g} seconds (UTC)")
+    print()
+    print(
+        f"{'Period (UTC, start inclusive)':41} {'Requests':>8} "
+        f"{'Avg/sec':>10} {'P50/sec':>10} {'P90/sec':>10} "
+        f"{'P99/sec':>10} {'P999/sec':>10}"
+    )
+    for start, values in sorted(buckets.items()):
+        values.sort()
+        period = f"{format_utc(start)} ~ {format_utc(start + interval_seconds)}"
+        print(
+            f"{period:41} {len(values):8d} "
+            f"{statistics.fmean(values):10.3f} "
+            f"{percentile(values, 50):10.3f} "
+            f"{percentile(values, 90):10.3f} "
+            f"{percentile(values, 99):10.3f} "
+            f"{percentile(values, 99.9):10.3f}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Calculate duration statistics for JSON Lines request logs"
     )
-    parser.add_argument("path", nargs="?", default="2026-07-19.jl", type=Path)
+    parser.add_argument(
+        "paths",
+        nargs="*",
+        default=["2026-07-19.jl"],
+        metavar="PATH",
+        help="request log paths or glob patterns, such as 2026-07-*.jl",
+    )
+    parser.add_argument(
+        "--aggregate",
+        action="store_true",
+        help="aggregate all matched files; by default each file is calculated separately",
+    )
     parser.add_argument(
         "--interval",
         type=parse_interval,
@@ -161,39 +331,35 @@ def main() -> None:
         ),
     )
     args = parser.parse_args()
+    try:
+        paths = expand_paths(args.paths)
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    durations, buckets, missing_or_null, invalid, missing_timestamp = analyze(
-        args.path, args.interval
-    )
-    if not durations:
-        raise SystemExit("no valid duration values found")
-
-    print(f"File: {args.path}")
-    print(f"Valid requests: {len(durations):,}")
-    print(f"Missing or null: {missing_or_null:,}")
-    print(f"Invalid values: {invalid:,}")
-
-    if args.interval is None:
-        print_stats(durations)
+    if args.aggregate:
+        result = analyze_paths(paths, args.interval)
+        if not result[0]:
+            raise SystemExit("no valid duration values found")
+        if args.interval is None:
+            print_model_stats_tsv(result[2])
+        else:
+            print_interval_stats(paths, result, args.interval)
         return
 
-    print(f"Missing or invalid timestamps: {missing_timestamp:,}")
-    print(f"Interval: {args.interval:g} seconds (UTC)")
-    print()
-    print(
-        f"{'Period (UTC, start inclusive)':41} {'Requests':>8} "
-        f"{'Avg/sec':>10} {'P50/sec':>10} {'P90/sec':>10} {'P99/sec':>10}"
-    )
-    for start, values in sorted(buckets.items()):
-        values.sort()
-        period = f"{format_utc(start)} ~ {format_utc(start + args.interval)}"
-        print(
-            f"{period:41} {len(values):8d} "
-            f"{statistics.fmean(values):10.3f} "
-            f"{percentile(values, 50):10.3f} "
-            f"{percentile(values, 90):10.3f} "
-            f"{percentile(values, 99):10.3f}"
-        )
+    found_valid_duration = False
+    for index, path in enumerate(paths):
+        result = analyze(path, args.interval)
+        found_valid_duration = found_valid_duration or bool(result[0])
+        if args.interval is None:
+            print_model_stats_tsv(result[2], path, print_header=index == 0)
+        else:
+            if index:
+                print()
+            print_interval_stats([path], result, args.interval)
+        sys.stdout.flush()
+
+    if not found_valid_duration:
+        raise SystemExit("no valid duration values found")
 
 
 if __name__ == "__main__":
