@@ -1087,7 +1087,9 @@
             toggle.classList.toggle('unavailable', !available);
             toggle.title = available
                 ? 'Use the Responses API web_search tool for this request'
-                : 'Web search requires a GPT model with Responses API support';
+                : rawMode
+                    ? 'Web search is available in Chat mode only'
+                    : 'Web search requires a GPT model with Responses API support';
         }
 
         function onWebSearchChange() {
