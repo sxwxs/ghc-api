@@ -513,6 +513,34 @@
             background: #f0f0f0;
         }
 
+        .web-search-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.3rem 0.55rem;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            background: #fff;
+            color: #555;
+            font-size: 0.75rem;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .web-search-toggle input {
+            accent-color: #667eea;
+            cursor: pointer;
+        }
+
+        .web-search-toggle.unavailable {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .web-search-toggle.unavailable input {
+            cursor: not-allowed;
+        }
+
         .endpoint-select {
             display: none;
             padding: 0.35rem 0.5rem;
@@ -640,6 +668,10 @@
                     <button id="mode-chat" class="active" onclick="setRawMode(false)">Chat</button>
                     <button id="mode-raw" onclick="setRawMode(true)">Raw</button>
                 </div>
+                <label class="web-search-toggle" id="web-search-toggle" title="Available for GPT models using the Responses API">
+                    <input type="checkbox" id="web-search-enabled" onchange="onWebSearchChange()">
+                    Web search
+                </label>
             </div>
             <div class="messages-container" id="messages-container">
                 <div class="empty-state" id="empty-state">Select or create a chat session to begin</div>
@@ -656,6 +688,7 @@
     <script>
         const STORAGE_KEY = 'ghc_chat_sessions';
         const MODEL_KEY = 'ghc_chat_last_model';
+        const WEB_SEARCH_KEY = 'ghc_chat_web_search_enabled';
 
         let sessions = [];
         let activeSessionId = null;
@@ -711,6 +744,7 @@
             if (session && session.model) {
                 document.getElementById('model-select').value = session.model;
             }
+            updateWebSearchAvailability();
             renderSessionList();
             renderMessages();
             document.getElementById('chat-input').focus();
@@ -1004,6 +1038,7 @@
                 if (last && modelsData.some(m => m.id === last)) {
                     select.value = last;
                 }
+                updateWebSearchAvailability();
             } catch (err) {
                 select.innerHTML = '<option value="">Failed to load models</option>';
             }
@@ -1017,6 +1052,11 @@
                 session.model = model;
                 saveSessions();
             }
+            updateWebSearchAvailability();
+        }
+
+        function isGptModel(modelId) {
+            return /^gpt(?:-|$)/i.test(modelId || '');
         }
 
         function supportsResponses(modelId) {
@@ -1025,6 +1065,40 @@
             return endpoints.some(e =>
                 e === '/v1/responses' || e === '/responses' || e === 'responses'
             );
+        }
+
+        function shouldUseResponses(modelId) {
+            // GPT models prefer their native Responses API whenever model
+            // metadata advertises it. Responses-only non-GPT models continue
+            // to use the same endpoint as before.
+            return supportsResponses(modelId);
+        }
+
+        function canUseWebSearch(modelId) {
+            return !rawMode && isGptModel(modelId) && shouldUseResponses(modelId);
+        }
+
+        function updateWebSearchAvailability() {
+            const checkbox = document.getElementById('web-search-enabled');
+            const toggle = document.getElementById('web-search-toggle');
+            const model = document.getElementById('model-select').value;
+            const available = canUseWebSearch(model);
+            checkbox.disabled = !available;
+            toggle.classList.toggle('unavailable', !available);
+            toggle.title = available
+                ? 'Use the Responses API web_search tool for this request'
+                : rawMode
+                    ? 'Web search is available in Chat mode only'
+                    : 'Web search requires a GPT model with Responses API support';
+        }
+
+        function onWebSearchChange() {
+            const enabled = document.getElementById('web-search-enabled').checked;
+            localStorage.setItem(WEB_SEARCH_KEY, enabled ? 'true' : 'false');
+        }
+
+        function isWebSearchEnabled(modelId) {
+            return canUseWebSearch(modelId) && document.getElementById('web-search-enabled').checked;
         }
 
         // ---- Sending messages ----
@@ -1080,7 +1154,7 @@
 
             try {
                 let result;
-                if (supportsResponses(model)) {
+                if (shouldUseResponses(model)) {
                     result = await streamResponses(model, session.messages, assistantDiv, contentDiv);
                 } else {
                     result = await streamChatCompletions(model, session.messages, assistantDiv, contentDiv);
@@ -1138,6 +1212,14 @@
                 stream: true,
             };
 
+            // Make web search available to the model. Unlike the demo's
+            // forced tool choice, "auto" lets the backend decide whether the
+            // current request actually needs a search.
+            if (isWebSearchEnabled(model)) {
+                body.tools = [{ type: 'web_search' }];
+                body.tool_choice = 'auto';
+            }
+
             const res = await fetch('/v1/responses', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -1156,6 +1238,7 @@
             let thinkingEndTime = null;
             let isThinking = false;
             let thinkingEl = null;
+            let webSearchEl = null;
 
             const reader = res.body.getReader();
             const decoder = new TextDecoder();
@@ -1184,8 +1267,23 @@
                         const event = JSON.parse(data);
                         const eventType = event.type || lastEventType;
 
+                        // Show the native Responses web-search lifecycle while
+                        // the backend is searching.
+                        if (eventType === 'response.web_search_call.in_progress' ||
+                            eventType === 'response.web_search_call.searching') {
+                            if (!webSearchEl) {
+                                webSearchEl = document.createElement('div');
+                                webSearchEl.className = 'thinking-indicator';
+                                webSearchEl.innerHTML = '<div class="spinner"></div> Searching the web...';
+                                assistantDiv.insertBefore(webSearchEl, contentDiv);
+                            }
+                        } else if (eventType === 'response.web_search_call.completed') {
+                            if (webSearchEl) {
+                                webSearchEl.remove();
+                                webSearchEl = null;
+                            }
                         // Reasoning/thinking events
-                        if (eventType === 'response.reasoning_summary_text.delta' ||
+                        } else if (eventType === 'response.reasoning_summary_text.delta' ||
                             eventType === 'response.reasoning_summary_part.delta') {
                             if (!isThinking) {
                                 isThinking = true;
@@ -1259,7 +1357,9 @@
                 }
             }
 
-            // Replace thinking indicator with collapsible block
+            // Remove transient tool indicators and replace reasoning with a
+            // persistent collapsible block.
+            if (webSearchEl) webSearchEl.remove();
             if (thinkingEl) thinkingEl.remove();
             if (thinkingText) {
                 assistantDiv.insertBefore(buildThinkingBlock(thinkingText), contentDiv);
@@ -1387,6 +1487,7 @@
             chatBtn.classList.toggle('active', !enabled);
             rawBtn.classList.toggle('active', enabled);
             endpointSelect.classList.toggle('visible', enabled);
+            updateWebSearchAvailability();
 
             if (enabled) {
                 chatInput.classList.add('raw-mode');
@@ -1403,7 +1504,7 @@
             const sel = document.getElementById('endpoint-select').value;
             if (sel !== 'auto') return sel;
             const model = payload.model || document.getElementById('model-select').value;
-            if (model && supportsResponses(model)) return '/v1/responses';
+            if (model && shouldUseResponses(model)) return '/v1/responses';
             return '/v1/chat/completions';
         }
 
@@ -1602,6 +1703,10 @@
         // ---- Init ----
 
         loadSessions();
+        const savedWebSearchSetting = localStorage.getItem(WEB_SEARCH_KEY);
+        document.getElementById('web-search-enabled').checked =
+            savedWebSearchSetting === null || savedWebSearchSetting === 'true';
+        updateWebSearchAvailability();
         renderSessionList();
         renderMessages();
         loadModels();
