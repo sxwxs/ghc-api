@@ -63,12 +63,27 @@ class State:
         self.enable_web_search_proxy: bool = False
         self.web_search_proxy_endpoint: str = ""
 
-        # User authentication settings
-        # When True, /v1/chat/completions, /v1/messages, /v1/responses, /v1/models
-        # require an approved token from the user registry (users.json).
-        # When False (default), all requests are tagged with user_id="anonymous"
-        # and no auth check is performed.
+        # User authentication settings. enable_auth is the backward-compatible
+        # API-token gate for LLM endpoints. enable_email_auth separately opts
+        # dashboard/management routes into maglink session protection.
         self.enable_auth: bool = False
+        # Separate from legacy API-token auth. Only the nested auth.enabled
+        # configuration enables maglink sessions for dashboard/management.
+        self.enable_email_auth: bool = False
+        self.auth_hostname: str = ""
+        self.auth_secret_key: str = ""
+        self.auth_allow_public_registration: bool = False
+        self.auth_admin_emails: List[str] = []
+        self.auth_maildispatch_endpoint: str = ""
+        self.auth_maildispatch_api_key: str = ""
+        self.auth_maildispatch_sender_id: str = "system"
+        self.auth_maildispatch_timeout: int = 10
+        self.auth_store_path: str = ""
+        self.auth_code_ttl: int = 900
+        self.auth_rate_max: int = 5
+        self.auth_rate_window: int = 900
+        self.auth_confirm_max_attempts: int = 8
+        self.auth_trust_proxy_headers: bool = False
 
         # Session persistence settings
         self.session_flush_interval: int = 5  # seconds between buffered writes

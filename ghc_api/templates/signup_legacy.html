@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+  <title>Sign up — ghc-api</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #8b949e;
+      --accent: #2f81f7;
+      --accent-hover: #1f6feb;
+      --success: #238636;
+      --error: #f85149;
+      --code-bg: #0d1117;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 32px;
+      width: 100%;
+      max-width: 480px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 22px;
+      font-weight: 600;
+    }
+    p.lead {
+      margin: 0 0 24px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .hint {
+      color: var(--muted);
+      font-weight: 400;
+    }
+    input[type="text"] {
+      width: 100%;
+      padding: 8px 12px;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 14px;
+      font-family: inherit;
+      margin-bottom: 16px;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(47,129,247,0.2);
+    }
+    button {
+      width: 100%;
+      padding: 10px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    #result {
+      margin-top: 20px;
+      padding: 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.5;
+      display: none;
+    }
+    #result.success {
+      display: block;
+      background: rgba(35,134,54,0.15);
+      border: 1px solid var(--success);
+    }
+    #result.error {
+      display: block;
+      background: rgba(248,81,73,0.15);
+      border: 1px solid var(--error);
+    }
+    #result h3 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    #result .token-box {
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 10px;
+      margin-top: 8px;
+      font-family: "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      word-break: break-all;
+      user-select: all;
+    }
+    #result .copy-btn {
+      margin-top: 8px;
+      padding: 4px 10px;
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 12px;
+      width: auto;
+      font-weight: 400;
+    }
+    #result .copy-btn:hover { background: #3c424b; }
+    #result .note {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Request an API token</h1>
+    <p class="lead">Fill in your details to receive an API token for this ghc-api instance. The token will be inactive until an administrator approves it.</p>
+
+    <form id="signup-form">
+      <label for="user_id">User ID <span class="hint">(letters, digits, _ - . — max 64 chars)</span></label>
+      <input type="text" id="user_id" name="user_id" required autocomplete="off" placeholder="e.g. alice or bob-laptop">
+
+      <label for="display_name">Display name <span class="hint">(optional)</span></label>
+      <input type="text" id="display_name" name="display_name" autocomplete="off" placeholder="e.g. Alice">
+
+      <button type="submit" id="submit-btn">Register</button>
+    </form>
+
+    <div id="result"></div>
+  </div>
+
+  <script>
+    const form = document.getElementById('signup-form');
+    const result = document.getElementById('result');
+    const submitBtn = document.getElementById('submit-btn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Registering...';
+      result.className = '';
+      result.innerHTML = '';
+
+      const payload = {
+        user_id: document.getElementById('user_id').value.trim(),
+        display_name: document.getElementById('display_name').value.trim(),
+      };
+
+      try {
+        const res = await fetch('/signup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+
+        if (res.ok) {
+          result.className = 'success';
+          result.innerHTML = `
+            <h3>Registration successful</h3>
+            <div>Your API token (copy and keep it safe — it will not be shown again):</div>
+            <div class="token-box" id="token-box">${escapeHtml(data.token)}</div>
+            <button class="copy-btn" id="copy-btn" type="button">Copy token</button>
+            <div class="note">${escapeHtml(data.message || 'Wait for administrator approval before using the token.')}</div>
+          `;
+          document.getElementById('copy-btn').addEventListener('click', () => {
+            navigator.clipboard.writeText(data.token).then(() => {
+              document.getElementById('copy-btn').textContent = 'Copied!';
+            });
+          });
+          form.reset();
+        } else {
+          result.className = 'error';
+          result.innerHTML = `<h3>Registration failed</h3><div>${escapeHtml(data.message || data.error || 'Unknown error')}</div>`;
+        }
+      } catch (err) {
+        result.className = 'error';
+        result.innerHTML = `<h3>Network error</h3><div>${escapeHtml(err.message)}</div>`;
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Register';
+      }
+    });
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+    }
+  </script>
+</body>
+</html>
