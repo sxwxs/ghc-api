@@ -21,6 +21,10 @@ class State:
         self.copilot_token: Optional[str] = None
         self.models: Optional[Dict] = None
         self.account_type: str = "individual"
+        # Optional upstream URL overrides. Empty values preserve the normal
+        # GitHub/Copilot account-type routing; benchmarks use loopback URLs.
+        self.github_api_base_url: str = ""
+        self.copilot_api_base_url: str = ""
         self.token_expires_at: float = 0
         self.token_lock = threading.Lock()
         self.token_refresh_last_attempt_at: Optional[float] = None

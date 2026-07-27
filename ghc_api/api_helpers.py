@@ -18,10 +18,17 @@ _configured_chat_completions_support_by_models_id: Dict[int, set[str]] = {}
 
 
 def get_copilot_base_url() -> str:
-    """Get the Copilot API base URL based on account type"""
+    """Get the Copilot API base URL based on account type or override."""
+    if state.copilot_api_base_url:
+        return state.copilot_api_base_url.rstrip("/")
     if state.account_type == "individual":
         return "https://api.githubcopilot.com"
     return f"https://api.{state.account_type}.githubcopilot.com"
+
+
+def get_github_api_base_url() -> str:
+    """Get the GitHub API base URL, allowing an explicit local override."""
+    return (state.github_api_base_url or GITHUB_API_BASE_URL).rstrip("/")
 
 
 def get_github_headers() -> Dict[str, str]:
@@ -64,7 +71,7 @@ def refresh_copilot_token(force: bool = False) -> None:
             return
 
         state.token_refresh_last_attempt_at = time.time()
-        token_endpoint = f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token"
+        token_endpoint = f"{get_github_api_base_url()}/copilot_internal/v2/token"
         response = None
         print("Refreshing Copilot token...")
         try:

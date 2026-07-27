@@ -6,3 +6,10 @@ dist/
 .venv/
 workspace/
 build/
+
+# Local request dumps may contain private prompts and responses.
+/opus.jl
+/gpt.jl
+
+# Generated benchmark artifacts.
+/benchmarks/results/

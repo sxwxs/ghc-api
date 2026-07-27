@@ -89,8 +89,11 @@ def main():
         port = config.get('port', 8313)
         debug = config.get('debug', DEBUG)
 
-        # Set account type from config
+        # Set account type and optional upstream URL overrides. The overrides
+        # are useful for private gateways and fully offline E2E benchmarks.
         state.account_type = config.get('account_type', 'individual')
+        state.github_api_base_url = str(config.get('github_api_base_url', '') or '')
+        state.copilot_api_base_url = str(config.get('copilot_api_base_url', '') or '')
 
         # Set vscode version from config
         if 'vscode_version' in config:

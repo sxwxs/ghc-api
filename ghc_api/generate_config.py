@@ -32,6 +32,11 @@ debug: false
 #                   Uses: https://api.enterprise.githubcopilot.com
 account_type: individual
 
+# Optional upstream URL overrides. Leave empty for the normal GitHub services.
+# Local E2E benchmarks use loopback endpoints so no request reaches GitHub.
+github_api_base_url: ""
+copilot_api_base_url: ""
+
 # VSCode Version (only used to build request headers)
 vscode_version: "{vscode_version}"
 # GitHub API version to use (only used to build request headers)
