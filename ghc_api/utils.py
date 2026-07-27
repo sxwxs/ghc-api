@@ -3,7 +3,7 @@ import json
 import os
 import platform
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 from .config import model_mappings
@@ -45,6 +45,39 @@ def log_error_request(endpoint: str, request_body: dict, response_body: str, sta
 
     with open(log_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(log_entry) + "\n")
+
+
+def log_upstream_error(
+    operation: str,
+    endpoint: str,
+    status_code: Optional[int] = None,
+    response_body: str = "",
+    error: str = "",
+    max_response_chars: int = 65536,
+) -> bool:
+    """Append a structured upstream failure to error.log without logging auth headers."""
+    original_body = response_body or ""
+    logged_body = original_body[:max_response_chars]
+    entry = {
+        "timestamp": int(time.time()),
+        "event_type": "upstream_error",
+        "operation": operation,
+        "endpoint": endpoint,
+        "status_code": status_code,
+        "error": error,
+        "response": logged_body,
+        "response_length": len(original_body),
+        "response_truncated": len(logged_body) < len(original_body),
+    }
+    try:
+        log_dir = get_config_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        with open(os.path.join(log_dir, "error.log"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+        return True
+    except Exception as exc:
+        print(f"Failed to write upstream error log: {exc}")
+        return False
 
 
 def get_config_dir():

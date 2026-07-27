@@ -17,11 +17,16 @@ class State:
     """Global application state"""
     def __init__(self):
         self.github_token: str = GITHUB_TOKEN
+        self.github_token_source: str = "environment" if GITHUB_TOKEN else "unconfigured"
         self.copilot_token: Optional[str] = None
         self.models: Optional[Dict] = None
         self.account_type: str = "individual"
         self.token_expires_at: float = 0
         self.token_lock = threading.Lock()
+        self.token_refresh_last_attempt_at: Optional[float] = None
+        self.token_refresh_last_success_at: Optional[float] = None
+        self.token_refresh_last_succeeded: Optional[bool] = None
+        self.token_refresh_last_error: Optional[str] = None
 
         # Configurable version settings (can be overridden by config file)
         self.vscode_version: str = DEFAULT_VSCODE_VERSION

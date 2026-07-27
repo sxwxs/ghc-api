@@ -114,6 +114,39 @@
             background: #3f4857;
         }
 
+        .btn.danger {
+            background: #c62828;
+        }
+
+        .btn.danger:hover {
+            background: #a91f1f;
+        }
+
+        .token-status-table td:first-child {
+            width: 260px;
+            color: #555;
+            font-weight: 600;
+            background: #fafafa;
+        }
+
+        .token-status-table td:last-child {
+            word-break: break-word;
+        }
+
+        .status-value-success {
+            color: #2e7d32;
+            font-weight: 700;
+        }
+
+        .status-value-error {
+            color: #c62828;
+            font-weight: 700;
+        }
+
+        .status-value-muted {
+            color: #777;
+        }
+
         .status-line {
             min-height: 1.2rem;
             font-size: 0.875rem;
@@ -246,43 +279,6 @@
     </nav>
 
     <div class="container">
-        <div class="page-intro">
-            This page provides a full-size view of code agent config sync status, token usage, and config hash overview.
-        </div>
-
-        <div class="section">
-            <h2>Actions</h2>
-            <div class="manager-actions">
-                <button class="btn" type="button" onclick="installCodeAgents()">Install/Update Tools</button>
-                <button class="btn" type="button" onclick="syncConfigToOneDrive()">Sync Local to OneDrive</button>
-                <button class="btn" type="button" onclick="syncConfigFromOneDrive()">Sync OneDrive to Local</button>
-                <button class="btn secondary" type="button" onclick="refreshAll()">Refresh All</button>
-            </div>
-            <div class="status-line" id="status-line"></div>
-        </div>
-
-        <div class="section">
-            <h2>Sync Status</h2>
-            <div class="status-block" id="config-manager-details">Loading...</div>
-        </div>
-
-        <div class="section">
-            <h2>Software Versions</h2>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Software</th>
-                            <th>Status</th>
-                            <th>Version</th>
-                            <th>Command</th>
-                        </tr>
-                    </thead>
-                    <tbody id="software-versions-body"></tbody>
-                </table>
-            </div>
-        </div>
-
         <div class="section">
             <h2>Token Usage Overview</h2>
             <div class="token-controls">
@@ -291,7 +287,7 @@
                     <option value="all">All</option>
                     <option value="hour">Last 1h</option>
                     <option value="day">Last 24h</option>
-                    <option value="week">Last 7d</option>
+                    <option value="week" selected>Last 7d</option>
                     <option value="month">Last 30d</option>
                 </select>
                 <label for="token-usage-user" style="margin-left:1rem;">User</label>
@@ -347,19 +343,40 @@
         </div>
 
         <div class="section">
-            <h2>Config Hash Overview</h2>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Machine</th>
-                            <th>Hash</th>
-                            <th>Created At</th>
-                            <th>Path</th>
-                        </tr>
-                    </thead>
-                    <tbody id="config-hash-body"></tbody>
+            <h2>Code Agent Configuration and Tools</h2>
+            <p style="margin-bottom:0.75rem; color:#555;">
+                Monitor GitHub/Copilot authentication, token usage, and registered users here.
+                Actions, Sync Status, Software Versions, and Config Hash Overview are available on a separate page.
+            </p>
+            <a class="btn" style="display:inline-block; text-decoration:none;" href="/code-agent-manager/config">Open Configuration and Tools</a>
+        </div>
+
+        <div class="section">
+            <h2>GitHub / Copilot Token Status</h2>
+            <div class="manager-actions">
+                <button class="btn danger" type="button" onclick="startGithubDeviceLogin()">Sign in again with GitHub Device Code</button>
+                <button class="btn secondary" type="button" onclick="refreshTokenStatus()">Refresh Status</button>
+            </div>
+            <div class="status-line" id="status-line"></div>
+            <div class="table-wrap" style="max-height:none;">
+                <table class="token-status-table">
+                    <tbody>
+                        <tr><td>GitHub token configured</td><td id="github-token-configured">Loading...</td></tr>
+                        <tr><td>GitHub token source</td><td id="github-token-source">-</td></tr>
+                        <tr><td>Local token file exists</td><td id="local-token-file-exists">-</td></tr>
+                        <tr><td>Copilot token configured</td><td id="copilot-token-configured">-</td></tr>
+                        <tr><td>Copilot token expires</td><td id="copilot-token-expires">-</td></tr>
+                        <tr><td>Last refresh attempt</td><td id="last-refresh-attempt">-</td></tr>
+                        <tr><td>Last refresh result</td><td id="last-refresh-result">-</td></tr>
+                        <tr><td>Last successful refresh</td><td id="last-refresh-success">-</td></tr>
+                        <tr><td>Last refresh error</td><td id="last-refresh-error">-</td></tr>
+                    </tbody>
                 </table>
+            </div>
+            <div id="device-login-panel" style="display:none; margin-top:0.8rem; padding:1rem; border:1px solid #c5cae9; border-radius:8px; background:#f5f7ff;">
+                <div>Open <a id="device-verification-link" href="#" target="_blank" rel="noopener noreferrer"></a> and enter:</div>
+                <div id="device-user-code" style="font:700 1.8rem ui-monospace,monospace; letter-spacing:0.14em; margin:0.45rem 0;"></div>
+                <div id="device-login-message" style="font-size:0.875rem;"></div>
             </div>
         </div>
     </div>
@@ -367,7 +384,6 @@
     <script>
         let tokenUsageOverviewData = { machines: [], rows: [] };
         let tokenUsageSelectedMachines = new Set();
-        let configHashOverviewData = { shared_hash: null, machines: [] };
 
         function formatNumber(value) {
             return (value || 0).toLocaleString();
@@ -377,83 +393,6 @@
             const statusLine = document.getElementById("status-line");
             statusLine.className = "status-line" + (className ? " " + className : "");
             statusLine.textContent = message;
-        }
-
-        async function fetchConfigManagerStatus() {
-            const response = await fetch("/api/config-manager/status");
-            if (!response.ok) {
-                throw new Error("HTTP " + response.status);
-            }
-            return response.json();
-        }
-
-        function renderConfigManagerStatus(status, extraMessage = "") {
-            const details = document.getElementById("config-manager-details");
-            const lines = [];
-            const onedriveLabel = status.onedrive_access_disabled ? "DISABLED BY CONFIG" : (status.onedrive_path || "NOT FOUND");
-            lines.push("OneDrive: " + onedriveLabel);
-            lines.push("Sync Root: " + (status.sync_root || "N/A"));
-            lines.push("Agent Root: " + (status.agent_root || "N/A"));
-            lines.push("Has Sync Files: " + status.has_sync_files);
-            lines.push("Has Differences: " + status.has_differences);
-            if (status.hash_paths) {
-                lines.push("Hash(sync): " + (status.hash_paths.config_sync_hash || "N/A"));
-                lines.push("Hash(agent): " + (status.hash_paths.agent_hash || "N/A"));
-            }
-            if (status.hash_refreshed && status.hash_refreshed.length > 0) {
-                lines.push("Hash refreshed: " + status.hash_refreshed.join(", "));
-            }
-            if (status.hash_errors && status.hash_errors.length > 0) {
-                lines.push("Hash errors: " + status.hash_errors.join(" | "));
-            }
-            lines.push("");
-            for (const [name, file] of Object.entries(status.files || {})) {
-                lines.push("[" + name + "]");
-                lines.push("  local: " + file.local_path + " (" + (file.local_exists ? "exists" : "missing") + ")");
-                lines.push("  sync:  " + (file.sync_path || "N/A") + " (" + (file.sync_exists ? "exists" : "missing") + ")");
-                lines.push("  different: " + file.different);
-                lines.push("");
-            }
-            details.textContent = lines.join("\n").trim();
-            if (extraMessage) {
-                setStatus(extraMessage, "success");
-            }
-        }
-
-        async function refreshConfigManagerStatus(extraMessage = "") {
-            try {
-                const status = await fetchConfigManagerStatus();
-                renderConfigManagerStatus(status, extraMessage);
-            } catch (error) {
-                setStatus("Failed to load config status: " + (error.message || error), "error");
-            }
-        }
-
-        async function runConfigManagerAction(apiPath, successMessage) {
-            setStatus("Running...");
-            try {
-                const response = await fetch(apiPath, { method: "POST" });
-                const result = await response.json();
-                if (!response.ok || !result.ok) {
-                    throw new Error(result.error || ("Request failed (" + response.status + ")"));
-                }
-                await refreshConfigManagerStatus(successMessage);
-                await refreshConfigHashOverview();
-            } catch (error) {
-                setStatus(error.message || String(error), "error");
-            }
-        }
-
-        async function installCodeAgents() {
-            await runConfigManagerAction("/api/config-manager/install-tools", "Tools install finished.");
-        }
-
-        async function syncConfigToOneDrive() {
-            await runConfigManagerAction("/api/config-manager/sync-to-onedrive", "Config synced to OneDrive.");
-        }
-
-        async function syncConfigFromOneDrive() {
-            await runConfigManagerAction("/api/config-manager/sync-from-onedrive", "Config copied to local machine.");
         }
 
         async function fetchTokenUsageOverview(rangeKey) {
@@ -483,48 +422,6 @@
                 }
             }
             return data;
-        }
-
-        async function fetchSoftwareVersions() {
-            const response = await fetch("/api/config-manager/software-versions");
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || ("Failed to load software versions (" + response.status + ")"));
-            }
-            return data;
-        }
-
-        function renderSoftwareVersionsTable(data) {
-            const tbody = document.getElementById("software-versions-body");
-            tbody.innerHTML = "";
-
-            for (const tool of (data.tools || [])) {
-                const tr = document.createElement("tr");
-                const statusClass = tool.installed ? "software-installed" : "software-missing";
-                const statusText = tool.installed ? "Installed" : "Not installed";
-                tr.innerHTML = `
-                    <td>${tool.name || "-"}</td>
-                    <td class="${statusClass}">${statusText}</td>
-                    <td>${tool.version || "-"}</td>
-                    <td>${tool.command || "-"}</td>
-                `;
-                tbody.appendChild(tr);
-            }
-
-            if ((data.tools || []).length === 0) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"4\">No software data available.</td>";
-                tbody.appendChild(tr);
-            }
-        }
-
-        async function refreshSoftwareVersions() {
-            try {
-                const data = await fetchSoftwareVersions();
-                renderSoftwareVersionsTable(data);
-            } catch (error) {
-                setStatus("Failed to load software versions: " + (error.message || error), "error");
-            }
         }
 
         function renderMachineFilters(machines, resetSelection = false) {
@@ -808,70 +705,132 @@
             await refreshTokenUsageOverview(true);
         }
 
-        async function fetchConfigHashOverview() {
-            const response = await fetch("/api/config-manager/config-hashes");
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || ("Failed to load config hash overview (" + response.status + ")"));
-            }
-            return data;
+        function formatTimestamp(value) {
+            return value ? new Date(value * 1000).toLocaleString() : "Never";
         }
 
-        function renderConfigHashOverviewTable() {
-            const tbody = document.getElementById("config-hash-body");
-            tbody.innerHTML = "";
+        function setTokenStatusValue(id, value, className = "") {
+            const element = document.getElementById(id);
+            element.textContent = value;
+            element.className = className;
+        }
 
-            const shared = configHashOverviewData.shared_hash || {};
-            const sharedLabel = configHashOverviewData.onedrive_access_disabled
-                ? "OneDrive Shared (disabled by config)"
-                : "OneDrive Shared (configSync)";
-            const sharedRow = document.createElement("tr");
-            sharedRow.className = "shared-row";
-            sharedRow.innerHTML = `
-                <td>${sharedLabel}</td>
-                <td>${shared.hash || "-"}</td>
-                <td>${shared.created_at ? new Date(shared.created_at).toLocaleString() : "-"}</td>
-                <td>${shared.path || "-"}</td>
-            `;
-            tbody.appendChild(sharedRow);
+        function booleanStatus(value) {
+            return {
+                text: value ? "Yes" : "No",
+                className: value ? "status-value-success" : "status-value-error"
+            };
+        }
 
-            for (const machineRow of (configHashOverviewData.machines || [])) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = `
-                    <td>${machineRow.machine || "-"}</td>
-                    <td>${machineRow.hash || "-"}</td>
-                    <td>${machineRow.created_at ? new Date(machineRow.created_at).toLocaleString() : "-"}</td>
-                    <td>${machineRow.path || "-"}</td>
-                `;
-                tbody.appendChild(tr);
-            }
+        let deviceFlowPollTimer = null;
 
-            if ((configHashOverviewData.machines || []).length === 0) {
-                const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"4\">" + (
-                    configHashOverviewData.onedrive_access_disabled
-                        ? "OneDrive access is disabled by config."
-                        : "No machine hash files found."
-                ) + "</td>";
-                tbody.appendChild(tr);
+        function updateDeviceFlowPolling(flow) {
+            const shouldPoll = flow && ["starting", "pending", "completing"].includes(flow.status);
+            if (shouldPoll && deviceFlowPollTimer === null) {
+                deviceFlowPollTimer = setInterval(refreshTokenStatus, 3000);
+            } else if (!shouldPoll && deviceFlowPollTimer !== null) {
+                clearInterval(deviceFlowPollTimer);
+                deviceFlowPollTimer = null;
             }
         }
 
-        async function refreshConfigHashOverview() {
+        function renderTokenStatus(data) {
+            const githubConfigured = booleanStatus(data.github_token_configured);
+            const localFileExists = booleanStatus(data.local_token_file_exists);
+            const copilotConfigured = booleanStatus(data.copilot_token_configured);
+            const refreshResult = data.last_refresh_succeeded === null
+                ? { text: "Not attempted", className: "status-value-muted" }
+                : (data.last_refresh_succeeded
+                    ? { text: "SUCCESS", className: "status-value-success" }
+                    : { text: "FAILED", className: "status-value-error" });
+
+            setTokenStatusValue("github-token-configured", githubConfigured.text, githubConfigured.className);
+            setTokenStatusValue("github-token-source", data.github_token_source || "unknown");
+            setTokenStatusValue("local-token-file-exists", localFileExists.text, localFileExists.className);
+            setTokenStatusValue("copilot-token-configured", copilotConfigured.text, copilotConfigured.className);
+            setTokenStatusValue("copilot-token-expires", formatTimestamp(data.copilot_token_expires_at));
+            setTokenStatusValue("last-refresh-attempt", formatTimestamp(data.last_refresh_attempt_at));
+            setTokenStatusValue("last-refresh-result", refreshResult.text, refreshResult.className);
+            setTokenStatusValue("last-refresh-success", formatTimestamp(data.last_refresh_success_at));
+            setTokenStatusValue(
+                "last-refresh-error",
+                data.last_refresh_error || "-",
+                data.last_refresh_error ? "status-value-error" : "status-value-muted"
+            );
+            renderDeviceFlow(data.device_flow || { status: "idle" });
+        }
+
+        function safeGithubVerificationUrl(value) {
             try {
-                configHashOverviewData = await fetchConfigHashOverview();
-                renderConfigHashOverviewTable();
+                const url = new URL(value);
+                return url.protocol === "https:" && url.hostname === "github.com"
+                    ? url.href
+                    : "";
+            } catch (_error) {
+                return "";
+            }
+        }
+
+        function renderDeviceFlow(flow) {
+            updateDeviceFlowPolling(flow);
+            const panel = document.getElementById("device-login-panel");
+            const message = document.getElementById("device-login-message");
+            if (!flow || flow.status === "idle") {
+                panel.style.display = "none";
+                return;
+            }
+            panel.style.display = "block";
+            const link = document.getElementById("device-verification-link");
+            const verificationUrl = safeGithubVerificationUrl(flow.verification_uri);
+            link.href = verificationUrl || "#";
+            link.textContent = verificationUrl;
+            link.style.display = verificationUrl ? "" : "none";
+            document.getElementById("device-user-code").textContent = flow.user_code || "";
+            if (flow.status === "starting") {
+                message.textContent = "Requesting a device code from GitHub...";
+            } else if (flow.status === "pending") {
+                message.textContent = "Waiting for authorization. This page will update automatically.";
+            } else if (flow.status === "completing") {
+                message.textContent = "Authorization completed. Refreshing Copilot credentials...";
+            } else if (flow.status === "success") {
+                message.textContent = flow.message || "GitHub login completed.";
+            } else {
+                message.textContent = flow.error || "GitHub login failed.";
+            }
+        }
+
+        async function refreshTokenStatus() {
+            try {
+                const response = await fetch("/api/config-manager/token-status");
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Failed to load token status");
+                renderTokenStatus(data);
             } catch (error) {
-                setStatus("Failed to load config hash overview: " + (error.message || error), "error");
+                setStatus(error.message || String(error), "error");
+            }
+        }
+
+        async function startGithubDeviceLogin() {
+            setStatus("Starting GitHub Device Flow...");
+            try {
+                const response = await fetch("/api/config-manager/github-device-login", { method: "POST" });
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.error || "Failed to start GitHub Device Flow");
+                renderDeviceFlow(data);
+                const statusMessage = data.status === "starting"
+                    ? "GitHub Device Flow is starting..."
+                    : (data.status === "completing"
+                        ? "GitHub authorization is being finalized..."
+                        : "Device code created. Complete authorization in GitHub.");
+                setStatus(statusMessage, "success");
+            } catch (error) {
+                setStatus(error.message || String(error), "error");
             }
         }
 
         async function refreshAll() {
-            setStatus("");
-            await refreshConfigManagerStatus();
-            await refreshSoftwareVersions();
+            await refreshTokenStatus();
             await refreshTokenUsageOverview(false);
-            await refreshConfigHashOverview();
             await loadUsersAdmin();
         }
 

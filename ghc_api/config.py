@@ -23,18 +23,29 @@ DEFAULT_VSCODE_VERSION = "1.93.0"
 # Default model mappings (will be replaced if config file includes model_mappings)
 DEFAULT_MODEL_MAPPINGS = {
     "exact": {
-        # Add exact model name mappings here
-        'opus': 'claude-opus-4.5',
-        'sonnet': 'claude-sonnet-4.5',
-        'haiku': 'claude-haiku-4.5'
+        "opus": "claude-opus-4.8",
+        "sonnet": "claude-sonnet-5",
+        "haiku": "claude-haiku-4.5",
+        "claude-opus-4-8": "claude-opus-4.8",
+        "claude-opus-4-7": "claude-opus-4.7",
+        "claude-opus-4-6": "claude-opus-4.6",
+        "claude-opus-4-5": "claude-opus-4.5",
+        "claude-haiku-4-5": "claude-haiku-4.5",
     },
     "prefix": {
-        # Prefix-based mappings: if model name starts with the key, replace with value
         "claude-sonnet-4-": "claude-sonnet-4",
-        "claude-opus-4-": "claude-opus-4",
-        "claude-opus-4.5-": "claude-opus-4.5",
+        "claude-sonnet-5-": "claude-sonnet-5",
         "claude-haiku-4.5-": "claude-haiku-4.5",
-    }
+        "claude-opus-4.5-": "claude-opus-4.5",
+        "claude-haiku-4-5-": "claude-haiku-4.5",
+        "claude-opus-4-5-": "claude-opus-4.5",
+        "claude-opus-4-6-": "claude-opus-4.6",
+        "claude-opus-4.6-": "claude-opus-4.6",
+        "claude-opus-4-7-": "claude-opus-4.7",
+        "claude-opus-4.7-": "claude-opus-4.7",
+        "claude-opus-4-8-": "claude-opus-4.8",
+        "claude-opus-4.8-": "claude-opus-4.8",
+    },
 }
 
 # Models that should be advertised as supporting the OpenAI-compatible

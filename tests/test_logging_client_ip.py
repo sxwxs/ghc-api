@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from typing import Optional, get_type_hints
 from unittest import mock
 
 from ghc_api import utils
@@ -36,6 +37,10 @@ class GetClientIpTests(unittest.TestCase):
 
 
 class LogErrorRequestTests(unittest.TestCase):
+    def test_upstream_status_code_type_allows_none(self):
+        hints = get_type_hints(utils.log_upstream_error)
+        self.assertEqual(hints["status_code"], Optional[int])
+
     def test_error_log_has_unix_timestamp_and_client_ip(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(utils, "get_config_dir", return_value=tmp):
@@ -55,6 +60,30 @@ class LogErrorRequestTests(unittest.TestCase):
         self.assertEqual(entry["client_ip"], "203.0.113.5")
         self.assertEqual(entry["endpoint"], "/v1/messages")
         self.assertEqual(entry["status_code"], 500)
+
+    def test_upstream_error_log_keeps_response_content_with_a_size_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(utils, "get_config_dir", return_value=tmp):
+                written = utils.log_upstream_error(
+                    operation="copilot_token_refresh",
+                    endpoint="https://api.github.com/copilot_internal/v2/token",
+                    status_code=502,
+                    response_body="unicorn-response-body",
+                    error="HTTP 502",
+                    max_response_chars=8,
+                )
+
+            with open(os.path.join(tmp, "error.log"), encoding="utf-8") as f:
+                entry = json.loads(f.readline())
+
+        self.assertTrue(written)
+        self.assertEqual(entry["event_type"], "upstream_error")
+        self.assertEqual(entry["operation"], "copilot_token_refresh")
+        self.assertEqual(entry["status_code"], 502)
+        self.assertEqual(entry["response"], "unicorn-")
+        self.assertEqual(entry["response_length"], len("unicorn-response-body"))
+        self.assertTrue(entry["response_truncated"])
+        self.assertNotIn("headers", entry)
 
 
 class CacheClientIpTests(unittest.TestCase):

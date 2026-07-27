@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <title>Copilot API Proxy - Code Agent Config & Tools</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f5f5f5; color:#333; line-height:1.6; }
+        .navbar { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; padding:1rem 2rem; display:flex; justify-content:space-between; align-items:center; }
+        .navbar h1 { font-size:1.25rem; }
+        .navbar-actions { display:flex; gap:.75rem; flex-wrap:wrap; }
+        .navbar-actions a { color:#fff; text-decoration:none; padding:.45rem .8rem; border-radius:6px; background:rgba(255,255,255,.2); font-size:.875rem; }
+        .container { max-width:1400px; margin:0 auto; padding:1.5rem; }
+        .page-intro { margin-bottom:1rem; padding:.875rem 1rem; border-radius:8px; background:#fff8e1; border:1px solid #ffe082; color:#6d4c41; font-size:.9rem; }
+        .section { background:#fff; border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:1rem; }
+        .section h2 { font-size:1.1rem; margin-bottom:.8rem; border-bottom:2px solid #667eea; padding-bottom:.5rem; }
+        .manager-actions { display:flex; gap:.5rem; flex-wrap:wrap; margin-bottom:.75rem; }
+        .btn { border:0; border-radius:6px; padding:.45rem .8rem; font-size:.875rem; cursor:pointer; color:#fff; background:#667eea; }
+        .btn.secondary { background:#4a5568; }
+        .status-line { min-height:1.2rem; font-size:.875rem; }
+        .status-line.success { color:#2e7d32; } .status-line.error { color:#c62828; }
+        .status-block { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.8125rem; line-height:1.45; white-space:pre-wrap; word-break:break-word; background:#1e1e1e; color:#d4d4d4; border-radius:8px; padding:.85rem; min-height:170px; }
+        .table-wrap { max-height:420px; overflow:auto; border:1px solid #ececec; border-radius:8px; }
+        table { width:100%; border-collapse:collapse; } th,td { padding:.6rem .75rem; border-bottom:1px solid #efefef; text-align:left; font-size:.85rem; }
+        th { background:#f8f9fa; color:#555; position:sticky; top:0; } .shared-row { background:#f4f7ff; font-weight:600; }
+        .software-installed { color:#2e7d32; font-weight:600; } .software-missing { color:#c62828; font-weight:600; }
+        @media(max-width:768px){.navbar{padding:.9rem 1rem;flex-direction:column;align-items:flex-start;gap:.6rem}.container{padding:1rem}}
+    </style>
+</head>
+<body>
+<nav class="navbar">
+    <h1>Code Agent Config & Tools</h1>
+    <div class="navbar-actions">
+        <a href="/code-agent-manager">Code Agent Manager</a><a href="/">Dashboard</a><a href="/agent">Code Agent</a><a href="/request-stats">Request Stats</a>
+    </div>
+</nav>
+<div class="container">
+    <div class="page-intro">Tool installation, config synchronization, software versions, and config hashes are maintained on this separate page.</div>
+    <div class="section">
+        <h2>Actions</h2>
+        <div class="manager-actions">
+            <button class="btn" onclick="runAction('/api/config-manager/install-tools','Tools install finished.')">Install/Update Tools</button>
+            <button class="btn" onclick="runAction('/api/config-manager/sync-to-onedrive','Config synced to OneDrive.')">Sync Local to OneDrive</button>
+            <button class="btn" onclick="runAction('/api/config-manager/sync-from-onedrive','Config copied to local machine.')">Sync OneDrive to Local</button>
+            <button class="btn secondary" onclick="refreshAll()">Refresh All</button>
+        </div>
+        <div class="status-line" id="status-line"></div>
+    </div>
+    <div class="section"><h2>Sync Status</h2><div class="status-block" id="sync-status">Loading...</div></div>
+    <div class="section">
+        <h2>Software Versions</h2>
+        <div class="table-wrap"><table><thead><tr><th>Software</th><th>Status</th><th>Version</th><th>Command</th></tr></thead><tbody id="software-body"></tbody></table></div>
+    </div>
+    <div class="section">
+        <h2>Config Hash Overview</h2>
+        <div class="table-wrap"><table><thead><tr><th>Machine</th><th>Hash</th><th>Created At</th><th>Path</th></tr></thead><tbody id="hash-body"></tbody></table></div>
+    </div>
+</div>
+<script>
+const statusLine=document.getElementById('status-line');
+function setStatus(message,kind=''){statusLine.className='status-line'+(kind?' '+kind:'');statusLine.textContent=message;}
+function escapeHtml(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function jsonFetch(url,options){const response=await fetch(url,options);const data=await response.json();if(!response.ok||data.ok===false)throw new Error(data.error||`Request failed (${response.status})`);return data;}
+async function refreshSync(){
+    const s=await jsonFetch('/api/config-manager/status');
+    const lines=[
+        'OneDrive: '+(s.onedrive_access_disabled?'DISABLED BY CONFIG':(s.onedrive_path||'NOT FOUND')),
+        'Sync Root: '+(s.sync_root||'N/A'),'Agent Root: '+(s.agent_root||'N/A'),
+        'Has Sync Files: '+s.has_sync_files,'Has Differences: '+s.has_differences
+    ];
+    if(s.hash_paths){lines.push('Hash(sync): '+(s.hash_paths.config_sync_hash||'N/A'),'Hash(agent): '+(s.hash_paths.agent_hash||'N/A'));}
+    if(s.hash_refreshed?.length)lines.push('Hash refreshed: '+s.hash_refreshed.join(', '));
+    if(s.hash_errors?.length)lines.push('Hash errors: '+s.hash_errors.join(' | '));
+    for(const [name,file] of Object.entries(s.files||{})){lines.push('',`[${name}]`,`  local: ${file.local_path} (${file.local_exists?'exists':'missing'})`,`  sync:  ${file.sync_path||'N/A'} (${file.sync_exists?'exists':'missing'})`,`  different: ${file.different}`);}
+    document.getElementById('sync-status').textContent=lines.join('\n').trim();
+}
+async function refreshSoftware(){
+    const data=await jsonFetch('/api/config-manager/software-versions');const body=document.getElementById('software-body');body.innerHTML='';
+    for(const tool of data.tools||[]){const row=document.createElement('tr');row.innerHTML=`<td>${escapeHtml(tool.name||'-')}</td><td class="${tool.installed?'software-installed':'software-missing'}">${tool.installed?'Installed':'Not installed'}</td><td>${escapeHtml(tool.version||'-')}</td><td>${escapeHtml(tool.command||'-')}</td>`;body.appendChild(row);}
+    if(!(data.tools||[]).length)body.innerHTML='<tr><td colspan="4">No software data available.</td></tr>';
+}
+async function refreshHashes(){
+    const data=await jsonFetch('/api/config-manager/config-hashes');const body=document.getElementById('hash-body');body.innerHTML='';const shared=data.shared_hash||{};
+    const sharedRow=document.createElement('tr');sharedRow.className='shared-row';sharedRow.innerHTML=`<td>${data.onedrive_access_disabled?'OneDrive Shared (disabled by config)':'OneDrive Shared (configSync)'}</td><td>${escapeHtml(shared.hash||'-')}</td><td>${shared.created_at?new Date(shared.created_at).toLocaleString():'-'}</td><td>${escapeHtml(shared.path||'-')}</td>`;body.appendChild(sharedRow);
+    for(const item of data.machines||[]){const row=document.createElement('tr');row.innerHTML=`<td>${escapeHtml(item.machine||'-')}</td><td>${escapeHtml(item.hash||'-')}</td><td>${item.created_at?new Date(item.created_at).toLocaleString():'-'}</td><td>${escapeHtml(item.path||'-')}</td>`;body.appendChild(row);}
+    if(!(data.machines||[]).length){const row=document.createElement('tr');row.innerHTML=`<td colspan="4">${data.onedrive_access_disabled?'OneDrive access is disabled by config.':'No machine hash files found.'}</td>`;body.appendChild(row);}
+}
+async function refreshAll(){setStatus('');try{await Promise.all([refreshSync(),refreshSoftware(),refreshHashes()]);}catch(error){setStatus(error.message||String(error),'error');}}
+async function runAction(path,message){setStatus('Running...');try{await jsonFetch(path,{method:'POST'});await refreshAll();setStatus(message,'success');}catch(error){setStatus(error.message||String(error),'error');}}
+refreshAll();setInterval(refreshAll,30000);
+</script>
+</body>
+</html>
