@@ -3,7 +3,7 @@ import json
 import os
 import platform
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 from .config import model_mappings
@@ -324,7 +324,56 @@ def is_encrypted_content_parse_error(status_code: int, response_text: str) -> bo
     if status_code != 400:
         return False
 
-    prefix = '{"error":{"message":"The encrypted content '
-    suffix = ' could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_request_body"}}'
-    stripped = response_text.strip()
-    return stripped.startswith(prefix) and stripped.endswith(suffix)
+    try:
+        error = json.loads(response_text).get("error", {})
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return False
+
+    if not isinstance(error, dict) or error.get("code") != "invalid_request_body":
+        return False
+
+    message = error.get("message", "")
+    if not isinstance(message, str):
+        return False
+
+    normalized = message.lower()
+    return (
+        (
+            normalized.startswith("the encrypted content ")
+            and normalized.endswith(
+                " could not be verified. reason: encrypted content could not be decrypted or parsed."
+            )
+        )
+        or normalized == "encrypted function output content could not be decrypted or decoded."
+    )
+
+
+def remove_encrypted_content_items(request_input: Any) -> Tuple[Any, int]:
+    """Remove top-level Responses input items containing encrypted content.
+
+    Encrypted data normally appears directly on a reasoning item, but function
+    outputs can wrap it in nested content blocks. The upstream rejects the
+    entire request when any such value cannot be decoded, so the retry must
+    remove the containing input item regardless of nesting depth.
+    """
+    if not isinstance(request_input, list):
+        return request_input, 0
+
+    def contains_encrypted_content(value: Any) -> bool:
+        if isinstance(value, dict):
+            return "encrypted_content" in value or any(
+                contains_encrypted_content(child) for child in value.values()
+            )
+        if isinstance(value, list):
+            return any(contains_encrypted_content(child) for child in value)
+        return False
+
+    cleaned_input = []
+    removed_count = 0
+    for item in request_input:
+        if contains_encrypted_content(item):
+            removed_count += 1
+        else:
+            cleaned_input.append(item)
+
+    return cleaned_input, removed_count
