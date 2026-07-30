@@ -6,7 +6,10 @@ from ghc_api.config_sync import (
     ConfigEntry,
     _files_different,
     _hash_bytes_for_entry,
+    _ghc_secret_values,
     _prioritize_windows_user_homes,
+    _redact_ghc_secrets,
+    _rewrite_ghc_secrets,
     _restore_codex_config_preserving_projects,
     _split_codex_config_sections,
     _windows_path_to_wsl_path,
@@ -100,6 +103,43 @@ class ConfigSyncCodexTests(unittest.TestCase):
             with mock.patch.object(Path, "write_bytes", autospec=True) as write_mock:
                 _restore_codex_config_preserving_projects(source, target)
                 write_mock.assert_called_once_with(target, expected)
+
+    def test_ghc_auth_secrets_are_redacted_for_sync_and_hashing(self) -> None:
+        entry = ConfigEntry("ghc-api", Path("unused"), "ghc_api_config.yaml")
+        raw = (
+            b"address: localhost\n"
+            b"auth:\n"
+            b"  enabled: true\n"
+            b"  secret_key: \"session-secret\"\n"
+            b"  maildispatch:\n"
+            b"    endpoint: \"https://mail.test/api/v1/messages\"\n"
+            b"    api_key: \"md_live_secret\"\n"
+        )
+        redacted = _redact_ghc_secrets(raw)
+        self.assertNotIn(b"session-secret", redacted)
+        self.assertNotIn(b"md_live_secret", redacted)
+        self.assertIn(b"endpoint:", redacted)
+        self.assertEqual(_hash_bytes_for_entry(entry, raw), redacted)
+
+    def test_synced_ghc_config_restores_machine_local_secrets(self) -> None:
+        synced = (
+            b"auth:\n"
+            b"  enabled: true\n"
+            b"  secret_key: \"\"\n"
+            b"  maildispatch:\n"
+            b"    api_key: \"\"\n"
+        )
+        local = (
+            b"auth:\n"
+            b"  enabled: true\n"
+            b"  secret_key: \"local-session\"\n"
+            b"  maildispatch:\n"
+            b"    api_key: \"local-mail-key\"\n"
+        )
+        values = _ghc_secret_values(local)
+        restored = _rewrite_ghc_secrets(synced, values)
+        self.assertIn(b' secret_key: \"local-session\"', restored)
+        self.assertIn(b' api_key: \"local-mail-key\"', restored)
 
     def test_get_onedrive_path_returns_none_when_access_disabled(self) -> None:
         with mock.patch.object(state, "disable_onedrive_access", True):

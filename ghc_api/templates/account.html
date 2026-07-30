@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Account · ghc-api</title>
+<style>:root{color-scheme:dark}body{font:16px system-ui;background:#0d1117;color:#e6edf3}.card{max-width:46rem;margin:8vh auto;padding:2rem;background:#161b22;border:1px solid #30363d;border-radius:12px}.token{word-break:break-all;font:14px ui-monospace;padding:1rem;background:#0d1117;border-radius:6px}button,a.btn{display:inline-block;padding:.65rem 1rem;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#e6edf3;text-decoration:none;cursor:pointer}.muted{color:#8b949e}</style></head>
+<body><main class="card"><h1>Account</h1><p>Signed in as <strong>{{ user.email }}</strong>.</p>
+{% if record %}<p>User ID: <strong>{{ record.user_id }}</strong> · Status: <strong>{{ record.status }}</strong></p><h2>API token</h2><div class="token">{{ record.token }}</div><p class="muted">Use this token with the LLM API. It is accepted only while the account is approved.</p>
+{% else %}<p class="muted">This configured administrator does not have a user API token.</p>{% endif %}
+{% if user.is_admin %}<p><a class="btn" href="/">Open dashboard</a></p>{% endif %}<button id="logout">Sign out</button></main>
+<script>document.querySelector('#logout').onclick=async()=>{await fetch('/api/auth/logout',{method:'POST'});location.href='/login'}</script></body></html>

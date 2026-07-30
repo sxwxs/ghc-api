@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -31,7 +32,9 @@ from typing import Any, Dict, List, Optional, Tuple
 ANONYMOUS_USER_ID = "anonymous"
 TOKEN_PREFIX = "gha_"
 RELOAD_INTERVAL_SECONDS = 5.0
-REGISTRY_SCHEMA_VERSION = 1
+REGISTRY_SCHEMA_VERSION = 2
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
@@ -47,17 +50,24 @@ class UserRecord:
     status: str
     created_at: int
     approved_at: Optional[int] = None
+    email: Optional[str] = None
+    email_verified: bool = False
+
+    @property
+    def user_type(self) -> str:
+        return "email" if self.email else "legacy"
 
     def to_public_dict(self) -> Dict[str, Any]:
-        """Dict shape returned by /api/users (includes the token; this endpoint
-        is admin-only by virtue of nginx/reverse-proxy auth in production)."""
-        return asdict(self)
+        """Dict returned by the maglink administrator-only /api/users route."""
+        payload = asdict(self)
+        payload["user_type"] = self.user_type
+        return payload
 
     def to_safe_dict(self) -> Dict[str, Any]:
-        """Dict shape returned by /api/users-list (no token, safe to expose
-        to non-admin views like the filter-by-user dropdown)."""
+        """Token-redacted shape used by authenticated dashboard filters."""
         d = asdict(self)
         d.pop("token", None)
+        d["user_type"] = self.user_type
         return d
 
 
@@ -103,6 +113,7 @@ class UserRegistry:
         self._lock = threading.RLock()
         self._by_token: Dict[str, UserRecord] = {}
         self._by_user_id: Dict[str, UserRecord] = {}
+        self._by_email: Dict[str, UserRecord] = {}
         self._path: Optional[Path] = None
         self._mtime: float = 0.0
         self._last_check: float = 0.0
@@ -132,6 +143,7 @@ class UserRegistry:
             if not self._by_token:
                 self._by_token = {}
                 self._by_user_id = {}
+                self._by_email = {}
                 self._mtime = 0.0
             return
 
@@ -155,6 +167,7 @@ class UserRegistry:
 
         by_token: Dict[str, UserRecord] = {}
         by_user_id: Dict[str, UserRecord] = {}
+        by_email: Dict[str, UserRecord] = {}
         for raw in users:
             if not isinstance(raw, dict):
                 continue
@@ -163,6 +176,9 @@ class UserRegistry:
             status = raw.get("status")
             if not user_id or not token or status not in VALID_STATUSES:
                 continue
+            email = str(raw.get("email") or "").strip().lower() or None
+            if email is not None and not _EMAIL_RE.match(email):
+                email = None
             record = UserRecord(
                 user_id=str(user_id),
                 display_name=str(raw.get("display_name") or user_id),
@@ -170,12 +186,17 @@ class UserRegistry:
                 status=str(status),
                 created_at=int(raw.get("created_at") or 0),
                 approved_at=int(raw["approved_at"]) if raw.get("approved_at") else None,
+                email=email,
+                email_verified=bool(raw.get("email_verified", False)) if email else False,
             )
             by_token[record.token] = record
             by_user_id[record.user_id] = record
+            if record.email and record.email not in by_email:
+                by_email[record.email] = record
 
         self._by_token = by_token
         self._by_user_id = by_user_id
+        self._by_email = by_email
 
     def _flush_to_disk(self) -> None:
         if self._path is None:
@@ -205,6 +226,11 @@ class UserRegistry:
         with self._lock:
             self._ensure_fresh()
             return self._by_user_id.get(user_id)
+
+    def lookup_by_email(self, email: str) -> Optional[UserRecord]:
+        with self._lock:
+            self._ensure_fresh()
+            return self._by_email.get((email or "").strip().lower())
 
     def list_all(self) -> List[UserRecord]:
         with self._lock:
@@ -249,6 +275,100 @@ class UserRegistry:
             self._flush_to_disk()
             return record, None
 
+    def complete_email_registration(
+        self,
+        user_id: str,
+        email: str,
+        display_name: str,
+    ) -> Tuple[Optional[UserRecord], Optional[str]]:
+        """Create or complete an email user after device-confirmed verification."""
+        user_id = (user_id or "").strip()
+        email = (email or "").strip().lower()
+        display_name = (display_name or "").strip() or user_id
+        validation_error = self._validate_user_id(user_id)
+        if validation_error:
+            return None, validation_error
+        if len(email) > 320 or not _EMAIL_RE.match(email):
+            return None, "invalid email address"
+
+        with self._lock:
+            self._ensure_fresh()
+            existing_email = self._by_email.get(email)
+            if existing_email is not None:
+                if existing_email.email_verified:
+                    return None, "this email is already registered"
+                existing_email.email_verified = True
+                if display_name:
+                    existing_email.display_name = display_name[:128]
+                self._flush_to_disk()
+                return existing_email, None
+            if user_id in self._by_user_id:
+                return None, f"user_id '{user_id}' already exists"
+
+            record = UserRecord(
+                user_id=user_id,
+                display_name=display_name[:128],
+                token=generate_token(),
+                status=STATUS_PENDING,
+                created_at=int(time.time()),
+                approved_at=None,
+                email=email,
+                email_verified=True,
+            )
+            self._by_token[record.token] = record
+            self._by_user_id[record.user_id] = record
+            self._by_email[email] = record
+            self._flush_to_disk()
+            return record, None
+
+    def create_email_invitation(
+        self,
+        user_id: str,
+        email: str,
+        display_name: str,
+    ) -> Tuple[Optional[UserRecord], Optional[str]]:
+        """Admin-created email user; ownership must still be verified."""
+        user_id = (user_id or "").strip()
+        email = (email or "").strip().lower()
+        display_name = (display_name or "").strip() or user_id
+        validation_error = self._validate_user_id(user_id)
+        if validation_error:
+            return None, validation_error
+        if len(email) > 320 or not _EMAIL_RE.match(email):
+            return None, "invalid email address"
+        with self._lock:
+            self._ensure_fresh()
+            if user_id in self._by_user_id:
+                return None, f"user_id '{user_id}' already exists"
+            if email in self._by_email:
+                return None, "this email is already registered"
+            record = UserRecord(
+                user_id=user_id,
+                display_name=display_name[:128],
+                token=generate_token(),
+                status=STATUS_PENDING,
+                created_at=int(time.time()),
+                email=email,
+                email_verified=False,
+            )
+            self._by_token[record.token] = record
+            self._by_user_id[record.user_id] = record
+            self._by_email[email] = record
+            self._flush_to_disk()
+            return record, None
+
+    @staticmethod
+    def _validate_user_id(user_id: str) -> Optional[str]:
+        if not user_id:
+            return "user_id is required"
+        if len(user_id) > 64:
+            return "user_id is too long (max 64 chars)"
+        if user_id == ANONYMOUS_USER_ID:
+            return f"'{ANONYMOUS_USER_ID}' is reserved"
+        if any(not (ch.isalnum() or ch in "_-.") for ch in user_id):
+            return "user_id may only contain letters, digits, '_', '-', '.'"
+        return None
+
     def set_status(self, user_id: str, new_status: str) -> Tuple[Optional[UserRecord], Optional[str]]:
         if new_status not in VALID_STATUSES:
             return None, f"invalid status: {new_status}"
@@ -270,6 +390,8 @@ class UserRegistry:
             if record is None:
                 return False, f"user_id '{user_id}' not found"
             self._by_token.pop(record.token, None)
+            if record.email:
+                self._by_email.pop(record.email, None)
             self._flush_to_disk()
             return True, None
 
@@ -363,6 +485,14 @@ def require_auth(request) -> AuthResult:
             error_code="invalid_token",
             error_message="The provided token is not recognized.",
             http_status=401,
+        )
+
+    if record.email and not record.email_verified:
+        return AuthResult(
+            user_id=None,
+            error_code="email_unverified",
+            error_message="The email address for this token has not been verified.",
+            http_status=403,
         )
 
     if record.status == STATUS_PENDING:

@@ -2,9 +2,10 @@
 Flask application factory and initialization
 """
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, g, jsonify, redirect, request, url_for
 
 from .auth import ANONYMOUS_USER_ID, require_auth
+from .email_auth import get_email_auth, init_email_auth
 from .routes.agent import agent_bp
 from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
@@ -13,10 +14,9 @@ from .routes.openai import openai_bp
 from .state import state
 
 
-# Paths that require an approved user token when state.enable_auth is True.
-# Everything not in this set bypasses auth at the Flask layer (dashboard,
-# /signup, /api/users/*, /agent, static files). Production deployments are
-# expected to put nginx (or equivalent) in front to gate admin paths.
+# Paths that require an approved API token when state.enable_auth is True.
+# Legacy top-level enable_auth protects only these paths. The separate nested
+# email-auth mode additionally protects dashboard and management routes.
 PROTECTED_PATHS = frozenset({
     "/v1/chat/completions",
     "/chat/completions",
@@ -34,6 +34,7 @@ PROTECTED_PATHS = frozenset({
 def create_app() -> Flask:
     """Create and configure the Flask application"""
     app = Flask(__name__)
+    init_email_auth(app)
 
     @app.before_request
     def _auth_gate():
@@ -43,19 +44,51 @@ def create_app() -> Flask:
             g.user_id = ANONYMOUS_USER_ID
             return None
 
-        if request.path not in PROTECTED_PATHS:
+        if request.path in PROTECTED_PATHS:
+            result = require_auth(request)
+            if result.user_id is None:
+                return jsonify({
+                    "error": result.error_code,
+                    "message": result.error_message,
+                }), result.http_status
+            g.user_id = result.user_id
+            return None
+
+        # Legacy top-level enable_auth protects only LLM API endpoints. Email
+        # dashboard/management gating is opt-in through nested auth.enabled.
+        if not state.enable_email_auth:
             g.user_id = ANONYMOUS_USER_ID
             return None
 
-        result = require_auth(request)
-        if result.user_id is None:
-            return jsonify({
-                "error": result.error_code,
-                "message": result.error_message,
-            }), result.http_status
+        g.user_id = ANONYMOUS_USER_ID
+        public_path = (
+            request.path in {"/login", "/signup", "/favicon.ico"}
+            or request.path.startswith("/static/")
+            or request.path.startswith("/api/auth/")
+            or request.path.startswith("/api/register/")
+        )
+        if public_path:
+            return None
 
-        g.user_id = result.user_id
-        return None
+        auth = get_email_auth(app)
+        if auth is None:
+            return jsonify({"error": "auth_not_configured"}), 503
+
+        user = auth.current_user()
+        if request.path == "/account":
+            if user is not None:
+                g.user_id = user.get("id") or ANONYMOUS_USER_ID
+                return None
+            return redirect(url_for("auth.login_page", next=request.path))
+
+        if user is not None and user.get("is_admin"):
+            g.user_id = user.get("id") or ANONYMOUS_USER_ID
+            return None
+
+        wants_html = request.method == "GET" and not request.path.startswith("/api/")
+        if wants_html:
+            return redirect(url_for("auth.login_page", next=request.path))
+        return jsonify({"ok": False, "error": "admin_required"}), 403
 
     # Register blueprints
     app.register_blueprint(dashboard_bp)

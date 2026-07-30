@@ -292,11 +292,71 @@ def _split_codex_config_sections(raw: bytes) -> tuple[bytes, bytes]:
     return raw[:idx], raw[idx + 1:]
 
 
+def _ghc_secret_values(raw: bytes) -> Dict[str, str]:
+    """Extract machine-local auth secrets without parsing or rewriting YAML."""
+    values: Dict[str, str] = {}
+    in_auth = False
+    in_maildispatch = False
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        stripped = line.lstrip()
+        indent = len(line) - len(stripped)
+        if indent == 0:
+            in_auth = stripped.startswith("auth:")
+            in_maildispatch = False
+            continue
+        if not in_auth:
+            continue
+        if indent == 2:
+            in_maildispatch = stripped.startswith("maildispatch:")
+            if stripped.startswith("secret_key:"):
+                values["secret_key"] = stripped.split(":", 1)[1].strip()
+        elif indent == 4 and in_maildispatch and stripped.startswith("api_key:"):
+            values["maildispatch.api_key"] = stripped.split(":", 1)[1].strip()
+    return values
+
+
+def _rewrite_ghc_secrets(raw: bytes, values: Dict[str, str]) -> bytes:
+    lines = raw.decode("utf-8", errors="replace").splitlines(keepends=True)
+    output: list[str] = []
+    in_auth = False
+    in_maildispatch = False
+    for line in lines:
+        content = line.rstrip("\r\n")
+        newline = line[len(content):]
+        stripped = content.lstrip()
+        indent = len(content) - len(stripped)
+        replacement: Optional[str] = None
+        if indent == 0:
+            in_auth = stripped.startswith("auth:")
+            in_maildispatch = False
+        elif in_auth and indent == 2:
+            in_maildispatch = stripped.startswith("maildispatch:")
+            if stripped.startswith("secret_key:"):
+                replacement = values.get("secret_key", '""')
+        elif in_auth and indent == 4 and in_maildispatch and stripped.startswith("api_key:"):
+            replacement = values.get("maildispatch.api_key", '""')
+        if replacement is not None:
+            key = stripped.split(":", 1)[0]
+            output.append(f"{' ' * indent}{key}: {replacement}{newline}")
+        else:
+            output.append(line)
+    return "".join(output).encode("utf-8")
+
+
+def _redact_ghc_secrets(raw: bytes) -> bytes:
+    return _rewrite_ghc_secrets(
+        raw,
+        {"secret_key": '""', "maildispatch.api_key": '""'},
+    )
+
+
 def _hash_bytes_for_entry(entry: ConfigEntry, raw: bytes) -> bytes:
-    if entry.key != "codex":
-        return raw
-    header, _ = _split_codex_config_sections(raw)
-    return header
+    if entry.key == "codex":
+        header, _ = _split_codex_config_sections(raw)
+        return header
+    if entry.key == "ghc-api":
+        return _redact_ghc_secrets(raw)
+    return raw
 
 
 def _files_different(entry: ConfigEntry, left_path: Path, right_path: Path) -> bool:
@@ -550,6 +610,9 @@ def sync_local_to_onedrive() -> Dict[str, object]:
         if key == "codex":
             target.parent.mkdir(parents=True, exist_ok=True)
             _restore_codex_config_preserving_projects(entry.local_path, target)
+        elif key == "ghc-api":
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(_redact_ghc_secrets(entry.local_path.read_bytes()))
         else:
             shutil.copy2(entry.local_path, target)
         copied[key] = str(target)
@@ -590,6 +653,11 @@ def sync_onedrive_to_local() -> Dict[str, object]:
 
         if key == "codex":
             _restore_codex_config_preserving_projects(source, entry.local_path)
+        elif key == "ghc-api":
+            local_secrets = _ghc_secret_values(entry.local_path.read_bytes()) if entry.local_path.exists() else {}
+            entry.local_path.write_bytes(
+                _rewrite_ghc_secrets(source.read_bytes(), local_secrets)
+            )
         else:
             shutil.copy2(source, entry.local_path)
         restored[key] = str(entry.local_path)

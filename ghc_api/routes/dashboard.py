@@ -62,6 +62,7 @@ def _runtime_config() -> Dict[str, Any]:
         "save_request_to_file": state.save_request_to_file,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
+        "enable_email_auth": state.enable_email_auth,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,

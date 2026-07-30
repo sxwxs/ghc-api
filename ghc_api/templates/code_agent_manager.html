@@ -320,9 +320,13 @@
 
         <div class="section">
             <h2>Users</h2>
-            <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
+                <input id="invite-user-id" placeholder="User ID" style="width:140px;">
+                <input id="invite-user-email" type="email" placeholder="Email" style="width:220px;">
+                <input id="invite-display-name" placeholder="Display name" style="width:160px;">
+                <button onclick="inviteEmailUser()">Add email user</button>
                 <button onclick="loadUsersAdmin()">Refresh</button>
-                <span style="color:#888; font-size:12px;">Registered via /signup. Approve a token to make it usable.</span>
+                <span style="color:#888; font-size:12px;">Email users must verify their address and be approved. Legacy token-only users remain supported.</span>
             </div>
             <div class="table-wrap">
                 <table>
@@ -330,6 +334,8 @@
                         <tr>
                             <th>User ID</th>
                             <th>Display Name</th>
+                            <th>Type / Email</th>
+                            <th>Verified</th>
                             <th>Status</th>
                             <th>Token</th>
                             <th>Created</th>
@@ -844,7 +850,7 @@
                 const users = data.users || [];
                 if (users.length === 0) {
                     const tr = document.createElement("tr");
-                    tr.innerHTML = "<td colspan=\"7\" style=\"color:#888;\">No users registered. Direct people to /signup.</td>";
+                    tr.innerHTML = "<td colspan=\"9\" style=\"color:#888;\">No users registered.</td>";
                     tbody.appendChild(tr);
                     return;
                 }
@@ -862,6 +868,8 @@
                     tr.innerHTML = `
                         <td>${escapeHtml(u.user_id)}</td>
                         <td>${escapeHtml(u.display_name || "")}</td>
+                        <td>${u.email ? `<div>${escapeHtml(u.email)}</div><small>${escapeHtml(u.user_type || "email")}</small>` : "legacy"}</td>
+                        <td>${u.email ? (u.email_verified ? "Yes" : "No") : "—"}</td>
                         <td><span style="color:${statusColor}; font-weight:600;">${escapeHtml(u.status)}</span></td>
                         <td>${tokenDisplay}</td>
                         <td>${created}</td>
@@ -875,7 +883,36 @@
                     tbody.appendChild(tr);
                 }
             } catch (e) {
-                tbody.innerHTML = `<tr><td colspan="7" style="color:#f85149;">Failed to load users: ${escapeHtml(e.message)}</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" style="color:#f85149;">Failed to load users: ${escapeHtml(e.message)}</td></tr>`;
+            }
+        }
+
+        async function inviteEmailUser() {
+            const userId = document.getElementById("invite-user-id").value.trim();
+            const email = document.getElementById("invite-user-email").value.trim();
+            const displayName = document.getElementById("invite-display-name").value.trim();
+            if (!userId || !email) {
+                setStatus("User ID and email are required.", true);
+                return;
+            }
+            try {
+                const res = await fetch("/api/users", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({user_id: userId, email, display_name: displayName}),
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    setStatus(data.message || data.error || "Add user failed", true);
+                    return;
+                }
+                document.getElementById("invite-user-id").value = "";
+                document.getElementById("invite-user-email").value = "";
+                document.getElementById("invite-display-name").value = "";
+                setStatus(`Email user '${userId}' added. Ask them to verify at /signup.`);
+                await loadUsersAdmin();
+            } catch (e) {
+                setStatus(e.message, true);
             }
         }
 

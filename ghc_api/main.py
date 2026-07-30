@@ -37,6 +37,41 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def _load_auth_config(config: dict) -> None:
+    """Load legacy token-only or new maglink email-auth configuration."""
+    auth_config = config.get('auth') or {}
+    if not isinstance(auth_config, dict):
+        raise ValueError("'auth' must be a mapping")
+
+    # Legacy top-level enable_auth remains API-token-only. It must not suddenly
+    # require MailDispatch/session settings after an upgrade.
+    state.enable_auth = bool(config.get('enable_auth', False))
+    state.enable_email_auth = bool(auth_config.get('enabled', False))
+    if state.enable_email_auth:
+        state.enable_auth = True
+
+    state.auth_hostname = str(auth_config.get('hostname') or '')
+    state.auth_secret_key = str(auth_config.get('secret_key') or '')
+    state.auth_allow_public_registration = bool(auth_config.get('allow_public_registration', False))
+    admin_emails = auth_config.get('admin_emails') or []
+    if not isinstance(admin_emails, list):
+        raise ValueError("'auth.admin_emails' must be a list")
+    state.auth_admin_emails = [str(value).strip().lower() for value in admin_emails if str(value).strip()]
+    state.auth_store_path = str(auth_config.get('store_path') or '')
+    state.auth_code_ttl = int(auth_config.get('code_ttl', 900))
+    state.auth_rate_max = int(auth_config.get('rate_max', 5))
+    state.auth_rate_window = int(auth_config.get('rate_window', 900))
+    state.auth_confirm_max_attempts = int(auth_config.get('confirm_max_attempts', 8))
+    state.auth_trust_proxy_headers = bool(auth_config.get('trust_proxy_headers', False))
+    maildispatch = auth_config.get('maildispatch') or {}
+    if not isinstance(maildispatch, dict):
+        raise ValueError("'auth.maildispatch' must be a mapping")
+    state.auth_maildispatch_endpoint = str(maildispatch.get('endpoint') or '')
+    state.auth_maildispatch_api_key = str(maildispatch.get('api_key') or '')
+    state.auth_maildispatch_sender_id = str(maildispatch.get('sender_id') or 'system')
+    state.auth_maildispatch_timeout = int(maildispatch.get('timeout', 10))
+
+
 def main():
     """Main entry point for the application"""
     parser = argparse.ArgumentParser(description='GitHub Copilot API Proxy')
@@ -53,7 +88,7 @@ def main():
         help='Run GitHub Device Flow, replace the locally saved token, and exit',
     )
     parser.add_argument('--enable-auth', dest='enable_auth', action='store_true', default=None,
-                        help='Require an approved user token on LLM API endpoints (overrides config)')
+                        help='Require approved API tokens on LLM endpoints; does not by itself enable email auth')
     parser.add_argument('--no-enable-auth', dest='enable_auth', action='store_false',
                         help='Disable user-token auth even if enabled in config')
     parser.add_argument('-v', '--version', action='version', version=f'ghc-api {__version__}')
@@ -83,7 +118,6 @@ def main():
         generate_config_file()
     try:
         config = load_config(config_path)
-        print(config)
         # Load server settings from config (can be overridden by command line)
         host = config.get('address', 'localhost')
         port = config.get('port', 8313)
@@ -145,9 +179,8 @@ def main():
         if 'web_search_proxy_endpoint' in config:
             state.web_search_proxy_endpoint = config['web_search_proxy_endpoint']
 
-        # Load user-token auth setting
-        if 'enable_auth' in config:
-            state.enable_auth = bool(config['enable_auth'])
+        # Load legacy API-token auth and the opt-in maglink email mode.
+        _load_auth_config(config)
 
         # Load model mappings from config
         if 'model_mappings' in config:
@@ -184,20 +217,21 @@ def main():
     if args.enable_auth is not None:
         print(f"Overriding enable_auth to: {args.enable_auth} (was {state.enable_auth})")
         state.enable_auth = args.enable_auth
+        if not args.enable_auth:
+            state.enable_email_auth = False
 
-    if state.enable_auth:
+    if state.enable_email_auth:
         print("\n" + "=" * 60)
-        print("[Auth] enable_auth=True — LLM API endpoints require an approved")
-        print("       user token from the registry (users.json).")
-        print("")
-        print("       WARNING: dashboard pages (/, /requests, /code-agent-manager)")
-        print("       and admin APIs (/api/users/*, /api/runtime-config, /api/config-manager/*)")
-        print("       are NOT auth-protected by ghc-api itself. In production, put")
-        print("       a reverse proxy (e.g. nginx basic-auth) in front to gate them.")
-        print("       See README \"Production deployment\" for a sample nginx config.")
-        print("")
-        print(f"       For local-only use, bind to 127.0.0.1: ghc-api --enable-auth -a 127.0.0.1")
+        print("[Auth] email mode enabled — LLM endpoints require approved API tokens.")
+        print("       Dashboard and management routes require maglink email login")
+        print("       with an administrator email configured in auth.admin_emails.")
+        print("       Deployment contract: nginx + HTTPS with auth.hostname set.")
+        print("       MailDispatch API key: configured" if state.auth_maildispatch_api_key else "       MailDispatch API key: MISSING")
         print("=" * 60 + "\n")
+    elif state.enable_auth:
+        print("\n[Auth] legacy API-token mode enabled; dashboard and management")
+        print("       behavior remains unchanged. Use nested auth.enabled: true")
+        print("       to enable maglink email sessions.\n")
 
     # Create the Flask app
     app = create_app()

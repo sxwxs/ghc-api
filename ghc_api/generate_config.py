@@ -199,22 +199,50 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
 # User Authentication
 # -------------------
-# When true, the LLM API endpoints (/v1/chat/completions, /v1/messages, /v1/responses,
-# /v1/models, etc.) require an approved user token. Users register at /signup; an
-# administrator approves the token from the dashboard before it becomes usable.
-#
-# Token is accepted in any of these forms (first match wins):
-#   - Authorization: Bearer <token>      (OpenAI SDK, Claude Code's ANTHROPIC_AUTH_TOKEN, Codex)
-#   - x-api-key: <token>                 (Anthropic SDK's ANTHROPIC_API_KEY)
-#   - ?api_key=<token>                   (query parameter, for curl one-liners)
-#
-# When false (default), all requests proceed without auth and are tagged with
-# user_id="anonymous" in the dashboard and token-usage stats.
-#
-# The user registry (users.json) is stored under the OneDrive configSync folder when
-# OneDrive is detected (shared across machines); otherwise it falls back to the local
-# ghc-api config directory.
-enable_auth: false
+# Disabled by default for normal local use. This nested setting opts into the new
+# nginx + HTTPS email-auth mode. The legacy top-level `enable_auth: true` setting
+# remains API-token-only and does not require the settings below.
+# LLM endpoints keep using approved API tokens, while dashboard and management
+# routes require maglink email login by a configured administrator.
+auth:
+  enabled: false
+
+  # Public HTTPS hostname only (no scheme or path), e.g. ghc.example.com.
+  hostname: ""
+
+  # Strong random Flask session signing secret. Required when auth is enabled.
+  secret_key: ""
+
+  # When true, any verified email may create a pending account. When false, an
+  # administrator must add the email first. Approval is always required before
+  # normal users can sign in or use their API token.
+  allow_public_registration: false
+
+  # These verified email addresses can sign in as administrators without waiting
+  # for a users.json approval record. Multiple administrators are supported.
+  admin_emails: []
+
+  # Persistent maglink login/verification request store. Empty uses
+  # <ghc-api config dir>/maglink.db. Do not place this SQLite file in OneDrive.
+  store_path: ""
+  code_ttl: 900
+  rate_max: 5
+  rate_window: 900
+  confirm_max_attempts: 8
+
+  # Set true only when the application is reachable exclusively through the trusted
+  # nginx proxy which overwrites X-Forwarded-For.
+  trust_proxy_headers: false
+
+  maildispatch:
+    # Complete MailDispatch submission endpoint, e.g.
+    # https://mail.example.com/api/v1/messages
+    endpoint: ""
+    # Dedicated key with mail:send and mail:authentication scopes.
+    # This value is never returned by the runtime-config API or printed at startup.
+    api_key: ""
+    sender_id: "system"
+    timeout: 10
 
 """.format(
         vscode_version=DEFAULT_VSCODE_VERSION,

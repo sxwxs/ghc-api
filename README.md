@@ -59,7 +59,7 @@ By default, the server will start on `http://localhost:8313`.
 - `-c` or `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.21`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.22`)
 - `--help`: Show help message
 
 ### Configuration
@@ -230,24 +230,46 @@ Session data is stored in:
 
 Recent working directories are persisted to `workdirs.json` in the same location. Sessions from other machines are browsable via the machine selector dropdown when OneDrive is enabled.
 
-### User-Token Authentication (Optional)
+### Email and API-Token Authentication (Optional)
 
-When you want to share a single ghc-api instance among multiple people without giving everyone unrestricted access to the deployer's Copilot quota, enable token auth:
+Authentication is disabled by default for local use. The legacy top-level `enable_auth: true` setting and `--enable-auth` CLI flag remain API-token-only for backward compatibility; they do not require MailDispatch or protect dashboard routes, and the original direct `/signup` plus administrator-approval flow remains available. The new nested `auth.enabled: true` mode is for nginx + HTTPS public deployments and uses two complementary mechanisms:
 
-```bash
-ghc-api --enable-auth
-# or set in ~/.ghc-api/config.yaml:
-#   enable_auth: true
+- maglink email sessions protect the dashboard and management routes;
+- approved `gha_...` API tokens continue to protect LLM endpoints used by SDKs and CLI tools.
+
+Configure `~/.ghc-api/config.yaml`:
+
+```yaml
+auth:
+  enabled: true
+  hostname: "ghc.example.com"
+  secret_key: "replace-with-a-strong-random-secret"
+  allow_public_registration: false
+  admin_emails:
+    - "admin@example.com"
+  trust_proxy_headers: true
+  maildispatch:
+    endpoint: "https://mail.example.com/api/v1/messages"
+    api_key: "md_live_..."
+    sender_id: "system"
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, plus their non-`/v1` aliases) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+`hostname` is a hostname only; maglink builds HTTPS verification URLs from it. The MailDispatch key needs `mail:send` and `mail:authentication`. Bind the backend privately behind nginx before enabling `trust_proxy_headers`.
 
-**Self-signup flow**:
+**Email registration and approval**:
 
-1. User opens `http://<host>:8313/signup`, fills `user_id` (letters/digits/`_-.`, max 64 chars) and an optional display name, submits.
-2. Server generates a token of the form `gha_<43 url-safe chars>`, returns it once. Status is `pending`.
-3. Admin opens the dashboard → **Code Agent Manager** → **Users** section → clicks **Approve** next to the new user. (Or `curl -X POST http://localhost:8313/api/users/<id>/approve`.)
-4. The user can now use the token. Revocation and deletion are available from the same panel.
+1. The user opens `/signup`, solves the CAPTCHA, and requests email verification.
+2. The waiting browser displays a device code. The email contains only a private verification link.
+3. Opening the link is side-effect-free; the user must POST the device code on the confirmation page.
+4. The waiting browser consumes the verified email once and creates a `pending` account.
+5. An administrator approves the account from Code Agent Manager.
+6. Only an email-verified, approved account can sign in or use its API token.
+
+If final registration data such as `user_id` is invalid or already used, the verified email remains in the waiting browser session so the form can be corrected without sending another verification email. Eligibility is checked again when the user record is actually created.
+
+When `allow_public_registration: false`, an administrator must add the email user first. Configured `admin_emails` can bootstrap the management UI without a `users.json` approval record. Multiple administrators are supported.
+
+Existing records without an email remain valid legacy API-token users. New email records and legacy records coexist in the same `users.json`.
 
 **Token presentation** (middleware accepts any of these, first match wins):
 
@@ -299,13 +321,14 @@ curl http://localhost:8313/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}'
 ```
 
-**Per-user dashboard views**: with auth on, the request browser, statistics, and cross-machine token-usage overview all gain a "Filter by user" dropdown. Requests issued before auth was enabled (and any anonymous calls when auth is off) show up under a single `anonymous` bucket.
+**Per-user dashboard views**: with auth on, the request browser, statistics, and cross-machine token-usage overview retain their user filter. Requests issued while auth is off remain under `anonymous`.
 
-**Token registry storage**:
-- If OneDrive is detected and `disable_onedrive_access: false`: `{OneDrive}/.ghc-api/configSync/users.json` (shared across machines — register once, use anywhere).
-- Otherwise: `~/.ghc-api/users.json` (local-only).
+**Storage**:
 
-The registry file is re-read whenever its mtime changes (checked every 5 seconds), so approval / revocation on one machine propagates to others as soon as OneDrive syncs the file.
+- `users.json` remains under the existing OneDrive/local registry selection and is backward compatible with legacy users;
+- maglink's atomic pending requests and rate counters use local SQLite at `<config dir>/maglink.db` by default;
+- do not place the SQLite database in OneDrive;
+- Flask `secret_key` and the MailDispatch API key are excluded from OneDrive config sync and preserved locally when synced configuration is restored.
 
 ## API Endpoints
 
@@ -351,15 +374,20 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 
 ### User Authentication
 
-Active only when `enable_auth: true`. See [User-Token Authentication](#user-token-authentication-optional) above.
+Active only when `auth.enabled: true`. Dashboard and management endpoints require a maglink administrator session unless noted as public.
 
-- `GET /signup` - Self-signup form (public)
-- `POST /signup` - Create a pending user, return token (public)
-- `GET /api/users-list` - User list without tokens, for filter dropdowns (public)
-- `GET /api/users` - Full user list including tokens (admin: gate behind reverse proxy)
-- `POST /api/users/<user_id>/approve` - Mark a pending user as approved (admin)
-- `POST /api/users/<user_id>/revoke` - Revoke an approved user (admin)
-- `DELETE /api/users/<user_id>` - Remove a user from the registry (admin)
+- `GET /login` - Email login waiting page (public)
+- `GET /account` - Current signed-in email user's account and API token
+- `GET /signup` - Verified registration page (public)
+- `POST /signup` - Consume the waiting browser's verified email and create/complete a pending user
+- `/api/auth/*` - maglink CAPTCHA, login request, confirmation, status, state, and logout endpoints
+- `/api/register/*` - maglink email-only verification endpoints
+- `GET /api/users-list` - Token-redacted list for authenticated dashboard filters
+- `GET /api/users` - Full user list (administrator)
+- `POST /api/users` - Add an invited email user (administrator)
+- `POST /api/users/<user_id>/approve` - Approve a user (administrator)
+- `POST /api/users/<user_id>/revoke` - Revoke a user (administrator)
+- `DELETE /api/users/<user_id>` - Remove a user (administrator)
 
 Per-user filtering is also available on existing endpoints via the `?user=<user_id>` query parameter: `/api/stats`, `/api/requests`, `/api/requests/search`, `/api/config-manager/token-usage`.
 
@@ -452,21 +480,9 @@ Access the web dashboard at `http://localhost:8313/` to:
 
 ## Production deployment
 
-When you expose ghc-api beyond `localhost` (sharing a single instance with other people, putting it on a VPS, etc.), put a reverse proxy in front to authenticate admin paths. ghc-api intentionally does **not** authenticate dashboard pages or admin APIs at the Flask layer — that responsibility is delegated to your reverse proxy.
-
-### Path classification
-
-| Category | Paths | How to gate |
-|---|---|---|
-| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
-| **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
-| **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
-| **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
-| **Admin — dashboard & inspection** | `GET /`, `/requests`, `/request-stats`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
+Leave `auth.enabled: false` for the default local-only use case. Public auth is designed for an nginx + HTTPS deployment: nginx terminates TLS and forwards all routes, while ghc-api enforces maglink sessions on dashboard/management routes and API tokens on LLM routes.
 
 ### Sample nginx config
-
-Default-deny strategy: protect everything with basic-auth, then explicitly allow the public paths.
 
 ```nginx
 server {
@@ -475,64 +491,28 @@ server {
 
     # ssl_certificate / ssl_certificate_key go here
 
-    # Default for the whole server: admin basic-auth required.
-    auth_basic "ghc-api admin";
-    auth_basic_user_file /etc/nginx/ghc-api.htpasswd;
-
-    # ---- Public: LLM API (auth is enforced by ghc-api itself via user tokens) ----
-    location /v1/ {
-        auth_basic off;
-        proxy_pass http://127.0.0.1:8313;
-        proxy_buffering off;          # SSE / streaming responses
-        proxy_read_timeout 1200s;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-    # Aliases without the /v1 prefix
-    location ~ ^/(chat/completions|responses|models)(/|$) {
-        auth_basic off;
-        proxy_pass http://127.0.0.1:8313;
-        proxy_buffering off;
-        proxy_read_timeout 1200s;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-
-    # ---- Public: signup page and token-redacted user list ----
-    location = /signup {
-        auth_basic off;
-        proxy_pass http://127.0.0.1:8313;
-    }
-    location = /api/users-list {
-        auth_basic off;
-        proxy_pass http://127.0.0.1:8313;
-    }
-
-    # ---- Everything else: admin basic-auth applies ----
     location / {
         proxy_pass http://127.0.0.1:8313;
+        proxy_http_version 1.1;
         proxy_buffering off;
-        proxy_read_timeout 1200s;
+        proxy_read_timeout 1800s;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
     }
 }
 ```
 
-Create the password file (use bcrypt via `-B`):
+Bind ghc-api to a private interface such as `127.0.0.1`; do not expose the backend port directly. Set `auth.hostname` to the nginx `server_name`. Enable `auth.trust_proxy_headers` only when nginx is the exclusive trusted ingress and overwrites forwarding headers.
 
-```bash
-sudo htpasswd -cB /etc/nginx/ghc-api.htpasswd admin
-# add more admins later without -c:
-sudo htpasswd -B /etc/nginx/ghc-api.htpasswd alice
-```
+### Security notes
 
-### Critical caveats
-
-- **Never apply `auth_basic` to LLM API paths.** Clients like Codex, Claude Code, and the OpenAI SDK send `Authorization: Bearer <token>`, not HTTP basic. nginx would 401 the request before ghc-api ever sees it.
-- **Always set `proxy_buffering off;` and a long `proxy_read_timeout`** for any location that forwards LLM traffic — otherwise streamed responses stall or get truncated.
-- **The two `Authorization` schemes don't conflict**: basic-auth lives in admin `location` blocks (`Authorization: Basic ...`), user tokens live in LLM `location` blocks (`Authorization: Bearer ...`). They never coexist on the same request.
-- **For local-only single-user use without nginx**, bind ghc-api to localhost so the admin endpoints aren't reachable from the network: `ghc-api --enable-auth -a 127.0.0.1`.
+- Keep HTTPS enabled because auth sessions always use `Secure`, `HttpOnly`, `SameSite=Lax` cookies.
+- Do not add nginx Basic Auth in front of LLM routes: SDK clients need their Bearer API Token to reach ghc-api unchanged.
+- Keep `proxy_buffering off` and a long read timeout for SSE responses.
+- The MailDispatch API key must have only `mail:send` and `mail:authentication` and should be restricted to the configured sender.
+- MailDispatch recipient policy must allow every application user who may receive registration or login mail.
+- `GET` confirmation pages never approve a login or registration; approval requires the emailed token plus the device code in a deliberate POST.
 
 ## Architecture
 
@@ -547,7 +527,7 @@ sudo htpasswd -B /etc/nginx/ghc-api.htpasswd alice
   - `routes/` - API endpoint handlers (openai, anthropic, dashboard, agent)
   - `acp/` - Agent Client Protocol implementation (JSON-RPC 2.0 over subprocess stdio)
 - **Thread-Safe Caching**: Uses threading locks for concurrent access
-- **Memory-Based Storage**: No external database dependencies
+- **Lightweight Storage**: In-memory request cache, JSON user registry, and SQLite maglink state when public auth is enabled
 - **RESTful API Design**: Follows REST conventions
 
 ## License
