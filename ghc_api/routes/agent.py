@@ -24,6 +24,11 @@ def _get_session_manager():
     return _session_manager
 
 
+def _invalid_path_component_error():
+    """Response for a session_id/machine that is not a safe path component."""
+    return jsonify({"error": "Invalid session id or machine name"}), 400
+
+
 # ---------------------------------------------------------------------------
 # Page route
 # ---------------------------------------------------------------------------
@@ -78,7 +83,11 @@ def api_list_sessions():
     per_page = request.args.get("per_page", 50, type=int)
 
     mgr = _get_session_manager()
-    result = mgr.list_sessions(machine=machine, page=page, per_page=per_page)
+    from ..acp.session_manager import InvalidPathComponent
+    try:
+        result = mgr.list_sessions(machine=machine, page=page, per_page=per_page)
+    except InvalidPathComponent:
+        return _invalid_path_component_error()
     return jsonify(result)
 
 
@@ -87,7 +96,11 @@ def api_session_detail(session_id: str):
     """Get full session detail including message history."""
     machine = request.args.get("machine", None)
     mgr = _get_session_manager()
-    detail = mgr.get_session_detail(session_id, machine=machine)
+    from ..acp.session_manager import InvalidPathComponent
+    try:
+        detail = mgr.get_session_detail(session_id, machine=machine)
+    except InvalidPathComponent:
+        return _invalid_path_component_error()
     if detail is None:
         return jsonify({"error": "Session not found"}), 404
     return jsonify(detail)
@@ -220,7 +233,11 @@ def api_session_storage_path(session_id: str):
     """Get the storage path for a session."""
     machine = request.args.get("machine", None)
     mgr = _get_session_manager()
-    path = mgr.get_session_storage_path(session_id, machine=machine)
+    from ..acp.session_manager import InvalidPathComponent
+    try:
+        path = mgr.get_session_storage_path(session_id, machine=machine)
+    except InvalidPathComponent:
+        return _invalid_path_component_error()
     return jsonify({"path": path})
 
 

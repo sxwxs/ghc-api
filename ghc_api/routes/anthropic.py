@@ -990,7 +990,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
             usage = {}
             try:
                 anthropic_response = response.json()
-            except:
+            except ValueError:
                 anthropic_response = response.text
             cache.add_request(request_id, {
                 "request_headers": request_headers,
@@ -1042,6 +1042,12 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                     current_payload["messages"] = cleaned_messages
                     print(f"[Direct Anthropic] Retrying with cleaned messages...")
                     continue
+
+            # No payload repair applies (429, 5xx, unrelated 4xx). Resending the
+            # identical request would only duplicate load and cache entries, so
+            # stop here and return the upstream error as-is. Matches the
+            # streaming direct path and handle_translated_request().
+            break
 
     # Final failure after all retries
     if cleanup_log_entry is not None:

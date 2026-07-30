@@ -9,7 +9,7 @@ from typing import Dict, List, Any, Optional
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 PORT = int(os.environ.get("PORT", 8313))
 HOST = os.environ.get("HOST", "localhost")
-DEBUG = os.environ.get("DEBUG", "true").lower() == "true"
+DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
 
 # API Configuration
 GITHUB_API_BASE_URL = "https://api.github.com"

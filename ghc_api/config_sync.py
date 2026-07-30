@@ -26,6 +26,10 @@ TOOL_INSTALL_COMMANDS = {
     "copilot-cli": ["npm", "install", "-g", "@github/copilot"],
 }
 
+# npm can hang indefinitely on a stalled registry; without a timeout the call
+# would pin a Flask worker thread forever.
+INSTALL_COMMAND_TIMEOUT_SECONDS = 600
+
 
 SOFTWARE_VERSION_COMMANDS = [
     ("nodejs", "Node.js", [["node", "--version"]]),
@@ -635,7 +639,13 @@ def install_code_agents() -> Dict[str, object]:
             continue
 
         try:
-            proc = subprocess.run(resolved_command, capture_output=True, text=True, check=False)
+            proc = subprocess.run(
+                resolved_command,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=INSTALL_COMMAND_TIMEOUT_SECONDS,
+            )
             command_results[tool_name] = {
                 "command": " ".join(command),
                 "resolved_command": " ".join(resolved_command),

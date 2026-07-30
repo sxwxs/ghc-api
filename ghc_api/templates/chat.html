@@ -915,11 +915,13 @@
 
         function renderMarkdown(text) {
             if (!text) return '';
-            let html = text;
+            // Escape first: everything below builds HTML by string concatenation
+            // and the input is model output, which must never be trusted.
+            let html = escapeHtml(text);
 
             // Code blocks: ```lang\n...\n```
             html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-                return '<pre><code>' + escapeHtml(code.trim()) + '</code></pre>';
+                return '<pre><code>' + code.trim() + '</code></pre>';
             });
 
             // Inline code
@@ -1512,6 +1514,9 @@
             if (typeof json !== 'string') {
                 json = JSON.stringify(json, null, 2);
             }
+            // Escape before adding markup: the JSON comes from upstream/model
+            // output and the result is assigned with innerHTML.
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
                 let cls = 'json-number';
                 if (/^"/.test(match)) {

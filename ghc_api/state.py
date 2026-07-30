@@ -59,6 +59,12 @@ class State:
         self.save_request_to_file: bool = False
         self.disable_onedrive_access: bool = True
 
+        # Error/diagnostic log rotation. error.log stores full failed request
+        # bodies and grows fast; rotate it so it cannot fill the disk.
+        # backup_count 0 means "keep at most error_log_max_bytes in total".
+        self.error_log_max_bytes: int = 50 * 1024 * 1024
+        self.error_log_backup_count: int = 0
+
         # Web search proxy settings
         self.enable_web_search_proxy: bool = False
         self.web_search_proxy_endpoint: str = ""

@@ -8,6 +8,8 @@ serving as a proxy server for GitHub Copilot API with caching and monitoring cap
 
 import argparse
 import os
+from typing import Optional
+
 import yaml
 
 from . import __version__
@@ -37,8 +39,72 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+<<<<<<< Updated upstream
+=======
+def _config_int(config: dict, key: str, current: int, minimum: Optional[int] = None) -> int:
+    """Read one integer setting, keeping `current` when the value is unusable.
+
+    The whole config load runs inside a single try/except, so raising here would
+    silently skip every setting declared after this one (auth, model mappings,
+    ...). Report the bad key and keep going instead.
+    """
+    if key not in config:
+        return current
+    try:
+        value = int(config[key])
+    except (TypeError, ValueError):
+        print(f"Invalid value for '{key}' in config: {config[key]!r}; keeping {current}")
+        return current
+    if minimum is not None and value < minimum:
+        print(f"Value for '{key}' must be >= {minimum}, got {value}; keeping {current}")
+        return current
+    return value
+
+
+def _load_auth_config(config: dict) -> None:
+    """Load legacy token-only or new maglink email-auth configuration."""
+    auth_config = config.get('auth') or {}
+    if not isinstance(auth_config, dict):
+        raise ValueError("'auth' must be a mapping")
+
+    # Legacy top-level enable_auth remains API-token-only. It must not suddenly
+    # require MailDispatch/session settings after an upgrade.
+    state.enable_auth = bool(config.get('enable_auth', False))
+    state.enable_email_auth = bool(auth_config.get('enabled', False))
+    if state.enable_email_auth:
+        state.enable_auth = True
+
+    state.auth_hostname = str(auth_config.get('hostname') or '')
+    state.auth_secret_key = str(auth_config.get('secret_key') or '')
+    state.auth_allow_public_registration = bool(auth_config.get('allow_public_registration', False))
+    admin_emails = auth_config.get('admin_emails') or []
+    if not isinstance(admin_emails, list):
+        raise ValueError("'auth.admin_emails' must be a list")
+    state.auth_admin_emails = [str(value).strip().lower() for value in admin_emails if str(value).strip()]
+    state.auth_store_path = str(auth_config.get('store_path') or '')
+    state.auth_code_ttl = int(auth_config.get('code_ttl', 900))
+    state.auth_rate_max = int(auth_config.get('rate_max', 5))
+    state.auth_rate_window = int(auth_config.get('rate_window', 900))
+    state.auth_confirm_max_attempts = int(auth_config.get('confirm_max_attempts', 8))
+    state.auth_trust_proxy_headers = bool(auth_config.get('trust_proxy_headers', False))
+    maildispatch = auth_config.get('maildispatch') or {}
+    if not isinstance(maildispatch, dict):
+        raise ValueError("'auth.maildispatch' must be a mapping")
+    state.auth_maildispatch_endpoint = str(maildispatch.get('endpoint') or '')
+    state.auth_maildispatch_api_key = str(maildispatch.get('api_key') or '')
+    state.auth_maildispatch_sender_id = str(maildispatch.get('sender_id') or 'system')
+    state.auth_maildispatch_timeout = int(maildispatch.get('timeout', 10))
+
+
+>>>>>>> Stashed changes
 def main():
     """Main entry point for the application"""
+    # Server defaults. Assigned before the config load so a broken config file
+    # degrades to defaults instead of crashing with UnboundLocalError below.
+    host = 'localhost'
+    port = 8313
+    debug = DEBUG
+
     parser = argparse.ArgumentParser(description='GitHub Copilot API Proxy')
     parser.add_argument('-p', '--port', type=int, help='Port to listen on')
     parser.add_argument('-a', '--address', type=str, help='Address to listen on')
@@ -116,25 +182,36 @@ def main():
         if 'max_connection_retries' in config:
             state.max_connection_retries = config['max_connection_retries']
         if 'upstream_read_timeout' in config:
-            state.upstream_read_timeout = int(config['upstream_read_timeout'])
+            state.upstream_read_timeout = _config_int(
+                config, 'upstream_read_timeout', state.upstream_read_timeout, minimum=1)
         if 'sse_keepalive_interval' in config:
-            state.sse_keepalive_interval = int(config['sse_keepalive_interval'])
+            state.sse_keepalive_interval = _config_int(
+                config, 'sse_keepalive_interval', state.sse_keepalive_interval, minimum=0)
         if 'auto_remove_encrypted_content_on_parse_error' in config:
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
         if 'save_request_to_file' in config:
             state.save_request_to_file = bool(config['save_request_to_file'])
         if 'disable_onedrive_access' in config:
             state.disable_onedrive_access = bool(config['disable_onedrive_access'])
+        if 'error_log_max_bytes' in config:
+            state.error_log_max_bytes = _config_int(
+                config, 'error_log_max_bytes', state.error_log_max_bytes, minimum=0)
+        if 'error_log_backup_count' in config:
+            state.error_log_backup_count = _config_int(
+                config, 'error_log_backup_count', state.error_log_backup_count, minimum=0)
         if 'enable_tool_call_recovery' in config:
             state.enable_tool_call_recovery = bool(config['enable_tool_call_recovery'])
         if 'session_flush_interval' in config:
-            state.session_flush_interval = int(config['session_flush_interval'])
+            state.session_flush_interval = _config_int(
+                config, 'session_flush_interval', state.session_flush_interval, minimum=1)
 
         # Load request cache memory limits
         if 'cache_max_entries' in config:
-            state.cache_max_entries = int(config['cache_max_entries'])
+            state.cache_max_entries = _config_int(
+                config, 'cache_max_entries', state.cache_max_entries, minimum=1)
         if 'cache_max_request_size' in config:
-            state.cache_max_request_size = int(config['cache_max_request_size'])
+            state.cache_max_request_size = _config_int(
+                config, 'cache_max_request_size', state.cache_max_request_size, minimum=0)
         from .cache import cache as _request_cache
         _request_cache.max_entries = state.cache_max_entries
         _request_cache.max_request_size = state.cache_max_request_size
@@ -220,6 +297,13 @@ def main():
     print(f"OpenAI API: http://{host}:{port}/v1/chat/completions")
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
+
+    if debug and host not in ("localhost", "127.0.0.1", "::1"):
+        print("\n" + "!" * 60)
+        print("[WARNING] debug: true with a non-loopback bind address exposes the")
+        print("          Werkzeug debugger, which allows remote code execution.")
+        print("          Set debug: false in config.yaml for any shared deployment.")
+        print("!" * 60 + "\n")
 
     app.run(host=host, port=port, debug=debug, threaded=True)
 

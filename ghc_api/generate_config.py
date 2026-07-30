@@ -152,6 +152,20 @@ auto_remove_encrypted_content_on_parse_error: false
 # If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
 save_request_to_file: false
 
+# Error Log Rotation
+# ------------------
+# error.log records failed upstream requests together with their full request
+# bodies, so it grows quickly. When it reaches error_log_max_bytes it is
+# rotated. With error_log_backup_count: 0 the old file is discarded, so disk
+# usage stays under error_log_max_bytes; set it to 1 or more to keep
+# error.log.1 ... error.log.N as well. Set error_log_max_bytes to 0 to disable
+# rotation entirely (not recommended).
+# These two settings apply to every diagnostic log in this directory:
+# error.log, connection_retry.jl, and tool_result_cleanup.jl. Daily request
+# files under requests/ are not affected (they already rotate by date).
+error_log_max_bytes: 52428800
+error_log_backup_count: 0
+
 # If true, skip all OneDrive detection, sync, and OneDrive-backed shared status reads.
 # Local fallback files such as ~/.ghc-api/token_usage.jl are still used where supported.
 disable_onedrive_access: true

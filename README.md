@@ -24,10 +24,6 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
 
-## Maintenance Guides
-
-- [Anthropic Messages to Responses compatibility warning runbook](ANTHROPIC_RESPONSES_WARNING_RUNBOOK.md)
-
 ## Installation
 
 Install the package using pip:
@@ -144,6 +140,10 @@ ghc-api --github-device-login
 The Code Agent Manager shows the latest Copilot token refresh attempt/result and can start a new Device Flow. The UI displays GitHub's short user code and verification URL; the secret device code and resulting access token remain server-side. If `GITHUB_TOKEN` is set, deleting the local file does not remove that environment variable, and it will take priority again after restart.
 
 Copilot token refresh failures are appended as structured JSON lines to `error.log` in the ghc-api config directory. The upstream response body is retained for debugging up to 64 KiB; authentication headers and tokens are not logged.
+
+`error.log` also records failed upstream requests together with their full request bodies, so it is rotated automatically. It is truncated once it reaches `error_log_max_bytes` (default 50 MiB); set `error_log_backup_count` to keep `error.log.1 ... error.log.N` as well, or set `error_log_max_bytes: 0` to disable rotation.
+
+The same two settings also bound `connection_retry.jl` and `tool_result_cleanup.jl`. Since v1.0.22 these two diagnostic logs are written to the ghc-api config directory instead of the installed package directory; any old copies left inside `site-packages/ghc_api/` are no longer read and can be deleted.
 
 ### Config Sync and OneDrive
 

@@ -1,4 +1,9 @@
 Flask>=2.0.0
 requests>=2.25.0
 PyYAML>=5.4.0
+<<<<<<< Updated upstream
 tiktoken>=0.3.0
+=======
+tiktoken>=0.3.0
+maglink[flask]>=0.3.0,<0.4.0
+>>>>>>> Stashed changes

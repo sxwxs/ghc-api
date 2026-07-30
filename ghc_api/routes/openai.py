@@ -977,7 +977,7 @@ def chat_completions():
             log_error_request("/v1/chat/completions", payload, response.text, response.status_code, client_ip)
             try:
                 result = response.json()
-            except:
+            except ValueError:
                 result = response.text
             cache.add_request(request_id, {
                 "request_headers": request_headers,
@@ -1297,7 +1297,7 @@ def responses():
             usage = {}
             try:
                 result = response.json()
-            except:
+            except ValueError:
                 result = response.text
             cache.add_request(request_id, {
                 "request_headers": request_headers,

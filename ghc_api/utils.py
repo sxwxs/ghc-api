@@ -2,12 +2,65 @@ from datetime import datetime
 import json
 import os
 import platform
+import threading
 import time
 from typing import Dict, List, Optional
 
 
 from .config import model_mappings
 from .state import state
+
+
+# Serializes rotation + append so concurrent request threads cannot interleave
+# a rotation with another thread's write. This is a process-local lock: with a
+# multi-process server (e.g. gunicorn workers) a rotation in one process can
+# race another process's append, which may drop a few lines but cannot corrupt
+# the file, since every write is a single small append.
+_log_write_lock = threading.Lock()
+
+
+def _rotate_log_if_needed(log_file: str, pending_bytes: int = 0) -> None:
+    """Rotate `log_file` when appending `pending_bytes` would exceed the cap.
+
+    The cap is state.error_log_max_bytes, which bounds every diagnostic log
+    written through append_log_line() (error.log, connection_retry.jl,
+    tool_result_cleanup.jl). With error_log_backup_count == 0 (default) the
+    oversized file is simply removed, so total retention equals
+    error_log_max_bytes. With N > 0 the usual `.1 .. .N` suffix chain is kept
+    instead. Callers must hold `_log_write_lock`.
+    """
+    max_bytes = getattr(state, "error_log_max_bytes", 0) or 0
+    if max_bytes <= 0:
+        return
+    try:
+        if os.path.getsize(log_file) + pending_bytes <= max_bytes:
+            return
+    except OSError:
+        return
+
+    backup_count = max(0, getattr(state, "error_log_backup_count", 0) or 0)
+    try:
+        if backup_count == 0:
+            os.remove(log_file)
+            return
+        oldest = f"{log_file}.{backup_count}"
+        if os.path.exists(oldest):
+            os.remove(oldest)
+        for index in range(backup_count - 1, 0, -1):
+            source = f"{log_file}.{index}"
+            if os.path.exists(source):
+                os.replace(source, f"{log_file}.{index + 1}")
+        os.replace(log_file, f"{log_file}.1")
+    except OSError as exc:
+        print(f"Failed to rotate log file {log_file}: {exc}")
+
+
+def append_log_line(log_file: str, line: str) -> None:
+    """Append one line to `log_file`, rotating it first when it would overflow."""
+    with _log_write_lock:
+        _rotate_log_if_needed(log_file, len(line.encode("utf-8")))
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(line)
 
 
 def get_client_ip(request) -> str:
@@ -43,8 +96,10 @@ def log_error_request(endpoint: str, request_body: dict, response_body: str, sta
         "response": response_body,
     }
 
-    with open(log_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(log_entry) + "\n")
+    try:
+        append_log_line(log_file, json.dumps(log_entry) + "\n")
+    except Exception as exc:
+        print(f"Failed to write error log: {exc}")
 
 
 def log_upstream_error(
@@ -72,8 +127,7 @@ def log_upstream_error(
     try:
         log_dir = get_config_dir()
         os.makedirs(log_dir, exist_ok=True)
-        with open(os.path.join(log_dir, "error.log"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        append_log_line(os.path.join(log_dir, "error.log"), json.dumps(entry) + "\n")
         return True
     except Exception as exc:
         print(f"Failed to write upstream error log: {exc}")
@@ -164,8 +218,11 @@ def print_available_models():
 # Orphaned Tool Result Handling
 # ============================================================================
 
-# Log file for orphaned tool_result cleanup events
-TOOL_RESULT_CLEANUP_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_result_cleanup.jl")
+# Log file for orphaned tool_result cleanup events. Kept in the user config
+# directory -- the package install directory may be read-only (pipx, system
+# packages, containers) and must not accumulate runtime data.
+def _tool_result_cleanup_log() -> str:
+    return os.path.join(get_config_dir(), "tool_result_cleanup.jl")
 
 def log_tool_result_cleanup(log_entry: Dict) -> None:
     """
@@ -182,15 +239,16 @@ def log_tool_result_cleanup(log_entry: Dict) -> None:
     """
     try:
         log_entry["timestamp"] = datetime.now().isoformat()
-        with open(TOOL_RESULT_CLEANUP_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        os.makedirs(get_config_dir(), exist_ok=True)
+        append_log_line(_tool_result_cleanup_log(), json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[Tool Result Cleanup] Failed to write log: {e}")
 
 
 
-# Log file for connection retry events
-CONNECTION_RETRY_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection_retry.jl")
+# Log file for connection retry events (see note above about the config dir).
+def _connection_retry_log() -> str:
+    return os.path.join(get_config_dir(), "connection_retry.jl")
 
 def log_connection_retry(request_id: str, endpoint: str, attempt: int, max_retries: int, error: Exception) -> None:
     """
@@ -206,8 +264,8 @@ def log_connection_retry(request_id: str, endpoint: str, attempt: int, max_retri
             "error_type": type(error).__name__,
             "error_message": str(error),
         }
-        with open(CONNECTION_RETRY_LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+        os.makedirs(get_config_dir(), exist_ok=True)
+        append_log_line(_connection_retry_log(), json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[Connection Retry] Failed to write log: {e}")
 
@@ -229,11 +287,15 @@ def extract_orphaned_tool_use_ids(error_response: str) -> List[str]:
     start_idx = error_response.find(marker)
     if start_idx != -1:
         start_idx += len(marker)
-        # Find the end of the ID (ends with period, space, quote, or backslash)
+        # Consume the ID itself. Tool-use IDs are `toolu_` + [A-Za-z0-9_-], so
+        # stop at the first character outside that set (period, space, quote,
+        # backslash, newline, ...). Do NOT use a literal stop-character set
+        # here: ".  \"\\'\\n" also contains 'n' and '\\', which truncated every
+        # ID containing the letter 'n' (e.g. `toolu_orphan` -> `toolu_orpha`).
         end_idx = start_idx
         while end_idx < len(error_response):
             char = error_response[end_idx]
-            if char in ".  \"\\'\\n":
+            if not (char.isalnum() or char in "_-"):
                 break
             end_idx += 1
         tool_id = error_response[start_idx:end_idx].strip()

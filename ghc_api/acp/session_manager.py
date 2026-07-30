@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import queue
+import re
 import signal
 import socket
 import threading
@@ -31,6 +32,58 @@ from .connection import AgentConnection, resolve_agent_binary, _SENTINEL
 logger = logging.getLogger(__name__)
 
 _SESSION_EXT = ".jl.b64gz"
+
+# Machine names come from the UI as a query parameter and are used as a path
+# component, so restrict them to the shape produced by _local_machine_name()
+# (hostname + os label) and reject anything that could escape the sessions root.
+_MACHINE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+# Session ids are chosen by the external agent process (Claude Code, Codex,
+# ...), so their exact alphabet is not ours to define. Instead of a whitelist
+# that could reject a legitimate agent id, only require that the value stays a
+# single, non-traversing path component.
+_MAX_SESSION_ID_LEN = 200
+
+
+class InvalidPathComponent(ValueError):
+    """Raised when a user-supplied value cannot be used as a path component."""
+
+
+def _safe_machine_name(machine: Optional[str]) -> Optional[str]:
+    """Return `machine` when it is a valid single path component.
+
+    None means "local machine" and is passed through. Anything else that is not
+    a plain machine name raises, so callers surface a 400 instead of silently
+    serving local sessions under a bogus machine label.
+    """
+    if machine is None:
+        return None
+    machine = machine.strip()
+    if not machine or machine in (".", "..") or not _MACHINE_NAME_RE.match(machine):
+        raise InvalidPathComponent(f"Invalid machine name: {machine!r}")
+    return machine
+
+
+def _safe_session_id(session_id: str) -> str:
+    """Return `session_id` when it is safe to use as a file name.
+
+    Rejects path separators, traversal, absolute paths, NUL bytes, and control
+    characters, all of which would let a request escape the sessions root.
+    """
+    if not isinstance(session_id, str):
+        raise InvalidPathComponent(f"Invalid session id: {session_id!r}")
+    candidate = session_id.strip()
+    if (
+        not candidate
+        or len(candidate) > _MAX_SESSION_ID_LEN
+        or candidate in (".", "..")
+        or "/" in candidate
+        or "\\" in candidate
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate)
+        or Path(candidate).name != candidate
+    ):
+        raise InvalidPathComponent(f"Invalid session id: {session_id!r}")
+    return candidate
 
 
 def _encode_update(obj):
@@ -58,6 +111,7 @@ def _get_sessions_root(machine: Optional[str] = None) -> Path:
     from ..config_sync import get_agent_root, get_onedrive_path, onedrive_access_disabled
     from ..utils import get_config_dir
 
+    machine = _safe_machine_name(machine)
     if not onedrive_access_disabled():
         onedrive = get_onedrive_path()
         if onedrive:
@@ -178,10 +232,18 @@ class SessionManager:
         if not merged:
             return
 
+        try:
+            safe_id = _safe_session_id(session_id)
+        except InvalidPathComponent:
+            # Background writer: drop this buffer instead of raising, which
+            # would skip the remaining sessions in this flush cycle.
+            logger.warning("Dropping buffered updates for invalid session id %r", session_id)
+            return
+
         lock = self._get_file_lock(session_id)
         with lock:
             root = _get_sessions_root()
-            path = root / f"{session_id}{_SESSION_EXT}"
+            path = root / f"{safe_id}{_SESSION_EXT}"
             if not path.exists():
                 return
             try:
@@ -422,6 +484,7 @@ class SessionManager:
 
     def get_session_storage_path(self, session_id: str, machine: Optional[str] = None) -> str:
         """Get the file system path for a session's storage directory."""
+        _safe_session_id(session_id)
         return str(_get_sessions_root(machine))
 
     # --- Internal helpers ---
@@ -437,7 +500,7 @@ class SessionManager:
         """Write the session header (line 1) to a new .jl.b64gz file."""
         root = _get_sessions_root()
         root.mkdir(parents=True, exist_ok=True)
-        target = root / f"{session_id}{_SESSION_EXT}"
+        target = root / f"{_safe_session_id(session_id)}{_SESSION_EXT}"
         header = {k: v for k, v in metadata.items() if k != "messages"}
         target.write_text(_encode_update(header) + "\n", encoding="utf-8")
 
@@ -461,6 +524,7 @@ class SessionManager:
 
     def _resolve_session_path(self, session_id: str, machine: Optional[str] = None) -> Optional[Path]:
         """Find the session file path, trying new format first, then old."""
+        session_id = _safe_session_id(session_id)
         root = _get_sessions_root(machine)
         # Try new format first
         new_path = root / f"{session_id}{_SESSION_EXT}"

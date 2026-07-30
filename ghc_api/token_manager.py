@@ -41,8 +41,14 @@ def save_github_token_to_file(token: str) -> bool:
     token_file_path = get_token_file_path()
     try:
         os.makedirs(os.path.dirname(token_file_path), exist_ok=True)
-        with open(token_file_path, "w", encoding="utf-8") as f:
+        # Create with owner-only permissions; the file holds a GitHub credential.
+        fd = os.open(token_file_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(token)
+        try:
+            os.chmod(token_file_path, 0o600)  # tighten a pre-existing file too
+        except OSError:
+            pass
         print(f"Saved GitHub token to {token_file_path}")
         return True
     except Exception as exc:

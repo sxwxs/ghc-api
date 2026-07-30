@@ -248,9 +248,10 @@ def supports_direct_anthropic_api(model_id: str) -> bool:
 
 
 def supports_responses_api(model_id: str) -> bool:
-    """Check if a model supports the OpenAI Responses API (/v1/responses).
+    """Check if a model supports the OpenAI Responses API.
 
-    Returns True if the model's supported_endpoints includes "/v1/responses".
+    Returns True if the model's supported_endpoints includes "/responses"
+    (the value Copilot's model metadata reports for that endpoint).
     """
     if not state.models or not state.models.get("data"):
         return False
