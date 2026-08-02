@@ -120,8 +120,11 @@ def requests_page():
 
 @dashboard_bp.route("/chat", methods=["GET"])
 def chat_page():
-    """Serve the chat page"""
-    return render_template("chat.html")
+    """Serve the chat page."""
+    return render_template(
+        "chat.html",
+        webiq_available=bool(state.enable_webiq_search and state.webiq_api_key),
+    )
 
 
 @dashboard_bp.route("/code-agent-manager", methods=["GET"])

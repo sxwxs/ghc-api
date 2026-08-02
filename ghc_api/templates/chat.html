@@ -668,9 +668,13 @@
                     <button id="mode-chat" class="active" onclick="setRawMode(false)">Chat</button>
                     <button id="mode-raw" onclick="setRawMode(true)">Raw</button>
                 </div>
-                <label class="web-search-toggle" id="web-search-toggle" title="Available for GPT models using the Responses API">
+                <label class="web-search-toggle" id="web-search-toggle" title="GitHub native search for GPT Responses models">
                     <input type="checkbox" id="web-search-enabled" onchange="onWebSearchChange()">
-                    Web search
+                    Native web search
+                </label>
+                <label class="web-search-toggle" id="webiq-search-toggle" title="Search with Microsoft Web IQ">
+                    <input type="checkbox" id="webiq-search-enabled" onchange="onWebIqSearchChange()">
+                    Use Web IQ
                 </label>
             </div>
             <div class="messages-container" id="messages-container">
@@ -689,6 +693,8 @@
         const STORAGE_KEY = 'ghc_chat_sessions';
         const MODEL_KEY = 'ghc_chat_last_model';
         const WEB_SEARCH_KEY = 'ghc_chat_web_search_enabled';
+        const WEBIQ_SEARCH_KEY = 'ghc_chat_webiq_search_enabled';
+        const WEBIQ_AVAILABLE = {{ webiq_available | tojson }};
 
         let sessions = [];
         let activeSessionId = null;
@@ -1086,19 +1092,57 @@
             checkbox.disabled = !available;
             toggle.classList.toggle('unavailable', !available);
             toggle.title = available
-                ? 'Use the Responses API web_search tool for this request'
+                ? 'Use GitHub native Responses API web_search for this request'
                 : rawMode
                     ? 'Web search is available in Chat mode only'
-                    : 'Web search requires a GPT model with Responses API support';
+                    : 'Native web search requires a GPT model with Responses API support';
+            updateWebIqAvailability();
         }
 
         function onWebSearchChange() {
             const enabled = document.getElementById('web-search-enabled').checked;
+            if (enabled) {
+                document.getElementById('webiq-search-enabled').checked = false;
+                localStorage.setItem(WEBIQ_SEARCH_KEY, 'false');
+            }
             localStorage.setItem(WEB_SEARCH_KEY, enabled ? 'true' : 'false');
         }
 
         function isWebSearchEnabled(modelId) {
             return canUseWebSearch(modelId) && document.getElementById('web-search-enabled').checked;
+        }
+
+        function canUseWebIq(modelId) {
+            return !rawMode && !!modelId && WEBIQ_AVAILABLE;
+        }
+
+        function updateWebIqAvailability() {
+            const checkbox = document.getElementById('webiq-search-enabled');
+            const toggle = document.getElementById('webiq-search-toggle');
+            const model = document.getElementById('model-select').value;
+            const available = canUseWebIq(model);
+            checkbox.disabled = !available;
+            toggle.classList.toggle('unavailable', !available);
+            toggle.title = available
+                ? 'Ground this request with Microsoft Web IQ search results'
+                : rawMode
+                    ? 'Web IQ is available in Chat mode only'
+                    : WEBIQ_AVAILABLE
+                        ? 'Select a model first'
+                        : 'Microsoft Web IQ is not configured on the server';
+        }
+
+        function onWebIqSearchChange() {
+            const enabled = document.getElementById('webiq-search-enabled').checked;
+            if (enabled) {
+                document.getElementById('web-search-enabled').checked = false;
+                localStorage.setItem(WEB_SEARCH_KEY, 'false');
+            }
+            localStorage.setItem(WEBIQ_SEARCH_KEY, enabled ? 'true' : 'false');
+        }
+
+        function isWebIqSearchEnabled(modelId) {
+            return canUseWebIq(modelId) && document.getElementById('webiq-search-enabled').checked;
         }
 
         // ---- Sending messages ----
@@ -1143,7 +1187,9 @@
             // Create assistant message placeholder
             const assistantDiv = appendMessageEl('assistant', '');
             const contentDiv = assistantDiv.querySelector('.message-content');
-            contentDiv.innerHTML = '<span class="typing-indicator">Thinking</span>';
+            contentDiv.innerHTML = isWebIqSearchEnabled(model)
+                ? '<span class="typing-indicator">Searching with Web IQ</span>'
+                : '<span class="typing-indicator">Thinking</span>';
             scrollToBottom();
 
             isStreaming = true;
@@ -1218,6 +1264,9 @@
             if (isWebSearchEnabled(model)) {
                 body.tools = [{ type: 'web_search' }];
                 body.tool_choice = 'auto';
+            }
+            if (isWebIqSearchEnabled(model)) {
+                body.webiq_search_options = { enabled: true };
             }
 
             const res = await fetch('/v1/responses', {
@@ -1384,14 +1433,19 @@
                 content: m.content,
             }));
 
+            const body = {
+                model: model,
+                messages: msgs,
+                stream: true,
+            };
+            if (isWebIqSearchEnabled(model)) {
+                body.webiq_search_options = { enabled: true };
+            }
+
             const res = await fetch('/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    model: model,
-                    messages: msgs,
-                    stream: true,
-                }),
+                body: JSON.stringify(body),
                 signal: abortController.signal,
             });
 
@@ -1704,8 +1758,15 @@
 
         loadSessions();
         const savedWebSearchSetting = localStorage.getItem(WEB_SEARCH_KEY);
+        const savedWebIqSearchSetting = localStorage.getItem(WEBIQ_SEARCH_KEY);
         document.getElementById('web-search-enabled').checked =
             savedWebSearchSetting === null || savedWebSearchSetting === 'true';
+        document.getElementById('webiq-search-enabled').checked =
+            savedWebIqSearchSetting === 'true';
+        // Avoid restoring two mutually exclusive providers from old browser state.
+        if (document.getElementById('webiq-search-enabled').checked) {
+            document.getElementById('web-search-enabled').checked = false;
+        }
         updateWebSearchAvailability();
         renderSessionList();
         renderMessages();

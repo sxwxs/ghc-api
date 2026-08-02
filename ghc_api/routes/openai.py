@@ -30,6 +30,7 @@ from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
 from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error, get_client_ip
+from ..web_search import WebIQSearchError, apply_webiq_search
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -1013,6 +1014,13 @@ def chat_completions():
             payload = dict(payload)
             payload["model"] = translated_model
 
+        # Web IQ is a proxy-side grounding option. Consume it before routing so
+        # neither the option nor the API key ever reaches Copilot.
+        try:
+            payload = apply_webiq_search(payload, "chat", state)
+        except WebIQSearchError as exc:
+            return jsonify({"error": {"message": str(exc), "type": "webiq_search_error"}}), exc.status_code
+
         # Check for vision content
         enable_vision = False
         for msg in payload.get("messages", []):
@@ -1324,6 +1332,11 @@ def responses():
         if translated_model != original_model:
             payload = dict(payload)
             payload["model"] = translated_model
+
+        try:
+            payload = apply_webiq_search(payload, "responses", state)
+        except WebIQSearchError as exc:
+            return jsonify({"error": {"message": str(exc), "type": "webiq_search_error"}}), exc.status_code
 
         # Check if this model supports the Responses API
         if not supports_responses_api(translated_model):

@@ -204,6 +204,22 @@ cache_max_request_size: 1048576
 enable_web_search_proxy: false
 web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
+# Microsoft Web IQ Search
+# -----------------------
+# Enables application-side web grounding for models that do not have GitHub's
+# native web_search tool. The key stays on this server and is not sent to the UI.
+# passage format is recommended because full HTML can consume many model tokens.
+enable_webiq_search: false
+webiq_api_key: ""
+webiq_endpoint: "https://api.microsoftol.com/v3/search/web"
+webiq_max_results: 5
+webiq_max_length: 3000
+webiq_content_format: "passage"
+webiq_language: "en"
+webiq_region: "US"
+webiq_safe_search: "strict"
+webiq_timeout: 30
+
 # User Authentication
 # -------------------
 # When true, the LLM API endpoints (/v1/chat/completions, /v1/messages, /v1/responses,
