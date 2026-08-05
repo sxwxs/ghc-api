@@ -57,6 +57,7 @@ By default, the server will start on `http://localhost:8313`.
 - `-p PORT` or `--port PORT`: Specify the port to listen on (default: 8313)
 - `-a ADDRESS` or `--address ADDRESS`: Specify the address to listen on (default: localhost)
 - `-c` or `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
+- `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
 - `-v` or `--version`: Show version (for example `ghc-api 1.0.22`)
@@ -80,6 +81,14 @@ debug: false
 # GitHub Copilot Account Type
 # Options: "individual", "business", "enterprise"
 account_type: individual
+
+# Optional upstream endpoint overrides. Leave empty for github.com.
+github_api_base_url: ""
+copilot_api_base_url: ""
+
+# GitHub Enterprise Cloud with data residency example:
+# github_api_base_url: "https://api.octocorp.ghe.com"
+# copilot_api_base_url: "https://copilot-api.octocorp.ghe.com"
 
 # Version settings (used to build request headers)
 vscode_version: "1.93.0"
@@ -135,6 +144,30 @@ sse_keepalive_interval: 30    # Send a keepalive ping to the client when a strea
 ```
 
 ### Token Management
+
+For GitHub Enterprise Cloud with data residency, switch both upstream endpoints with one command:
+
+```bash
+ghc-api --ghe-endpoint https://octocorp.ghe.com
+```
+
+The command accepts the tenant web host, GitHub API host, or Copilot API host, and normalizes all of these forms to the same configuration:
+
+```text
+octocorp.ghe.com
+https://octocorp.ghe.com
+https://api.octocorp.ghe.com
+https://copilot-api.octocorp.ghe.com
+```
+
+It updates `config.yaml` while preserving its other settings and comments:
+
+```yaml
+github_api_base_url: "https://api.octocorp.ghe.com"
+copilot_api_base_url: "https://copilot-api.octocorp.ghe.com"
+```
+
+GitHub API and Copilot requests use these values directly. Device Flow derives the OAuth origin by removing the `api.` prefix, so the example above signs in through `https://octocorp.ghe.com`. Restart a running server after switching; run `ghc-api --github-device-login` if the new tenant requires a different token. Invalid or non-HTTPS GHE URLs fail explicitly rather than falling back to github.com.
 
 The application follows this priority for getting the GitHub token:
 

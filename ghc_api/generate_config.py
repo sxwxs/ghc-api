@@ -33,7 +33,18 @@ debug: false
 account_type: individual
 
 # Optional upstream URL overrides. Leave empty for the normal GitHub services.
-# Local E2E benchmarks use loopback endpoints so no request reaches GitHub.
+#
+# GitHub Enterprise Cloud with data residency example:
+#   ghc-api --ghe-endpoint https://octocorp.ghe.com
+#
+# The command sets:
+#   github_api_base_url: "https://api.octocorp.ghe.com"
+#   copilot_api_base_url: "https://copilot-api.octocorp.ghe.com"
+#
+# Device Flow derives https://octocorp.ghe.com from the GitHub API URL, so the
+# GitHub API override must use the https://api.<tenant>.ghe.com form.
+# Local E2E benchmarks may also use loopback endpoints; Device Flow is disabled
+# for overrides whose GitHub OAuth origin cannot be derived safely.
 github_api_base_url: ""
 copilot_api_base_url: ""
 
