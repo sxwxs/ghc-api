@@ -81,11 +81,13 @@ def log_upstream_error(
 
 
 def get_config_dir():
-    """Get the config directory path based on the OS"""
+    """Get the config directory path based on an override or the OS default."""
+    override = os.environ.get("GHC_API_CONFIG_DIR")
+    if override:
+        return os.path.abspath(os.path.expanduser(os.path.expandvars(override)))
     if platform.system() == "Windows":
         return os.path.expandvars("%APPDATA%/ghc-api")
-    else:
-        return os.path.expanduser("~/.ghc-api")
+    return os.path.expanduser("~/.ghc-api")
 
 
 def print_model_mappings():
