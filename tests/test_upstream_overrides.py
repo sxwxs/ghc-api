@@ -91,6 +91,18 @@ def test_configure_ghe_endpoint_creates_minimal_config_when_missing(tmp_path):
     }
 
 
+def test_configure_ghe_endpoint_accepts_filename_without_parent_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    configure_ghe_endpoint("config.yaml", "octocorp.ghe.com")
+
+    config = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert config["github_api_base_url"] == "https://api.octocorp.ghe.com"
+    assert config["copilot_api_base_url"] == "https://copilot-api.octocorp.ghe.com"
+
+
 def test_github_web_base_url_defaults_to_github_com():
     old = state.github_api_base_url
     try:

@@ -82,8 +82,11 @@ def update_top_level_config_values(config_path: str, updates: dict[str, str]) ->
         for key, value in remaining.items():
             lines.append(f"{key}: {json.dumps(value)}\n")
 
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(prefix=".config.", suffix=".yaml.tmp", dir=os.path.dirname(config_path))
+    config_dir = os.path.dirname(config_path) or "."
+    os.makedirs(config_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=".config.", suffix=".yaml.tmp", dir=config_dir
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.writelines(lines)
