@@ -87,8 +87,9 @@ def _sse(events: Iterable[Dict], options: Dict, anthropic: bool = False) -> Resp
             first = False
             if delay_ms:
                 time.sleep(delay_ms / 1000.0)
-            event_type = event.get("type", "")
-            yield f"event: {event_type}\ndata: {json.dumps(event, separators=(',', ':'))}\n\n"
+            event_type = event.get("type")
+            event_header = f"event: {event_type}\n" if event_type else ""
+            yield f"{event_header}data: {json.dumps(event, separators=(',', ':'))}\n\n"
         if not anthropic:
             yield "data: [DONE]\n\n"
 
