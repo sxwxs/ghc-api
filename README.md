@@ -4,7 +4,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Features
 
-- **OpenAI API Compatibility**: `/v1/chat/completions` endpoint
+- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` endpoints
 - **Anthropic API Compatibility**: `/v1/messages` endpoint with automatic request/response translation
 - **Model Listing**: `/v1/models` endpoint listing available models
 - **Model Name Mapping**: Translate model names with exact and prefix-based matching
@@ -57,9 +57,10 @@ By default, the server will start on `http://localhost:8313`.
 - `-p PORT` or `--port PORT`: Specify the port to listen on (default: 8313)
 - `-a ADDRESS` or `--address ADDRESS`: Specify the address to listen on (default: localhost)
 - `-c` or `--config`: Generate a YAML config file in `~/.ghc-api/config.yaml`
+- `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.21`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.22`)
 - `--help`: Show help message
 
 ### Configuration
@@ -80,6 +81,14 @@ debug: false
 # GitHub Copilot Account Type
 # Options: "individual", "business", "enterprise"
 account_type: individual
+
+# Optional upstream endpoint overrides. Leave empty for github.com.
+github_api_base_url: ""
+copilot_api_base_url: ""
+
+# GitHub Enterprise Cloud with data residency example:
+# github_api_base_url: "https://api.octocorp.ghe.com"
+# copilot_api_base_url: "https://copilot-api.octocorp.ghe.com"
 
 # Version settings (used to build request headers)
 vscode_version: "1.93.0"
@@ -119,14 +128,75 @@ disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared
 # Optional leaked tool-call recovery (direct Anthropic /v1/messages streaming)
 enable_tool_call_recovery: false # If true, recover tool calls Copilot leaks as plain text
 
+# Retry /v1/responses streams that fail before any output (enabled by default)
+enable_responses_early_failure_retry: true # Transparently retry a stream that returns
+                              # HTTP 200 then response.failed before any text, reasoning,
+                              # or tool call. Retries stop once real output has been sent
+                              # (never duplicates content) and are capped by
+                              # max_connection_retries. Each retry costs upstream quota.
+                              # Set false to disable.
+
 # Streaming reliability
 upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot request
 sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
                               # this many seconds (keeps clients like Claude Code from
                               # timing out while the model "thinks"). Set 0 to disable.
+
+# Recover from undecryptable encrypted content (disabled by default)
+auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
+                              # because encrypted reasoning or tool output content cannot
+                              # be decrypted, clean request.input and retry once.
+                              # Lossy; see "Encrypted Content Recovery" below.
 ```
 
+### Encrypted Content Recovery
+
+Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 because encrypted
+reasoning blobs (`encrypted_content` on a `reasoning` item) or encrypted tool output can no
+longer be decrypted — typically after a token rotation or a server-side key change. The
+conversation is then permanently stuck: every follow-up turn replays the same history and
+fails again.
+
+Set `auto_remove_encrypted_content_on_parse_error: true` to let ghc-api react to such a 400
+exactly once per request:
+
+- Items whose encrypted payload *is* the content (reasoning items, messages) are dropped.
+- Tool output items (`function_call_output`, `custom_tool_call_output`, ...) are **kept** with
+  their encrypted blocks stripped and a placeholder body, so the paired `function_call` is not
+  orphaned (removing them would make the retry fail with "No tool output found for function call").
+- If a tool *call* itself must be dropped, its paired output is dropped with it.
+- The cleaned request is retried once; the retry does not consume the connection-retry budget,
+  and a second identical failure is returned to the client as-is.
+
+The option is **off by default** because it is lossy — the model loses that reasoning/tool
+context — and costs one extra upstream request. Every recovery is counted
+(`mod.encrypted_content_removal`) and logged.
+
 ### Token Management
+
+For GitHub Enterprise Cloud with data residency, switch both upstream endpoints with one command:
+
+```bash
+ghc-api --ghe-endpoint https://octocorp.ghe.com
+```
+
+The command accepts the tenant web host, GitHub API host, or Copilot API host, and normalizes all of these forms to the same configuration:
+
+```text
+octocorp.ghe.com
+https://octocorp.ghe.com
+https://api.octocorp.ghe.com
+https://copilot-api.octocorp.ghe.com
+```
+
+It updates `config.yaml` while preserving its other settings and comments:
+
+```yaml
+github_api_base_url: "https://api.octocorp.ghe.com"
+copilot_api_base_url: "https://copilot-api.octocorp.ghe.com"
+```
+
+GitHub API and Copilot requests use these values directly. Device Flow derives the OAuth origin by removing the `api.` prefix, so the example above signs in through `https://octocorp.ghe.com`. Restart a running server after switching; run `ghc-api --github-device-login` if the new tenant requires a different token. Invalid or non-HTTPS GHE URLs fail explicitly rather than falling back to github.com.
 
 The application follows this priority for getting the GitHub token:
 
@@ -240,7 +310,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, plus their non-`/v1` aliases) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, plus their non-`/v1` aliases) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -313,6 +383,8 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 
 - `POST /v1/chat/completions` - Chat completions
 - `POST /chat/completions` - Chat completions (without v1 prefix)
+- `POST /v1/embeddings` - Create embeddings
+- `POST /embeddings` - Create embeddings (without v1 prefix)
 - `GET /v1/models` - List available models
 - `GET /models` - List available models (without v1 prefix)
 
@@ -458,7 +530,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |

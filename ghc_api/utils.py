@@ -3,7 +3,7 @@ import json
 import os
 import platform
 import time
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 from .config import model_mappings
@@ -81,11 +81,13 @@ def log_upstream_error(
 
 
 def get_config_dir():
-    """Get the config directory path based on the OS"""
+    """Get the config directory path based on an override or the OS default."""
+    override = os.environ.get("GHC_API_CONFIG_DIR")
+    if override:
+        return os.path.abspath(os.path.expanduser(os.path.expandvars(override)))
     if platform.system() == "Windows":
         return os.path.expandvars("%APPDATA%/ghc-api")
-    else:
-        return os.path.expanduser("~/.ghc-api")
+    return os.path.expanduser("~/.ghc-api")
 
 
 def print_model_mappings():
@@ -319,12 +321,164 @@ def is_orphaned_tool_result_error(status_code: int, response_text: str) -> bool:
     return "tool_use_id" in response_text and "tool_result" in response_text
 
 
+# Guard against pathological nesting while scanning arbitrary client payloads.
+_MAX_ENCRYPTED_SCAN_DEPTH = 32
+
+_TOOL_CALL_ITEM_TYPES = frozenset({
+    "function_call",
+    "custom_tool_call",
+    "computer_call",
+    "local_shell_call",
+})
+
+_TOOL_OUTPUT_ITEM_TYPES = frozenset({
+    "function_call_output",
+    "custom_tool_call_output",
+    "computer_call_output",
+    "local_shell_call_output",
+})
+
+_REMOVED_TOOL_OUTPUT_PLACEHOLDER = (
+    "[ghc-api] tool output omitted: encrypted content could not be decrypted upstream"
+)
+
+
 def is_encrypted_content_parse_error(status_code: int, response_text: str) -> bool:
     """Check if the error indicates encrypted content cannot be decrypted or parsed"""
     if status_code != 400:
         return False
 
-    prefix = '{"error":{"message":"The encrypted content '
-    suffix = ' could not be verified. Reason: Encrypted content could not be decrypted or parsed.","code":"invalid_request_body"}}'
-    stripped = response_text.strip()
-    return stripped.startswith(prefix) and stripped.endswith(suffix)
+    try:
+        error = json.loads(response_text).get("error", {})
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return False
+
+    if not isinstance(error, dict) or error.get("code") != "invalid_request_body":
+        return False
+
+    message = error.get("message", "")
+    if not isinstance(message, str):
+        return False
+
+    normalized = message.lower()
+    return (
+        (
+            normalized.startswith("the encrypted content ")
+            and normalized.endswith(
+                " could not be verified. reason: encrypted content could not be decrypted or parsed."
+            )
+        )
+        or normalized == "encrypted function output content could not be decrypted or decoded."
+    )
+
+
+def _contains_encrypted_content(value: Any, depth: int = 0) -> bool:
+    if depth > _MAX_ENCRYPTED_SCAN_DEPTH:
+        return False
+    if isinstance(value, dict):
+        if "encrypted_content" in value:
+            return True
+        return any(_contains_encrypted_content(child, depth + 1) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_encrypted_content(child, depth + 1) for child in value)
+    return False
+
+
+def _strip_encrypted_content(value: Any, depth: int = 0) -> Tuple[Any, bool]:
+    """Remove encrypted payloads while keeping the surrounding item structure intact."""
+    if depth > _MAX_ENCRYPTED_SCAN_DEPTH:
+        return value, False
+
+    if isinstance(value, dict):
+        changed = "encrypted_content" in value
+        result = {}
+        for key, child in value.items():
+            if key == "encrypted_content":
+                continue
+            new_child, child_changed = _strip_encrypted_content(child, depth + 1)
+            changed = changed or child_changed
+            result[key] = new_child
+        return result, changed
+
+    if isinstance(value, list):
+        changed = False
+        result = []
+        for element in value:
+            # A content block that carries encrypted data is meaningless once the
+            # payload is gone, so drop the block rather than leaving a husk behind.
+            if isinstance(element, dict) and _contains_encrypted_content(element, depth + 1):
+                changed = True
+                continue
+            new_element, element_changed = _strip_encrypted_content(element, depth + 1)
+            changed = changed or element_changed
+            result.append(new_element)
+        return result, changed
+
+    return value, False
+
+
+def _ensure_tool_output_present(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep a tool output item structurally valid after its content was stripped."""
+    output = item.get("output")
+    if isinstance(output, list):
+        if not output:
+            item["output"] = [{"type": "output_text", "text": _REMOVED_TOOL_OUTPUT_PLACEHOLDER}]
+    elif isinstance(output, str):
+        if not output.strip():
+            item["output"] = _REMOVED_TOOL_OUTPUT_PLACEHOLDER
+    elif output is None:
+        item["output"] = _REMOVED_TOOL_OUTPUT_PLACEHOLDER
+    return item
+
+
+def remove_encrypted_content_items(request_input: Any) -> Tuple[Any, int]:
+    """Strip encrypted content from Responses input, preserving tool-call pairing.
+
+    Encrypted data appears either directly on a reasoning item or nested inside tool
+    output content blocks. Dropping a whole ``function_call_output`` would orphan its
+    ``function_call`` and make the retry fail with "No tool output found for function
+    call", so tool outputs are sanitized in place (with a placeholder body) instead of
+    being deleted. Any other item carrying encrypted content is removed outright, and
+    if a tool *call* itself has to go, its paired output is removed with it.
+
+    Returns the cleaned input and the number of items that were removed or rewritten.
+    """
+    if not isinstance(request_input, list):
+        return request_input, 0
+
+    cleaned_input: List[Any] = []
+    changed_count = 0
+    dropped_call_ids = set()
+
+    for item in request_input:
+        if not isinstance(item, dict) or not _contains_encrypted_content(item):
+            cleaned_input.append(item)
+            continue
+
+        item_type = item.get("type")
+        if item_type in _TOOL_OUTPUT_ITEM_TYPES:
+            sanitized, _ = _strip_encrypted_content(item)
+            cleaned_input.append(_ensure_tool_output_present(sanitized))
+            changed_count += 1
+            continue
+
+        changed_count += 1
+        if item_type in _TOOL_CALL_ITEM_TYPES:
+            call_id = item.get("call_id") or item.get("id")
+            if isinstance(call_id, str):
+                dropped_call_ids.add(call_id)
+
+    if dropped_call_ids:
+        paired: List[Any] = []
+        for item in cleaned_input:
+            if (
+                isinstance(item, dict)
+                and item.get("type") in _TOOL_OUTPUT_ITEM_TYPES
+                and item.get("call_id") in dropped_call_ids
+            ):
+                changed_count += 1
+                continue
+            paired.append(item)
+        cleaned_input = paired
+
+    return cleaned_input, changed_count

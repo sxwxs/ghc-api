@@ -21,6 +21,10 @@ class State:
         self.copilot_token: Optional[str] = None
         self.models: Optional[Dict] = None
         self.account_type: str = "individual"
+        # Optional upstream URL overrides. Empty values preserve the normal
+        # GitHub/Copilot account-type routing; benchmarks use loopback URLs.
+        self.github_api_base_url: str = ""
+        self.copilot_api_base_url: str = ""
         self.token_expires_at: float = 0
         self.token_lock = threading.Lock()
         self.token_refresh_last_attempt_at: Optional[float] = None
@@ -68,6 +72,14 @@ class State:
         self.anthropic_responses_replay_require_trusted_tenant: bool = True
         self.anthropic_responses_replay_trusted_single_user: bool = False
 
+        # Copilot intermittently answers /v1/responses with HTTP 200 whose SSE body is
+        # just response.created followed by response.failed, before any model output.
+        # When enabled, such a stream is transparently retried (up to
+        # max_connection_retries) as long as nothing has been forwarded to the client
+        # yet. Enabled by default; it can be disabled to hand the upstream response
+        # object to the stream handler untouched (see ghc_api/sse/openai_responses.py).
+        self.enable_responses_early_failure_retry: bool = True
+
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
 
@@ -78,6 +90,10 @@ class State:
         # SSE keepalive: when a stream is idle this many seconds, emit a keepalive
         # ping to the client so its read timeout does not fire. 0 disables.
         self.sse_keepalive_interval: int = 30
+        # When /v1/responses rejects a request because encrypted reasoning or tool
+        # output content cannot be decrypted, clean the input and retry once instead
+        # of surfacing the 400. Lossy by design (see remove_encrypted_content_items),
+        # so it is opt-in.
         self.auto_remove_encrypted_content_on_parse_error: bool = False
         self.save_request_to_file: bool = False
         self.disable_onedrive_access: bool = True
@@ -87,8 +103,8 @@ class State:
         self.web_search_proxy_endpoint: str = ""
 
         # User authentication settings
-        # When True, /v1/chat/completions, /v1/messages, /v1/responses, /v1/models
-        # require an approved token from the user registry (users.json).
+        # When True, /v1/chat/completions, /v1/messages, /v1/responses,
+        # /v1/embeddings, and /v1/models require an approved user token.
         # When False (default), all requests are tagged with user_id="anonymous"
         # and no auth check is performed.
         self.enable_auth: bool = False

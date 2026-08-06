@@ -32,6 +32,22 @@ debug: false
 #                   Uses: https://api.enterprise.githubcopilot.com
 account_type: individual
 
+# Optional upstream URL overrides. Leave empty for the normal GitHub services.
+#
+# GitHub Enterprise Cloud with data residency example:
+#   ghc-api --ghe-endpoint https://octocorp.ghe.com
+#
+# The command sets:
+#   github_api_base_url: "https://api.octocorp.ghe.com"
+#   copilot_api_base_url: "https://copilot-api.octocorp.ghe.com"
+#
+# Device Flow derives https://octocorp.ghe.com from the GitHub API URL, so the
+# GitHub API override must use the https://api.<tenant>.ghe.com form.
+# Local E2E benchmarks may also use loopback endpoints; Device Flow is disabled
+# for overrides whose GitHub OAuth origin cannot be derived safely.
+github_api_base_url: ""
+copilot_api_base_url: ""
+
 # VSCode Version (only used to build request headers)
 vscode_version: "{vscode_version}"
 # GitHub API version to use (only used to build request headers)
@@ -143,10 +159,12 @@ upstream_read_timeout: 1800
 # before emitting the first token. Set to 0 to disable keepalive.
 sse_keepalive_interval: 30
 
-# If true, when /v1/responses gets HTTP 400 with message that starts with
-# "The encrypted content" and ends with
-# "Reason: Encrypted content could not be decrypted or parsed.",
-# all items containing "encrypted_content" in request.input are removed and retried once.
+# If true, when /v1/responses gets HTTP 400 because encrypted reasoning or function
+# output content cannot be decrypted, the request is cleaned and retried exactly once:
+# reasoning/message items carrying encrypted_content are dropped, while tool output
+# items (function_call_output etc.) keep their place with a placeholder body so the
+# paired function_call is not orphaned. This loses context and costs one extra upstream
+# request, so it is disabled by default.
 auto_remove_encrypted_content_on_parse_error: false
 
 # If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
@@ -209,6 +227,13 @@ anthropic_responses_replay_encryption_key_env: GHC_REPLAY_ENCRYPTION_KEY
 # it explicitly treats anonymous traffic as one trusted tenant.
 anthropic_responses_replay_require_trusted_tenant: true
 anthropic_responses_replay_trusted_single_user: false
+
+# If true, transparently retry a /v1/responses stream that returns HTTP 200 but emits
+# response.failed before any model output (text, reasoning, or tool call). Retries stop
+# as soon as real output has been forwarded, so content is never duplicated, and are
+# capped by max_connection_retries. Each retry is a fresh upstream request and consumes
+# quota. Enabled by default; set false to forward the upstream stream untouched.
+enable_responses_early_failure_retry: true
 
 # Session File Flush Interval
 # ---------------------------

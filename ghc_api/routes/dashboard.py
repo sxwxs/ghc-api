@@ -21,6 +21,11 @@ from ..config_sync import (
     sync_local_to_onedrive,
     sync_onedrive_to_local,
 )
+from ..api_helpers import (
+    get_copilot_base_url,
+    get_github_api_base_url,
+    get_github_web_base_url,
+)
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
 from ..token_usage_reporter import get_token_usage_overview
@@ -453,7 +458,18 @@ def api_runtime_config_update():
 @dashboard_bp.route("/api/config-manager/token-status", methods=["GET"])
 def api_config_manager_token_status():
     """Return Copilot refresh state and the active web Device Flow session."""
+    github_oauth_base_url = None
+    github_device_flow_error = None
+    try:
+        github_oauth_base_url = get_github_web_base_url()
+    except ValueError as exc:
+        github_device_flow_error = str(exc)
+
     return jsonify({
+        "github_api_base_url": get_github_api_base_url(),
+        "github_oauth_base_url": github_oauth_base_url,
+        "github_device_flow_error": github_device_flow_error,
+        "copilot_api_base_url": get_copilot_base_url(),
         "github_token_configured": bool(state.github_token),
         "github_token_source": state.github_token_source,
         "local_token_file_exists": os.path.exists(get_token_file_path()),

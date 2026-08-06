@@ -6,13 +6,19 @@ subclass since the base alone has no concrete endpoint string.
 """
 
 import json
+import threading
+import time
 import unittest
 from unittest import mock
 
 import requests
 
 from ghc_api.cache import RequestCache
-from ghc_api.sse import AnthropicDirectStreamHandler, OpenAIResponsesStreamHandler
+from ghc_api.sse import (
+    AnthropicDirectStreamHandler,
+    OpenAIResponsesStreamHandler,
+    RetryingResponsesResponse,
+)
 from ghc_api.sse import base as base_module
 
 
@@ -24,6 +30,7 @@ class _FakeResponse:
         self.status_code = status_code
         self.ok = status_code < 400
         self.text = ""
+        self.closed = False
 
     def iter_lines(self):
         for line in self._lines:
@@ -32,7 +39,7 @@ class _FakeResponse:
             yield line
 
     def close(self):
-        pass
+        self.closed = True
 
 
 def _collect(generator):
@@ -253,6 +260,174 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
         self.assertEqual(entry["input_tokens"], 12)
         self.assertEqual(entry["output_tokens"], 4)
         self.assertEqual(entry["cache_creation_input_tokens"], 2)
+
+    def test_terminal_response_failed_is_recorded_as_error(self):
+        failed = json.dumps({
+            "type": "response.failed",
+            "response": {"error": None, "status": "failed"},
+        })
+        handler = OpenAIResponsesStreamHandler(
+            response=_FakeResponse([
+                b"event: response.failed",
+                f"data: {failed}".encode(),
+            ]),
+            request_id="req-failed",
+            request_size=10,
+            start_time=0.0,
+            original_model="gpt-5",
+            translated_model="gpt-5",
+            request_body_for_cache={"model": "gpt-5"},
+        )
+
+        _collect(handler._generate())
+
+        entry = self.cache.get_request("req-failed")
+        self.assertEqual(entry["status_code"], 502)
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+
+
+class _LazyStreamResponse:
+    """A ``requests.Response`` stand-in with real streaming semantics.
+
+    ``_FakeResponse`` above has a plain ``text = ""`` attribute, so it cannot
+    catch code that eagerly reads ``.text``. On a real ``stream=True`` response
+    ``.text`` goes through ``.content``, which drains the socket and blocks
+    until the upstream is done -- destroying streaming. This double reproduces
+    that: reading ``.text`` consumes the line iterator and records the access.
+    """
+
+    def __init__(self, lines):
+        self._lines = iter(lines)
+        self._buffered = []
+        self.status_code = 200
+        self.ok = True
+        self.text_accessed = False
+        self.closed = False
+
+    @property
+    def text(self):
+        self.text_accessed = True
+        self._buffered.extend(self._lines)  # blocks until upstream finishes
+        return b"\n".join(self._buffered).decode()
+
+    def iter_lines(self):
+        buffered, self._buffered = self._buffered, []
+        yield from buffered
+        yield from self._lines
+
+    def close(self):
+        self.closed = True
+
+
+class RetryingResponsesResponseTest(unittest.TestCase):
+    @staticmethod
+    def _event(event_type, **extra):
+        return f'data: {json.dumps({"type": event_type, **extra})}'.encode()
+
+    def test_construction_does_not_read_the_streaming_body(self):
+        """The wrapper is built inside the request handler, before Flask starts
+        iterating. Touching ``.text`` there would block the route until the
+        model finished generating and buffer the whole response in memory.
+        """
+        upstream = _LazyStreamResponse([self._event("response.created")])
+
+        wrapper = RetryingResponsesResponse(upstream, mock.Mock(), 1, "req-lazy")
+
+        self.assertFalse(
+            upstream.text_accessed,
+            "RetryingResponsesResponse must not read response.text; on a real "
+            "streaming response that drains the body and kills streaming",
+        )
+        self.assertEqual(wrapper.status_code, 200)
+        self.assertTrue(wrapper.ok)
+
+    def test_output_reaches_the_client_before_upstream_finishes(self):
+        """End-to-end liveness: a delta must be forwarded while the upstream is
+        still generating, not after the stream closes.
+        """
+        upstream_still_generating = threading.Event()
+
+        def lines():
+            yield self._event("response.output_text.delta", delta="first")
+            # Upstream keeps the connection open while the model thinks.
+            upstream_still_generating.wait(10)
+            yield self._event("response.output_text.delta", delta="second")
+
+        upstream = _LazyStreamResponse(lines())
+        wrapper = RetryingResponsesResponse(upstream, mock.Mock(), 1, "req-live")
+
+        started = time.time()
+        stream = wrapper.iter_lines()
+        try:
+            first = next(stream)
+            elapsed = time.time() - started
+        finally:
+            upstream_still_generating.set()
+            stream.close()
+
+        self.assertEqual(first, self._event("response.output_text.delta", delta="first"))
+        self.assertFalse(upstream.text_accessed)
+        self.assertLess(
+            elapsed, 5,
+            "the first delta must be yielded immediately, not after the whole "
+            "upstream stream has been consumed",
+        )
+
+    def test_retries_early_response_failed_without_forwarding_failed_attempt(self):
+        first = _FakeResponse([
+            b"event: response.created",
+            self._event("response.created", marker="first"),
+            b"event: response.failed",
+            self._event("response.failed", response={"error": None}),
+        ])
+        second = _FakeResponse([
+            b"event: response.created",
+            self._event("response.created", marker="second"),
+            b"event: response.output_text.delta",
+            self._event("response.output_text.delta", delta="ok"),
+            b"event: response.completed",
+            self._event("response.completed", response={"usage": {}}),
+        ])
+        retry_count = 0
+
+        def retry():
+            nonlocal retry_count
+            retry_count += 1
+            return second
+
+        response = RetryingResponsesResponse(first, retry, 1, "req-retry")
+        output = list(response.iter_lines())
+
+        self.assertEqual(retry_count, 1)
+        self.assertTrue(first.closed)
+        self.assertNotIn(self._event("response.created", marker="first"), output)
+        self.assertFalse(any(b"response.failed" in line for line in output))
+        self.assertIn(self._event("response.created", marker="second"), output)
+        self.assertIn(self._event("response.output_text.delta", delta="ok"), output)
+
+    def test_does_not_retry_after_output_has_started(self):
+        first = _FakeResponse([
+            self._event("response.created"),
+            self._event("response.output_text.delta", delta="partial"),
+            self._event("response.failed", response={"error": None}),
+        ])
+        retry = mock.Mock()
+
+        output = list(RetryingResponsesResponse(first, retry, 3, "req-partial").iter_lines())
+
+        retry.assert_not_called()
+        self.assertTrue(any(b"response.failed" in line for line in output))
+
+    def test_forwards_failure_after_retry_budget_is_exhausted(self):
+        failed_line = self._event("response.failed", response={"error": None})
+        first = _FakeResponse([self._event("response.created"), failed_line])
+        second = _FakeResponse([self._event("response.created"), failed_line])
+        retry = mock.Mock(return_value=second)
+
+        output = list(RetryingResponsesResponse(first, retry, 1, "req-exhausted").iter_lines())
+
+        retry.assert_called_once_with()
+        self.assertIn(failed_line, output)
 
 
 class SSEKeepaliveIntegrationTest(unittest.TestCase):

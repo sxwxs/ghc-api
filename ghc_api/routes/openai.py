@@ -17,18 +17,25 @@ from ..api_helpers import (
     get_copilot_base_url,
     get_copilot_headers,
     is_configured_chat_completions_support_added,
+    supports_embeddings_api,
     supports_responses_api,
 )
 from ..auth import redact_auth_headers
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support
-from ..sse import OpenAIResponsesStreamHandler
+from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
 from ..sse.keepalive import KEEPALIVE, iter_lines_with_keepalive
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
-from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error, get_client_ip
+from ..utils import (
+    get_client_ip,
+    is_encrypted_content_parse_error,
+    log_connection_retry,
+    log_error_request,
+    remove_encrypted_content_items,
+)
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -834,6 +841,159 @@ def list_models():
 def list_models_full():
     return jsonify(state.models)
 
+@openai_bp.route("/v1/embeddings", methods=["POST"])
+@openai_bp.route("/embeddings", methods=["POST"])
+def embeddings():
+    """Handle OpenAI-compatible embeddings via Copilot's /embeddings API."""
+    try:
+        start_time = time.time()
+        ensure_copilot_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({
+                "error": {
+                    "message": "Request body must be a JSON object.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_json",
+                }
+            }), 400
+
+        original_request_body = copy.deepcopy(payload)
+        request_id = str(uuid.uuid4())
+        request_headers = redact_auth_headers(dict(request.headers))
+        client_ip = get_client_ip(request)
+        user_id = _current_user_id()
+
+        original_model = payload.get("model")
+        if not isinstance(original_model, str) or not original_model:
+            return jsonify({
+                "error": {
+                    "message": "The 'model' field is required.",
+                    "type": "invalid_request_error",
+                    "code": "missing_model",
+                    "param": "model",
+                }
+            }), 400
+
+        translated_model = translate_model_name(original_model)
+        if not supports_embeddings_api(translated_model):
+            return jsonify({
+                "error": {
+                    "message": f"Model '{original_model}' does not support embeddings.",
+                    "type": "invalid_request_error",
+                    "code": "unsupported_model",
+                    "param": "model",
+                }
+            }), 400
+
+        input_value = payload.get("input")
+        if isinstance(input_value, str):
+            if not input_value:
+                return jsonify({
+                    "error": {
+                        "message": "The 'input' field must not be empty.",
+                        "type": "invalid_request_error",
+                        "code": "invalid_input",
+                        "param": "input",
+                    }
+                }), 400
+            normalized_input = [input_value]
+        elif isinstance(input_value, list) and input_value:
+            # OpenAI also permits one pre-tokenized input as a flat integer
+            # array. Preserve that meaning while satisfying Copilot's batch-only
+            # request shape.
+            normalized_input = [input_value] if all(isinstance(item, int) for item in input_value) else input_value
+        else:
+            return jsonify({
+                "error": {
+                    "message": "The 'input' field must be a non-empty string or array.",
+                    "type": "invalid_request_error",
+                    "code": "invalid_input",
+                    "param": "input",
+                }
+            }), 400
+
+        upstream_payload = dict(payload)
+        upstream_payload["model"] = translated_model
+        upstream_payload["input"] = normalized_input
+        request_size = len(json.dumps(upstream_payload))
+        headers = get_copilot_headers()
+        headers["X-Initiator"] = "user"
+
+        connection_retries = state.max_connection_retries
+        last_connection_error = None
+        for conn_attempt in range(connection_retries + 1):
+            try:
+                response = requests.post(
+                    f"{get_copilot_base_url()}/embeddings",
+                    headers=headers,
+                    json=upstream_payload,
+                    timeout=state.upstream_read_timeout,
+                )
+                last_connection_error = None
+                break
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+                last_connection_error = exc
+                log_connection_retry(request_id, "/v1/embeddings", conn_attempt, connection_retries, exc)
+                ensure_copilot_token()
+                if conn_attempt < connection_retries:
+                    time.sleep(min(2 ** conn_attempt, 8))
+
+        if last_connection_error is not None:
+            return jsonify({
+                "error": f"Upstream connection error after {connection_retries + 1} attempts: "
+                         f"{type(last_connection_error).__name__}"
+            }), 504
+
+        duration = round(time.time() - start_time, 2)
+        response_size = len(response.content)
+        result_is_json = True
+        try:
+            result = response.json()
+        except ValueError:
+            result_is_json = False
+            result = response.text
+
+        if response.ok and isinstance(result, dict):
+            # Copilot currently omits fields that OpenAI clients commonly expect.
+            result.setdefault("object", "list")
+            result.setdefault("model", original_model)
+            for item in result.get("data", []):
+                if isinstance(item, dict):
+                    item.setdefault("object", "embedding")
+
+        usage = result.get("usage", {}) if isinstance(result, dict) else {}
+        cache.add_request(request_id, {
+            "request_headers": request_headers,
+            "client_ip": client_ip,
+            "original_request_body": original_request_body,
+            "request_body": upstream_payload,
+            "response_body": result,
+            "model": original_model,
+            "translated_model": translated_model if translated_model != original_model else None,
+            "endpoint": "/v1/embeddings",
+            "status_code": response.status_code,
+            "request_size": request_size,
+            "response_size": response_size,
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": 0,
+            "duration": duration,
+            "user_id": user_id,
+        })
+
+        if response.ok and result_is_json:
+            return jsonify(result)
+
+        upstream_content_type = response.headers.get("Content-Type", "application/json")
+        if response.ok:
+            return Response(response.content, status=response.status_code, content_type=upstream_content_type)
+
+        log_error_request("/v1/embeddings", upstream_payload, response.text, response.status_code, client_ip)
+        return Response(response.content, status=response.status_code, content_type=upstream_content_type)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @openai_bp.route("/v1/chat/completions", methods=["POST"])
 @openai_bp.route("/chat/completions", methods=["POST"])
 def chat_completions():
@@ -918,30 +1078,6 @@ def chat_completions():
 
         if last_connection_error is not None:
             return jsonify({"error": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}), 504
-
-        if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
-            request_input = payload.get("input")
-            if isinstance(request_input, list):
-                cleaned_input = []
-                removed_count = 0
-                for item in request_input:
-                    if isinstance(item, dict) and "encrypted_content" in item:
-                        removed_count += 1
-                        continue
-                    cleaned_input.append(item)
-
-                if removed_count > 0:
-                    counters.incr("mod.encrypted_content_removal")
-                    retry_payload = dict(payload)
-                    retry_payload["input"] = cleaned_input
-                    response = requests.post(
-                        f"{get_copilot_base_url()}/v1/responses",
-                        headers=headers,
-                        json=retry_payload,
-                        timeout=state.upstream_read_timeout,
-                    )
-                    payload = retry_payload
-                    request_size = len(json.dumps(payload))
 
         duration = round(time.time() - start_time, 2)
         response_body = response.text
@@ -1201,10 +1337,13 @@ def responses():
         _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
-        connection_retries = state.max_connection_retries
+        connection_retries = max(0, state.max_connection_retries)
         last_connection_error = None
         use_streaming = payload.get("stream", False)
-        for conn_attempt in range(connection_retries + 1):
+        response = None
+        conn_attempt = 0
+        encrypted_content_retry_attempted = False
+        while conn_attempt <= connection_retries:
             request_size = len(json.dumps(payload))
             try:
                 response = requests.post(
@@ -1216,8 +1355,27 @@ def responses():
                 )
                 if use_streaming:
                     if response.ok:
+                        upstream_response = response
+                        if state.enable_responses_early_failure_retry:
+                            def retry_streaming_response():
+                                ensure_copilot_token()
+                                retry_headers = get_copilot_headers(enable_vision)
+                                return requests.post(
+                                    f"{get_copilot_base_url()}/v1/responses",
+                                    headers=retry_headers,
+                                    json=payload,
+                                    stream=True,
+                                    timeout=state.upstream_read_timeout,
+                                )
+
+                            upstream_response = RetryingResponsesResponse(
+                                response=response,
+                                response_factory=retry_streaming_response,
+                                max_retries=state.max_connection_retries,
+                                request_id=request_id,
+                            )
                         return OpenAIResponsesStreamHandler(
-                            response=response,
+                            response=upstream_response,
                             request_id=request_id,
                             request_size=request_size,
                             start_time=start_time,
@@ -1232,23 +1390,25 @@ def responses():
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
                     log_error_request("/v1/responses", payload, response.text, response.status_code, client_ip)
-                    if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
+                    if (
+                        state.auto_remove_encrypted_content_on_parse_error
+                        and not encrypted_content_retry_attempted
+                        and is_encrypted_content_parse_error(response.status_code, response.text)
+                    ):
+                        encrypted_content_retry_attempted = True
                         request_input = payload.get("input")
                         if isinstance(request_input, list):
-                            cleaned_input = []
-                            removed_count = 0
-                            for item in request_input:
-                                if isinstance(item, dict) and "encrypted_content" in item:
-                                    removed_count += 1
-                                    continue
-                                cleaned_input.append(item)
+                            cleaned_input, removed_count = remove_encrypted_content_items(request_input)
                             print("Warning: Detected possible encrypted content parse error in response. auto_remove_encrypted_content_on_parse_error is enabled, so will remove encrypted content and retry the request. May cause loss of information.")
-                            print("Try to remove encrypted content and retry", f"Removed {removed_count} encrypted content items from input for request {request_id}")
+                            print("Try to remove encrypted content and retry", f"Cleaned {removed_count} encrypted content items from input for request {request_id}")
                             if removed_count > 0:
                                 counters.incr("mod.encrypted_content_removal")
                                 retry_payload = dict(payload)
                                 retry_payload["input"] = cleaned_input
                                 payload = retry_payload
+                                # The error body was already consumed; release the
+                                # upstream connection before issuing the retry.
+                                response.close()
                                 continue
                 last_connection_error = None
                 break
@@ -1259,12 +1419,17 @@ def responses():
                 if conn_attempt < connection_retries:
                     print(f"[Responses API] Connection error (attempt {conn_attempt + 1}/{connection_retries + 1}) for request {request_id}: {type(e).__name__}: {e}")
                     time.sleep(min(2 ** conn_attempt, 8))
+                    conn_attempt += 1
                     continue
                 else:
                     print(f"[Responses API] Connection error (final attempt) for request {request_id}: {type(e).__name__}: {e}")
+                    break
 
         if last_connection_error is not None:
             return jsonify({"error": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}), 504
+
+        if response is None:
+            return jsonify({"error": "Upstream request was never attempted"}), 502
 
         duration = round(time.time() - start_time, 2)
         response_size = len(response.text)

@@ -15,6 +15,7 @@ from ghc_api.token_manager import (
     get_github_token,
     get_token_file_path,
     github_device_flow_manager,
+    poll_github_device_flow,
     request_github_device_code,
     save_github_token_to_file,
 )
@@ -60,6 +61,52 @@ class TokenFileTests(unittest.TestCase):
 
 
 class DeviceFlowRequestTests(unittest.TestCase):
+    def setUp(self):
+        self.github_api_base_url = state.github_api_base_url
+
+    def tearDown(self):
+        state.github_api_base_url = self.github_api_base_url
+
+    @patch("ghc_api.token_manager.requests.post")
+    def test_ghe_device_code_uses_configured_tenant(self, post):
+        state.github_api_base_url = "https://api.octocorp.ghe.com/"
+        response = Mock(ok=True)
+        response.json.return_value = {
+            "device_code": "secret",
+            "user_code": "ABCD-1234",
+            "verification_uri": "https://octocorp.ghe.com/login/device",
+            "expires_in": 900,
+            "interval": 5,
+        }
+        post.return_value = response
+
+        request_github_device_code()
+
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://octocorp.ghe.com/login/device/code",
+        )
+
+    @patch("ghc_api.token_manager.time.sleep")
+    @patch("ghc_api.token_manager.requests.post")
+    def test_ghe_device_flow_poll_uses_configured_tenant(self, post, _sleep):
+        state.github_api_base_url = "https://api.octocorp.ghe.com"
+        response = Mock(ok=True)
+        response.json.return_value = {"access_token": "github-token"}
+        post.return_value = response
+
+        token = poll_github_device_flow({
+            "device_code": "secret",
+            "expires_in": 900,
+            "interval": 0,
+        })
+
+        self.assertEqual(token, "github-token")
+        self.assertEqual(
+            post.call_args.args[0],
+            "https://octocorp.ghe.com/login/oauth/access_token",
+        )
+
     @patch("ghc_api.token_manager.requests.post")
     def test_device_code_error_response_is_truncated(self, post):
         post.return_value = Mock(ok=False, status_code=502, text="x" * 1000)
@@ -284,9 +331,25 @@ class TokenManagerRouteTests(unittest.TestCase):
             flow = response.get_json()["device_flow"]
             self.assertNotIn("device_code", flow)
             self.assertEqual(flow["user_code"], "ABCD-1234")
+            self.assertEqual(response.get_json()["github_oauth_base_url"], "https://github.com")
         finally:
             with github_device_flow_manager._lock:
                 github_device_flow_manager._session = previous
+
+    def test_token_status_exposes_resolved_ghe_endpoints(self):
+        saved = (state.github_api_base_url, state.copilot_api_base_url)
+        try:
+            state.github_api_base_url = "https://api.octocorp.ghe.com"
+            state.copilot_api_base_url = "https://copilot-api.octocorp.ghe.com"
+            response = self.client.get("/api/config-manager/token-status")
+            self.assertEqual(response.status_code, 200)
+            data = response.get_json()
+            self.assertEqual(data["github_api_base_url"], "https://api.octocorp.ghe.com")
+            self.assertEqual(data["github_oauth_base_url"], "https://octocorp.ghe.com")
+            self.assertEqual(data["copilot_api_base_url"], "https://copilot-api.octocorp.ghe.com")
+            self.assertIsNone(data["github_device_flow_error"])
+        finally:
+            state.github_api_base_url, state.copilot_api_base_url = saved
 
     def test_config_details_page_exists(self):
         response = self.client.get("/code-agent-manager/config")
@@ -304,6 +367,7 @@ class TokenManagerRouteTests(unittest.TestCase):
         self.assertNotIn("refreshConfigHashOverview", html)
         self.assertIn('url.protocol === "https:"', html)
         self.assertIn('url.hostname === "github.com"', html)
+        self.assertIn('url.origin === configuredOrigin', html)
         self.assertGreater(
             html.index("GitHub / Copilot Token Status"),
             html.index("Code Agent Configuration and Tools"),
