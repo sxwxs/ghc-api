@@ -159,12 +159,13 @@ upstream_read_timeout: 1800
 # before emitting the first token. Set to 0 to disable keepalive.
 sse_keepalive_interval: 30
 
-# If true, when /v1/responses gets HTTP 400 because encrypted reasoning or
-# function output content cannot be decrypted, all top-level request.input
-# items containing "encrypted_content" (including nested blocks) are removed
-# and the request is retried once. Set this to false to return the upstream
-# error without retrying.
-auto_remove_encrypted_content_on_parse_error: true
+# If true, when /v1/responses gets HTTP 400 because encrypted reasoning or function
+# output content cannot be decrypted, the request is cleaned and retried exactly once:
+# reasoning/message items carrying encrypted_content are dropped, while tool output
+# items (function_call_output etc.) keep their place with a placeholder body so the
+# paired function_call is not orphaned. This loses context and costs one extra upstream
+# request, so it is disabled by default.
+auto_remove_encrypted_content_on_parse_error: false
 
 # If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
 save_request_to_file: false

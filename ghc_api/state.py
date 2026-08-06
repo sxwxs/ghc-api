@@ -67,7 +67,11 @@ class State:
         # SSE keepalive: when a stream is idle this many seconds, emit a keepalive
         # ping to the client so its read timeout does not fire. 0 disables.
         self.sse_keepalive_interval: int = 30
-        self.auto_remove_encrypted_content_on_parse_error: bool = True
+        # When /v1/responses rejects a request because encrypted reasoning or tool
+        # output content cannot be decrypted, clean the input and retry once instead
+        # of surfacing the 400. Lossy by design (see remove_encrypted_content_items),
+        # so it is opt-in.
+        self.auto_remove_encrypted_content_on_parse_error: bool = False
         self.save_request_to_file: bool = False
         self.disable_onedrive_access: bool = True
 
