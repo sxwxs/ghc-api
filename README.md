@@ -141,7 +141,36 @@ upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot
 sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
                               # this many seconds (keeps clients like Claude Code from
                               # timing out while the model "thinks"). Set 0 to disable.
+
+# Recover from undecryptable encrypted content (disabled by default)
+auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
+                              # because encrypted reasoning or tool output content cannot
+                              # be decrypted, clean request.input and retry once.
+                              # Lossy; see "Encrypted Content Recovery" below.
 ```
+
+### Encrypted Content Recovery
+
+Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 because encrypted
+reasoning blobs (`encrypted_content` on a `reasoning` item) or encrypted tool output can no
+longer be decrypted — typically after a token rotation or a server-side key change. The
+conversation is then permanently stuck: every follow-up turn replays the same history and
+fails again.
+
+Set `auto_remove_encrypted_content_on_parse_error: true` to let ghc-api react to such a 400
+exactly once per request:
+
+- Items whose encrypted payload *is* the content (reasoning items, messages) are dropped.
+- Tool output items (`function_call_output`, `custom_tool_call_output`, ...) are **kept** with
+  their encrypted blocks stripped and a placeholder body, so the paired `function_call` is not
+  orphaned (removing them would make the retry fail with "No tool output found for function call").
+- If a tool *call* itself must be dropped, its paired output is dropped with it.
+- The cleaned request is retried once; the retry does not consume the connection-retry budget,
+  and a second identical failure is returned to the client as-is.
+
+The option is **off by default** because it is lossy — the model loses that reasoning/tool
+context — and costs one extra upstream request. Every recovery is counted
+(`mod.encrypted_content_removal`) and logged.
 
 ### Token Management
 
