@@ -36,7 +36,7 @@ from ..utils import (
     log_error_request,
     remove_encrypted_content_items,
 )
-from ..web_search import WebIQSearchError, apply_webiq_search
+from ..webiq import LEGACY_OPTION_MESSAGE, pop_legacy_option
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -1020,12 +1020,15 @@ def chat_completions():
             payload = dict(payload)
             payload["model"] = translated_model
 
-        # Web IQ is a proxy-side grounding option. Consume it before routing so
-        # neither the option nor the API key ever reaches Copilot.
-        try:
-            payload = apply_webiq_search(payload, "chat", state)
-        except WebIQSearchError as exc:
-            return jsonify({"error": {"message": str(exc), "type": "webiq_search_error"}}), exc.status_code
+        # Web IQ is no longer applied inside the proxy path. Strip the retired
+        # option so it can never reach Copilot as an unknown parameter, and
+        # tell callers that still send it where the feature moved.
+        if pop_legacy_option(payload):
+            return jsonify({"error": {
+                "message": LEGACY_OPTION_MESSAGE,
+                "type": "invalid_request_error",
+                "code": "webiq_search_options_removed",
+            }}), 400
 
         # Check for vision content
         enable_vision = False
@@ -1315,10 +1318,12 @@ def responses():
             payload = dict(payload)
             payload["model"] = translated_model
 
-        try:
-            payload = apply_webiq_search(payload, "responses", state)
-        except WebIQSearchError as exc:
-            return jsonify({"error": {"message": str(exc), "type": "webiq_search_error"}}), exc.status_code
+        if pop_legacy_option(payload):
+            return jsonify({"error": {
+                "message": LEGACY_OPTION_MESSAGE,
+                "type": "invalid_request_error",
+                "code": "webiq_search_options_removed",
+            }}), 400
 
         # Check if this model supports the Responses API
         if not supports_responses_api(translated_model):

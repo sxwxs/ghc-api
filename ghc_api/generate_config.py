@@ -224,9 +224,15 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
 # Microsoft Web IQ Search
 # -----------------------
-# Enables application-side web grounding for models that do not have GitHub's
-# native web_search tool. The key stays on this server and is not sent to the UI.
+# Exposes POST /v1/webiq/search, which runs a web search with the key below.
+# The proxy never searches on a model's behalf: clients declare the
+# 'webiq_search' function tool, the model decides whether and what to search,
+# and the client executes the tool call against that endpoint. The built-in
+# chat UI (/chat) does this automatically when the Web IQ toggle is on.
+# The key stays on this server and is never sent to the UI or to Copilot.
 # passage format is recommended because full HTML can consume many model tokens.
+# webiq_max_results is the default when a tool call does not specify one.
+# webiq_max_length caps each result's content locally, bounding tool-result size.
 enable_webiq_search: false
 webiq_api_key: ""
 webiq_endpoint: "https://api.microsoftol.com/v3/search/web"

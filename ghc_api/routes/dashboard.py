@@ -27,6 +27,7 @@ from ..api_helpers import (
 )
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
+from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
 from ..token_usage_reporter import get_token_usage_overview
 from ..token_manager import (
     get_token_file_path,
@@ -128,7 +129,9 @@ def chat_page():
     """Serve the chat page."""
     return render_template(
         "chat.html",
-        webiq_available=bool(state.enable_webiq_search and state.webiq_api_key),
+        webiq_available=webiq_is_configured(state),
+        webiq_tool_chat=webiq_tool_definition("chat"),
+        webiq_tool_responses=webiq_tool_definition("responses"),
     )
 
 
