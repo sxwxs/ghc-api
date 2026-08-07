@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+import traceback
 import yaml
 
 from . import __version__
@@ -181,9 +182,14 @@ def main():
     if not os.path.exists(config_path):
         print(f"No config file found at {config_path}, will generate one.")
         generate_config_file()
+    # Server defaults must exist even if config loading fails below, otherwise the
+    # error path would crash later with UnboundLocalError on host/port/debug.
+    host = 'localhost'
+    port = 8313
+    debug = DEBUG
+
     try:
         config = load_config(config_path)
-        print(config)
         # Load server settings from config (can be overridden by command line)
         host = config.get('address', 'localhost')
         port = config.get('port', 8313)
@@ -270,7 +276,9 @@ def main():
         print(f"Loaded configuration from: {config_path}")
 
     except Exception as e:
-        print(f"Error loading config file: {e}")
+        print(f"Error loading config file ({config_path}): {e!r}")
+        traceback.print_exc()
+        print(f"Falling back to defaults: address={host}, port={port}, debug={debug}")
         # Use default mappings on error
         model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
         chat_completions_model_support.load_from_config({
