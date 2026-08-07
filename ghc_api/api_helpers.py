@@ -5,6 +5,7 @@ API helper functions for GitHub Copilot API
 import time
 import uuid
 from typing import Dict, List
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -18,10 +19,98 @@ _configured_chat_completions_support_by_models_id: Dict[int, set[str]] = {}
 
 
 def get_copilot_base_url() -> str:
-    """Get the Copilot API base URL based on account type"""
+    """Get the Copilot API base URL based on account type or override."""
+    if state.copilot_api_base_url:
+        return state.copilot_api_base_url.rstrip("/")
     if state.account_type == "individual":
         return "https://api.githubcopilot.com"
     return f"https://api.{state.account_type}.githubcopilot.com"
+
+
+def get_github_api_base_url() -> str:
+    """Get the GitHub API base URL, allowing an explicit local override."""
+    return (state.github_api_base_url or GITHUB_API_BASE_URL).rstrip("/")
+
+
+def resolve_ghe_endpoints(endpoint: str) -> Dict[str, str]:
+    """Normalize a GHE tenant/web/API endpoint into all required origins.
+
+    Accepts ``octocorp.ghe.com``, ``https://octocorp.ghe.com``,
+    ``https://api.octocorp.ghe.com``, or
+    ``https://copilot-api.octocorp.ghe.com``.
+    """
+    raw = (endpoint or "").strip()
+    if not raw:
+        raise ValueError("GHE endpoint is required")
+    if "://" not in raw:
+        raw = f"https://{raw}"
+
+    parsed = urlsplit(raw)
+    hostname = parsed.hostname or ""
+    if parsed.scheme != "https":
+        raise ValueError("GHE endpoint must use HTTPS")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("GHE endpoint contains unsupported URL components")
+    if parsed.path not in ("", "/"):
+        raise ValueError("GHE endpoint must not contain a path")
+    if parsed.port not in (None, 443):
+        raise ValueError("GHE endpoint only supports the default HTTPS port")
+
+    if hostname.startswith("copilot-api."):
+        tenant_hostname = hostname[len("copilot-api."):]
+    elif hostname.startswith("api."):
+        tenant_hostname = hostname[len("api."):]
+    else:
+        tenant_hostname = hostname
+
+    if tenant_hostname == "ghe.com" or not tenant_hostname.endswith(".ghe.com"):
+        raise ValueError("GHE endpoint must identify a tenant under *.ghe.com")
+
+    return {
+        "github_web_base_url": f"https://{tenant_hostname}",
+        "github_api_base_url": f"https://api.{tenant_hostname}",
+        "copilot_api_base_url": f"https://copilot-api.{tenant_hostname}",
+    }
+
+
+def get_github_web_base_url() -> str:
+    """Derive the GitHub web/OAuth origin from the configured API base URL.
+
+    GitHub.com uses ``api.github.com`` -> ``github.com``. GitHub Enterprise
+    Cloud with data residency uses ``api.<tenant>.ghe.com`` ->
+    ``<tenant>.ghe.com``. Arbitrary benchmark/private-gateway overrides remain
+    valid for API traffic, but Device Flow is disabled when their OAuth origin
+    cannot be derived safely.
+    """
+    api_base_url = get_github_api_base_url()
+    parsed = urlsplit(api_base_url)
+    hostname = parsed.hostname or ""
+
+    if parsed.scheme != "https":
+        raise ValueError(
+            "GitHub Device Flow requires an HTTPS github_api_base_url "
+            "for github.com or api.<tenant>.ghe.com"
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("github_api_base_url contains unsupported URL components")
+    if parsed.path not in ("", "/"):
+        raise ValueError("github_api_base_url must not contain a path for GitHub Device Flow")
+
+    if hostname == "api.github.com":
+        web_hostname = "github.com"
+    elif hostname.startswith("api.") and hostname.endswith(".ghe.com"):
+        web_hostname = hostname[4:]
+        if web_hostname == "ghe.com":
+            raise ValueError("github_api_base_url must include a GHE tenant subdomain")
+    else:
+        raise ValueError(
+            "Cannot derive the GitHub Device Flow host from github_api_base_url; "
+            "expected https://api.github.com or https://api.<tenant>.ghe.com"
+        )
+
+    if parsed.port not in (None, 443):
+        raise ValueError("GitHub Device Flow only supports the default HTTPS port")
+    return urlunsplit(("https", web_hostname, "", "", ""))
 
 
 def get_github_headers() -> Dict[str, str]:
@@ -64,7 +153,7 @@ def refresh_copilot_token(force: bool = False) -> None:
             return
 
         state.token_refresh_last_attempt_at = time.time()
-        token_endpoint = f"{GITHUB_API_BASE_URL}/copilot_internal/v2/token"
+        token_endpoint = f"{get_github_api_base_url()}/copilot_internal/v2/token"
         response = None
         print("Refreshing Copilot token...")
         try:

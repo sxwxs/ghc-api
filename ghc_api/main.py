@@ -7,10 +7,14 @@ serving as a proxy server for GitHub Copilot API with caching and monitoring cap
 """
 
 import argparse
+import json
 import os
+import re
+import tempfile
 import yaml
 
 from . import __version__
+from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
 from .config import (
     DEBUG,
@@ -37,12 +41,87 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def apply_upstream_config(config: dict) -> None:
+    """Apply account and upstream endpoint settings to global state."""
+    state.account_type = config.get('account_type', 'individual')
+    state.github_api_base_url = str(config.get('github_api_base_url', '') or '')
+    state.copilot_api_base_url = str(config.get('copilot_api_base_url', '') or '')
+
+
+def update_top_level_config_values(config_path: str, updates: dict[str, str]) -> None:
+    """Update selected top-level YAML scalar values while preserving comments."""
+    lines = []
+    if os.path.exists(config_path):
+        with open(config_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+
+    found = set()
+    patterns = {
+        key: re.compile(rf"^{re.escape(key)}\s*:")
+        for key in updates
+    }
+    for index, line in enumerate(lines):
+        if line[:1].isspace():
+            continue
+        for key, pattern in patterns.items():
+            if pattern.match(line):
+                newline = "\n" if line.endswith("\n") else ""
+                lines[index] = f"{key}: {json.dumps(updates[key])}{newline}"
+                found.add(key)
+                break
+
+    remaining = {
+        key: value for key, value in updates.items()
+        if key not in found
+    }
+    if remaining:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        for key, value in remaining.items():
+            lines.append(f"{key}: {json.dumps(value)}\n")
+
+    config_dir = os.path.dirname(config_path) or "."
+    os.makedirs(config_dir, exist_ok=True)
+    fd, temp_path = tempfile.mkstemp(
+        prefix=".config.", suffix=".yaml.tmp", dir=config_dir
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, config_path)
+    except Exception:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+        raise
+
+
+def configure_ghe_endpoint(config_path: str, endpoint: str) -> dict[str, str]:
+    """Resolve a GHE tenant and persist both upstream endpoint overrides."""
+    resolved = resolve_ghe_endpoints(endpoint)
+    updates = {
+        "github_api_base_url": resolved["github_api_base_url"],
+        "copilot_api_base_url": resolved["copilot_api_base_url"],
+    }
+    update_top_level_config_values(config_path, updates)
+    return resolved
+
+
 def main():
     """Main entry point for the application"""
     parser = argparse.ArgumentParser(description='GitHub Copilot API Proxy')
     parser.add_argument('-p', '--port', type=int, help='Port to listen on')
     parser.add_argument('-a', '--address', type=str, help='Address to listen on')
     parser.add_argument('-c', '--config', action='store_true', help='Generate a YAML config file')
+    parser.add_argument(
+        '--ghe-endpoint', metavar='HOST',
+        help='Configure GitHub Enterprise Cloud data-residency endpoints and exit',
+    )
     token_actions = parser.add_mutually_exclusive_group()
     token_actions.add_argument(
         '--delete-github-token', action='store_true',
@@ -66,7 +145,31 @@ def main():
     if args.delete_github_token:
         delete_github_token_file()
         return
+
+    config_dir = get_config_dir()
+    config_path = os.path.join(config_dir, "config.yaml")
+
+    if args.ghe_endpoint:
+        try:
+            resolved = configure_ghe_endpoint(config_path, args.ghe_endpoint)
+        except Exception as exc:
+            print(f"Failed to configure GHE endpoint: {exc}")
+            return
+        print(f"Configured GHE endpoints in {config_path}:")
+        print(f"  GitHub OAuth: {resolved['github_web_base_url']}")
+        print(f"  GitHub API:   {resolved['github_api_base_url']}")
+        print(f"  Copilot API:  {resolved['copilot_api_base_url']}")
+        print("Restart ghc-api to use the new endpoints.")
+        print("Run 'ghc-api --github-device-login' if this tenant requires a new token.")
+        return
+
     if args.github_device_login:
+        if os.path.exists(config_path):
+            try:
+                apply_upstream_config(load_config(config_path))
+            except Exception as exc:
+                print(f"Failed to load upstream settings from {config_path}: {exc}")
+                return
         token = authenticate_github_device_flow()
         if token:
             save_github_token_to_file(token)
@@ -75,9 +178,6 @@ def main():
         return
 
     # Load config from file if it exists
-    config_dir = get_config_dir()
-    config_path = os.path.join(config_dir, "config.yaml")
-
     if not os.path.exists(config_path):
         print(f"No config file found at {config_path}, will generate one.")
         generate_config_file()
@@ -89,8 +189,9 @@ def main():
         port = config.get('port', 8313)
         debug = config.get('debug', DEBUG)
 
-        # Set account type from config
-        state.account_type = config.get('account_type', 'individual')
+        # Set account type and optional upstream URL overrides. The overrides
+        # are useful for GHE data residency, private gateways, and offline E2E benchmarks.
+        apply_upstream_config(config)
 
         # Set vscode version from config
         if 'vscode_version' in config:

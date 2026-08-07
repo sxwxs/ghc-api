@@ -29,7 +29,13 @@ from ..sse.keepalive import KEEPALIVE, iter_lines_with_keepalive
 from ..state import state
 from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
-from ..utils import log_error_request, log_connection_retry, is_encrypted_content_parse_error, get_client_ip
+from ..utils import (
+    get_client_ip,
+    is_encrypted_content_parse_error,
+    log_connection_retry,
+    log_error_request,
+    remove_encrypted_content_items,
+)
 from ..web_search import WebIQSearchError, apply_webiq_search
 
 openai_bp = Blueprint('openai', __name__)
@@ -1081,30 +1087,6 @@ def chat_completions():
         if last_connection_error is not None:
             return jsonify({"error": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}), 504
 
-        if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
-            request_input = payload.get("input")
-            if isinstance(request_input, list):
-                cleaned_input = []
-                removed_count = 0
-                for item in request_input:
-                    if isinstance(item, dict) and "encrypted_content" in item:
-                        removed_count += 1
-                        continue
-                    cleaned_input.append(item)
-
-                if removed_count > 0:
-                    counters.incr("mod.encrypted_content_removal")
-                    retry_payload = dict(payload)
-                    retry_payload["input"] = cleaned_input
-                    response = requests.post(
-                        f"{get_copilot_base_url()}/v1/responses",
-                        headers=headers,
-                        json=retry_payload,
-                        timeout=state.upstream_read_timeout,
-                    )
-                    payload = retry_payload
-                    request_size = len(json.dumps(payload))
-
         duration = round(time.time() - start_time, 2)
         response_body = response.text
         response_size = len(response_body)
@@ -1368,10 +1350,13 @@ def responses():
         _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
-        connection_retries = state.max_connection_retries
+        connection_retries = max(0, state.max_connection_retries)
         last_connection_error = None
         use_streaming = payload.get("stream", False)
-        for conn_attempt in range(connection_retries + 1):
+        response = None
+        conn_attempt = 0
+        encrypted_content_retry_attempted = False
+        while conn_attempt <= connection_retries:
             request_size = len(json.dumps(payload))
             try:
                 response = requests.post(
@@ -1418,23 +1403,25 @@ def responses():
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
                     log_error_request("/v1/responses", payload, response.text, response.status_code, client_ip)
-                    if state.auto_remove_encrypted_content_on_parse_error and is_encrypted_content_parse_error(response.status_code, response.text):
+                    if (
+                        state.auto_remove_encrypted_content_on_parse_error
+                        and not encrypted_content_retry_attempted
+                        and is_encrypted_content_parse_error(response.status_code, response.text)
+                    ):
+                        encrypted_content_retry_attempted = True
                         request_input = payload.get("input")
                         if isinstance(request_input, list):
-                            cleaned_input = []
-                            removed_count = 0
-                            for item in request_input:
-                                if isinstance(item, dict) and "encrypted_content" in item:
-                                    removed_count += 1
-                                    continue
-                                cleaned_input.append(item)
+                            cleaned_input, removed_count = remove_encrypted_content_items(request_input)
                             print("Warning: Detected possible encrypted content parse error in response. auto_remove_encrypted_content_on_parse_error is enabled, so will remove encrypted content and retry the request. May cause loss of information.")
-                            print("Try to remove encrypted content and retry", f"Removed {removed_count} encrypted content items from input for request {request_id}")
+                            print("Try to remove encrypted content and retry", f"Cleaned {removed_count} encrypted content items from input for request {request_id}")
                             if removed_count > 0:
                                 counters.incr("mod.encrypted_content_removal")
                                 retry_payload = dict(payload)
                                 retry_payload["input"] = cleaned_input
                                 payload = retry_payload
+                                # The error body was already consumed; release the
+                                # upstream connection before issuing the retry.
+                                response.close()
                                 continue
                 last_connection_error = None
                 break
@@ -1445,12 +1432,17 @@ def responses():
                 if conn_attempt < connection_retries:
                     print(f"[Responses API] Connection error (attempt {conn_attempt + 1}/{connection_retries + 1}) for request {request_id}: {type(e).__name__}: {e}")
                     time.sleep(min(2 ** conn_attempt, 8))
+                    conn_attempt += 1
                     continue
                 else:
                     print(f"[Responses API] Connection error (final attempt) for request {request_id}: {type(e).__name__}: {e}")
+                    break
 
         if last_connection_error is not None:
             return jsonify({"error": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}), 504
+
+        if response is None:
+            return jsonify({"error": "Upstream request was never attempted"}), 502
 
         duration = round(time.time() - start_time, 2)
         response_size = len(response.text)

@@ -9,11 +9,19 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from .api_helpers import get_github_web_base_url
 from .config import GITHUB_OAUTH_CLIENT_ID
 from .utils import get_config_dir
 
-_DEVICE_CODE_URL = "https://github.com/login/device/code"
-_TOKEN_URL = "https://github.com/login/oauth/access_token"
+
+def get_github_device_code_url() -> str:
+    """Return the Device Flow start URL for the configured GitHub endpoint."""
+    return f"{get_github_web_base_url()}/login/device/code"
+
+
+def get_github_oauth_token_url() -> str:
+    """Return the Device Flow token URL for the configured GitHub endpoint."""
+    return f"{get_github_web_base_url()}/login/oauth/access_token"
 
 
 def get_token_file_path() -> str:
@@ -68,7 +76,7 @@ def delete_github_token_file() -> bool:
 def request_github_device_code() -> Dict[str, Any]:
     """Start Device Flow and return internal details, including secret device_code."""
     response = requests.post(
-        _DEVICE_CODE_URL,
+        get_github_device_code_url(),
         data={
             "client_id": GITHUB_OAUTH_CLIENT_ID,
             "scope": "read:user copilot",
@@ -108,7 +116,7 @@ def poll_github_device_flow(device: Dict[str, Any], progress=None) -> str:
         time.sleep(interval)
         try:
             response = requests.post(
-                _TOKEN_URL,
+                get_github_oauth_token_url(),
                 data={
                     "client_id": GITHUB_OAUTH_CLIENT_ID,
                     "device_code": device["device_code"],
@@ -150,8 +158,14 @@ def poll_github_device_flow(device: Dict[str, Any], progress=None) -> str:
 
 def authenticate_github_device_flow() -> Optional[str]:
     """Run interactive GitHub Device Flow and return the access token."""
+    try:
+        github_web_base_url = get_github_web_base_url()
+    except Exception as exc:
+        print(f"GitHub Device Flow is not available: {exc}")
+        return None
+
     print("\n" + "=" * 60)
-    print("GitHub Device Flow Authentication")
+    print(f"GitHub Device Flow Authentication ({github_web_base_url})")
     print("=" * 60)
     try:
         device = request_github_device_code()

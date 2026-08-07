@@ -354,13 +354,16 @@
         <div class="section">
             <h2>GitHub / Copilot Token Status</h2>
             <div class="manager-actions">
-                <button class="btn danger" type="button" onclick="startGithubDeviceLogin()">Sign in again with GitHub Device Code</button>
+                <button class="btn danger" id="github-device-login-button" type="button" onclick="startGithubDeviceLogin()">Sign in again with GitHub Device Code</button>
                 <button class="btn secondary" type="button" onclick="refreshTokenStatus()">Refresh Status</button>
             </div>
             <div class="status-line" id="status-line"></div>
             <div class="table-wrap" style="max-height:none;">
                 <table class="token-status-table">
                     <tbody>
+                        <tr><td>GitHub API endpoint</td><td id="github-api-base-url">Loading...</td></tr>
+                        <tr><td>GitHub OAuth endpoint</td><td id="github-oauth-base-url">-</td></tr>
+                        <tr><td>Copilot API endpoint</td><td id="copilot-api-base-url">-</td></tr>
                         <tr><td>GitHub token configured</td><td id="github-token-configured">Loading...</td></tr>
                         <tr><td>GitHub token source</td><td id="github-token-source">-</td></tr>
                         <tr><td>Local token file exists</td><td id="local-token-file-exists">-</td></tr>
@@ -744,6 +747,13 @@
                     ? { text: "SUCCESS", className: "status-value-success" }
                     : { text: "FAILED", className: "status-value-error" });
 
+            setTokenStatusValue("github-api-base-url", data.github_api_base_url || "-");
+            setTokenStatusValue(
+                "github-oauth-base-url",
+                data.github_oauth_base_url || data.github_device_flow_error || "-",
+                data.github_device_flow_error ? "status-value-error" : ""
+            );
+            setTokenStatusValue("copilot-api-base-url", data.copilot_api_base_url || "-");
             setTokenStatusValue("github-token-configured", githubConfigured.text, githubConfigured.className);
             setTokenStatusValue("github-token-source", data.github_token_source || "unknown");
             setTokenStatusValue("local-token-file-exists", localFileExists.text, localFileExists.className);
@@ -757,21 +767,25 @@
                 data.last_refresh_error || "-",
                 data.last_refresh_error ? "status-value-error" : "status-value-muted"
             );
-            renderDeviceFlow(data.device_flow || { status: "idle" });
+            const loginButton = document.getElementById("github-device-login-button");
+            loginButton.disabled = Boolean(data.github_device_flow_error);
+            loginButton.title = data.github_device_flow_error || "";
+            renderDeviceFlow(data.device_flow || { status: "idle" }, data.github_oauth_base_url);
         }
 
-        function safeGithubVerificationUrl(value) {
+        function safeGithubVerificationUrl(value, githubOauthBaseUrl) {
             try {
                 const url = new URL(value);
-                return url.protocol === "https:" && url.hostname === "github.com"
-                    ? url.href
-                    : "";
+                const configuredOrigin = githubOauthBaseUrl ? new URL(githubOauthBaseUrl).origin : "";
+                return url.protocol === "https:" && (
+                    url.hostname === "github.com" || url.origin === configuredOrigin
+                ) ? url.href : "";
             } catch (_error) {
                 return "";
             }
         }
 
-        function renderDeviceFlow(flow) {
+        function renderDeviceFlow(flow, githubOauthBaseUrl) {
             updateDeviceFlowPolling(flow);
             const panel = document.getElementById("device-login-panel");
             const message = document.getElementById("device-login-message");
@@ -781,7 +795,7 @@
             }
             panel.style.display = "block";
             const link = document.getElementById("device-verification-link");
-            const verificationUrl = safeGithubVerificationUrl(flow.verification_uri);
+            const verificationUrl = safeGithubVerificationUrl(flow.verification_uri, githubOauthBaseUrl);
             link.href = verificationUrl || "#";
             link.textContent = verificationUrl;
             link.style.display = verificationUrl ? "" : "none";
