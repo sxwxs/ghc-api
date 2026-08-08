@@ -11,7 +11,7 @@ from flask import Blueprint, jsonify, request
 
 from ..counters import counters
 from ..state import state
-from ..webiq import WebIQError, search
+from ..webiq import WebIQError, normalize_query, search
 
 webiq_bp = Blueprint("webiq", __name__)
 
@@ -31,9 +31,12 @@ def webiq_search():
             "type": "invalid_request_error",
         }}), 400
 
+    # Normalize up front so the echoed query, the log line and the query that
+    # actually reaches upstream are all the same bounded, single-line string.
     try:
+        query = normalize_query(payload.get("query"))
         results = search(
-            payload.get("query"),
+            query,
             state,
             max_results=payload.get("max_results"),
         )
@@ -47,7 +50,6 @@ def webiq_search():
 
     counters.incr("webiq.search")
     elapsed = time.time() - started
-    query = payload.get("query")
     print(f"[WebIQ] query={query!r} results={len(results)} in {elapsed:.2f}s")
     return jsonify({
         "query": query,

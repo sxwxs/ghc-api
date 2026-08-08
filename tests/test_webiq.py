@@ -163,6 +163,26 @@ class RouteTest(unittest.TestCase):
 
         self.assertEqual(res.status_code, 400)
 
+    @patch("ghc_api.routes.webiq.search")
+    def test_echoes_the_normalized_query(self, search_mock):
+        """The echoed query must be what was actually searched."""
+        search_mock.return_value = []
+
+        res = self.client.post("/v1/webiq/search", json={
+            "query": "  python\n\n  asyncio " + "x" * 500,
+        })
+
+        self.assertEqual(res.status_code, 200)
+        echoed = res.get_json()["query"]
+        self.assertEqual(echoed, search_mock.call_args[0][0])
+        self.assertNotIn("\n", echoed)
+        self.assertLessEqual(len(echoed), 400)
+
+    def test_rejects_bad_query_before_searching(self):
+        res = self.client.post("/v1/webiq/search", json={"query": "   "})
+
+        self.assertEqual(res.status_code, 400)
+
 
 class LegacyRouteRejectionTest(unittest.TestCase):
     """The retired option must fail loudly rather than silently do nothing."""

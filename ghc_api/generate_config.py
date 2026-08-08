@@ -231,7 +231,7 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 # chat UI (/chat) does this automatically when the Web IQ toggle is on.
 # The key stays on this server and is never sent to the UI or to Copilot.
 # passage format is recommended because full HTML can consume many model tokens.
-# webiq_max_results is the default when a tool call does not specify one.
+# webiq_max_results is the default when a tool call does not specify one (1-10).
 # webiq_max_length caps each result's content locally, bounding tool-result size.
 enable_webiq_search: false
 webiq_api_key: ""

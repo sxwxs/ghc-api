@@ -999,6 +999,18 @@
             return div.innerHTML;
         }
 
+        // Only http(s) links are safe to put in an href. Anything else
+        // (javascript:, data:, ...) is rendered as inert text instead.
+        function safeHttpUrl(raw) {
+            try {
+                const parsed = new URL(String(raw || ''), window.location.origin);
+                if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                    return parsed.href;
+                }
+            } catch (e) { /* fall through */ }
+            return null;
+        }
+
         // ---- Model loading ----
 
         function formatTokenCount(n) {
@@ -1382,10 +1394,16 @@
             const content = document.createElement('div');
             content.className = 'thinking-content';
             content.innerHTML = sources.map((s, i) => {
-                const url = escapeHtml(s.url || '');
+                const rawUrl = s.url || '';
+                const url = escapeHtml(rawUrl);
                 const title = escapeHtml(s.title || 'Untitled');
-                return '<p>[' + (i + 1) + '] <a href="' + url + '" target="_blank" ' +
-                    'rel="noopener noreferrer">' + title + '</a><br><small>' + url + '</small></p>';
+                const href = safeHttpUrl(rawUrl);
+                const link = href
+                    ? '<a href="' + escapeHtml(href) + '" target="_blank" ' +
+                      'rel="noopener noreferrer">' + title + '</a>'
+                    : '<span title="Blocked non-http(s) link">' + title + '</span>';
+                return '<p>[' + (i + 1) + '] ' + link +
+                    '<br><small>' + url + '</small></p>';
             }).join('');
             block.appendChild(content);
 
