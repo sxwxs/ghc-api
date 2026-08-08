@@ -14,6 +14,7 @@ import tempfile
 import yaml
 
 from . import __version__
+from . import webiq
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
 from .config import (
@@ -247,6 +248,31 @@ def main():
             state.enable_web_search_proxy = bool(config['enable_web_search_proxy'])
         if 'web_search_proxy_endpoint' in config:
             state.web_search_proxy_endpoint = config['web_search_proxy_endpoint']
+
+        # Load Microsoft Web IQ settings. The API key is deliberately kept in
+        # server-side state and only a configured/not-configured flag reaches UI.
+        if 'enable_webiq_search' in config:
+            state.enable_webiq_search = bool(config['enable_webiq_search'])
+        if 'webiq_api_key' in config:
+            state.webiq_api_key = str(config['webiq_api_key'] or '')
+        if 'webiq_endpoint' in config:
+            state.webiq_endpoint = str(config['webiq_endpoint'] or state.webiq_endpoint)
+        if 'webiq_max_results' in config:
+            # Clamp to the same limit the webiq_search tool contract advertises,
+            # so a larger config value cannot look accepted but be capped later.
+            state.webiq_max_results = max(1, min(webiq.MAX_RESULTS_LIMIT, int(config['webiq_max_results'])))
+        if 'webiq_max_length' in config:
+            state.webiq_max_length = max(1, min(500000, int(config['webiq_max_length'])))
+        if 'webiq_content_format' in config:
+            state.webiq_content_format = str(config['webiq_content_format'])
+        if 'webiq_language' in config:
+            state.webiq_language = str(config['webiq_language'])
+        if 'webiq_region' in config:
+            state.webiq_region = str(config['webiq_region'])
+        if 'webiq_safe_search' in config:
+            state.webiq_safe_search = str(config['webiq_safe_search'])
+        if 'webiq_timeout' in config:
+            state.webiq_timeout = max(1, int(config['webiq_timeout']))
 
         # Load user-token auth setting
         if 'enable_auth' in config:
