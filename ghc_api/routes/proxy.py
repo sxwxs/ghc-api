@@ -201,7 +201,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     translated_model = upstream_payload.get("model")
     if not isinstance(translated_model, str) or not translated_model:
         translated_model = original_model
-    request_size = len(json.dumps(upstream_payload))
+    request_size = len(json.dumps(upstream_payload).encode("utf-8"))
 
     if use_streaming and response.ok:
         content_length = response.headers.get("Content-Length")
@@ -236,7 +236,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
 
     duration = round(time.time() - start_time, 2)
     response_content = response.content
-    response_size = len(response.text)
+    response_size = len(response_content)
 
     if response.ok and not response_content:
         response.close()

@@ -396,24 +396,31 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(stats["model_stats"]["demo-model"]["cache_creation_input_tokens"], 1)
 
     def test_non_stream_cache_records_effective_upstream_model(self):
-        upstream = FakeResponse(payload={
+        upstream_payload = {
             "id": "chat-1",
             "model": "private-deployment",
-            "choices": [],
+            "choices": [{"message": {"role": "assistant", "content": "你好"}}],
             "usage": {"prompt_tokens": 2, "completion_tokens": 1},
-        })
+        }
+        upstream_content = json.dumps(upstream_payload, ensure_ascii=False).encode("utf-8")
+        upstream = FakeResponse(payload=upstream_payload, content=upstream_content)
 
-        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
             with self.app.test_client() as client:
                 response = client.post("/proxy/demo-profile/v1/chat/completions", json={
                     "model": "demo-model",
-                    "messages": [{"role": "user", "content": "hello"}],
+                    "messages": [{"role": "user", "content": "你好"}],
                 })
 
         self.assertEqual(response.status_code, 200)
         cached = next(iter(cache.cache.values()))
         self.assertEqual(cached["model"], "demo-model")
         self.assertEqual(cached["translated_model"], "chat-deployment")
+        self.assertEqual(
+            cached["request_size"],
+            len(json.dumps(post.call_args.kwargs["json"]).encode("utf-8")),
+        )
+        self.assertEqual(cached["response_size"], len(upstream_content))
 
     def test_error_responses_do_not_add_usage_to_token_stats(self):
         upstream = FakeResponse(
