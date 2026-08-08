@@ -10,7 +10,9 @@ import argparse
 import json
 import os
 import re
+import sys
 import tempfile
+import traceback
 import yaml
 
 from . import __version__
@@ -182,9 +184,14 @@ def main():
     if not os.path.exists(config_path):
         print(f"No config file found at {config_path}, will generate one.")
         generate_config_file()
+    # Server defaults; a config error aborts startup instead of silently
+    # running with a half-applied configuration.
+    host = 'localhost'
+    port = 8313
+    debug = DEBUG
+
     try:
         config = load_config(config_path)
-        print(config)
         # Load server settings from config (can be overridden by command line)
         host = config.get('address', 'localhost')
         port = config.get('port', 8313)
@@ -296,12 +303,19 @@ def main():
         print(f"Loaded configuration from: {config_path}")
 
     except Exception as e:
-        print(f"Error loading config file: {e}")
-        # Use default mappings on error
-        model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
-        chat_completions_model_support.load_from_config({
-            "chat_completions_model_support": DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
-        })
+        # Do not start with a half-applied config: some settings (enable_auth,
+        # model_mappings, port) would silently differ from what the file asks for,
+        # which is worse than not starting at all.
+        print(f"Error loading config file ({config_path}): {e!r}", file=sys.stderr)
+        traceback.print_exc()
+        print(
+            "Configuration was not applied; refusing to start with a partially "
+            "loaded configuration.\n"
+            f"Fix {config_path}, or move it aside and run 'ghc-api --config' to "
+            "regenerate a default one.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
     # Command line args override config file
     if args.address is not None:
