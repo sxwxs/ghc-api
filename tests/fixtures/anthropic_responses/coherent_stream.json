@@ -1,0 +1,103 @@
+{
+  "fixture_schema": "ghc-anthropic-responses-coherent-stream-v1",
+  "events": [
+    {
+      "type": "response.created",
+      "sequence_number": 0,
+      "response": {"id": "resp_fixture", "model": "gpt-fixture", "status": "in_progress", "output": []}
+    },
+    {
+      "type": "response.output_item.added",
+      "sequence_number": 1,
+      "output_index": 0,
+      "item": {"id": "rs_fixture", "type": "reasoning", "status": "in_progress", "summary": [], "encrypted_content": "<opaque>"}
+    },
+    {
+      "type": "response.output_item.done",
+      "sequence_number": 2,
+      "output_index": 0,
+      "item": {"id": "rs_fixture", "type": "reasoning", "status": "completed", "summary": [], "encrypted_content": "<opaque>"}
+    },
+    {
+      "type": "response.output_item.added",
+      "sequence_number": 3,
+      "output_index": 1,
+      "item": {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "in_progress", "phase": "commentary", "content": []}
+    },
+    {
+      "type": "response.output_text.delta",
+      "sequence_number": 4,
+      "output_index": 1,
+      "content_index": 0,
+      "item_id": "msg_fixture",
+      "delta": "<text>",
+      "logprobs": []
+    },
+    {
+      "type": "response.output_text.done",
+      "sequence_number": 5,
+      "output_index": 1,
+      "content_index": 0,
+      "item_id": "msg_fixture",
+      "text": "<text>",
+      "logprobs": []
+    },
+    {
+      "type": "response.output_item.done",
+      "sequence_number": 6,
+      "output_index": 1,
+      "item": {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed", "phase": "commentary", "content": [{"type": "output_text", "text": "<text>", "annotations": [], "logprobs": []}]}
+    },
+    {
+      "type": "response.output_item.added",
+      "sequence_number": 7,
+      "output_index": 2,
+      "item": {"id": "fc_fixture", "type": "function_call", "status": "in_progress", "call_id": "call_fixture", "name": "Read", "arguments": ""}
+    },
+    {
+      "type": "response.function_call_arguments.delta",
+      "sequence_number": 8,
+      "output_index": 2,
+      "item_id": "fc_fixture",
+      "delta": "{\"path\":\"<path>\"}"
+    },
+    {
+      "type": "response.function_call_arguments.done",
+      "sequence_number": 9,
+      "output_index": 2,
+      "item_id": "fc_fixture",
+      "arguments": "{\"path\":\"<path>\"}"
+    },
+    {
+      "type": "response.output_item.done",
+      "sequence_number": 10,
+      "output_index": 2,
+      "item": {"id": "fc_fixture", "type": "function_call", "status": "completed", "call_id": "call_fixture", "name": "Read", "arguments": "{\"path\":\"<path>\"}"}
+    },
+    {
+      "type": "response.completed",
+      "sequence_number": 11,
+      "response": {
+        "id": "resp_fixture",
+        "model": "gpt-fixture",
+        "status": "completed",
+        "output": [
+          {"id": "rs_fixture", "type": "reasoning", "status": "completed", "summary": [], "encrypted_content": "<opaque>"},
+          {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed", "phase": "commentary", "content": [{"type": "output_text", "text": "<text>", "annotations": [], "logprobs": []}]},
+          {"id": "fc_fixture", "type": "function_call", "status": "completed", "call_id": "call_fixture", "name": "Read", "arguments": "{\"path\":\"<path>\"}"}
+        ],
+        "usage": {"input_tokens": 7, "input_tokens_details": {"cached_tokens": 2}, "output_tokens": 3, "output_tokens_details": {"reasoning_tokens": 1}, "total_tokens": 10}
+      }
+    }
+  ],
+  "expected": {
+    "event_suffix": ["message_delta", "message_stop"],
+    "content_block_types": ["text", "tool_use"],
+    "text": "<text>",
+    "tool_name": "Read",
+    "tool_input": {"path": "<path>"},
+    "stop_reason": "tool_use",
+    "replay_item_types": ["reasoning", "message", "function_call"],
+    "usage": {"input_tokens": 5, "cache_read_input_tokens": 2, "output_tokens": 3}
+  }
+}

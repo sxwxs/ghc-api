@@ -32,20 +32,67 @@ class BackgroundResult:
 
     def __init__(self, fn):
         self._q: "queue.Queue" = queue.Queue(maxsize=1)
+        self._abandoned = threading.Event()
+        self._done = threading.Event()
+        self._delivery_lock = threading.Lock()
+
+        def _close_if_possible(value):
+            close = getattr(value, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
         def _runner():
             try:
-                self._q.put((False, fn()))
+                result = fn()
+                with self._delivery_lock:
+                    if self._abandoned.is_set():
+                        _close_if_possible(result)
+                    else:
+                        self._q.put((False, result))
             except Exception as exc:  # propagate to the consumer thread
-                self._q.put((True, exc))
+                with self._delivery_lock:
+                    if not self._abandoned.is_set():
+                        self._q.put((True, exc))
+            finally:
+                self._done.set()
 
-        threading.Thread(target=_runner, daemon=True).start()
+        self._thread = threading.Thread(target=_runner, daemon=True)
+        self._thread.start()
 
     def get(self, timeout=None):
         is_exc, item = self._q.get(timeout=timeout)
         if is_exc:
             raise item
         return item
+
+    def abandon(self):
+        """Stop delivering the result and close it whenever it becomes ready.
+
+        Python ``requests`` cannot reliably cancel a blocking header read from
+        another thread. This still guarantees that a late Response is closed
+        immediately instead of leaking its socket after the client disconnects.
+        """
+
+        with self._delivery_lock:
+            self._abandoned.set()
+            try:
+                is_exc, item = self._q.get_nowait()
+            except queue.Empty:
+                return
+            if not is_exc:
+                close = getattr(item, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+
+    @property
+    def done(self):
+        return self._done.is_set()
 
 
 def wait_result_with_keepalive(pending_result, interval):
@@ -79,19 +126,31 @@ def iter_lines_with_keepalive(response, interval):
         yield from response.iter_lines()
         return
 
-    q: "queue.Queue" = queue.Queue()
+    # Bound producer lead so a fast or adversarial upstream cannot queue an
+    # unbounded response in memory while the downstream client is slow.
+    q: "queue.Queue" = queue.Queue(maxsize=128)
     stop = threading.Event()
+
+    def _put(item):
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _reader():
         try:
             for line in response.iter_lines():
                 if stop.is_set():
                     break
-                q.put((False, line))
+                if not _put((False, line)):
+                    break
         except Exception as exc:  # propagate to the consumer thread
-            q.put((True, exc))
+            _put((True, exc))
         finally:
-            q.put((False, _SENTINEL))
+            _put((False, _SENTINEL))
 
     threading.Thread(target=_reader, daemon=True).start()
 

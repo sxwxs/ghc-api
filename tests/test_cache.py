@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime
 from unittest import mock
@@ -118,6 +119,32 @@ class RequestDurationOnErrorTests(unittest.TestCase):
         cache.update_request_state("req-ok", RequestCache.STATE_RECEIVING)
 
         self.assertEqual(cache.get_request("req-ok")["duration"], 0)
+
+
+class RequestCacheTranslatedStreamTests(unittest.TestCase):
+    def test_raw_events_and_terminal_projection_share_cache_when_small(self) -> None:
+        cache = RequestCache(max_request_size=1024)
+        cache.start_request("req", {"request_size": 1})
+        cache.complete_request("req", {
+            "raw_events": ["raw"],
+            "response_body": {"type": "message"},
+            "response_size": 3,
+        })
+        item = cache.get_request("req")
+        self.assertEqual(item["raw_events"], ["raw"])
+        self.assertEqual(item["response_body"], {"type": "message"})
+
+    def test_both_stream_views_are_truncated_at_dashboard_limit(self) -> None:
+        cache = RequestCache(max_request_size=4)
+        cache.start_request("req", {"request_size": 1})
+        cache.complete_request("req", {
+            "raw_events": ["private raw event"],
+            "response_body": {"private": "terminal projection"},
+            "response_size": 100,
+        })
+        item = cache.get_request("req")
+        self.assertTrue(json.loads(item["raw_events"][0])["_truncated"])
+        self.assertTrue(item["response_body"]["_truncated"])
 
 
 if __name__ == "__main__":

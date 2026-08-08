@@ -137,6 +137,34 @@ class KeepaliveTest(unittest.TestCase):
         with self.assertRaises(requests.exceptions.ConnectionError):
             list(wait_result_with_keepalive(pending, interval=5))
 
+    def test_abandoned_background_result_closes_late_response(self):
+        release = threading.Event()
+        closed = threading.Event()
+
+        class Result:
+            def close(self):
+                closed.set()
+
+        pending = BackgroundResult(lambda: (release.wait(2), Result())[1])
+        pending.abandon()
+        release.set()
+        self.assertTrue(closed.wait(2))
+        self.assertTrue(pending.done)
+
+    def test_abandon_closes_already_queued_response(self):
+        closed = threading.Event()
+
+        class Result:
+            def close(self):
+                closed.set()
+
+        pending = BackgroundResult(Result)
+        deadline = time.time() + 2
+        while not pending.done and time.time() < deadline:
+            time.sleep(0.001)
+        pending.abandon()
+        self.assertTrue(closed.wait(2))
+
 
 if __name__ == "__main__":
     unittest.main()

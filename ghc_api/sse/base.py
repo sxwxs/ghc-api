@@ -46,6 +46,10 @@ class SSEStreamHandler:
       - ``forward_raw_line(line)`` -- yield SSE-formatted strings for upstream lines
         that are neither ``event:`` nor ``data:`` headers. Default: passes through
         unchanged when upstream returned an error (matches existing behavior).
+      - ``forward_malformed_data(data)`` -- handle a ``data:`` payload that is
+        not JSON. Default: pass it through verbatim.
+      - ``parse_event_data(data)`` -- decode one JSON data payload. Protocol
+        adapters may override this with a stricter parser.
       - ``finalize_stream()`` -- emit any pending events after the upstream
         iterator ends. Default: no events.
       - ``extra_cache_fields()`` -- additional keys to pass to ``cache.complete_request``.
@@ -65,6 +69,7 @@ class SSEStreamHandler:
     # signals end-of-stream via ``message_stop`` events) and clients parsing
     # each line as Anthropic JSON would choke on a bare ``[DONE]``.
     emit_done_sentinel: bool = True
+    capture_raw_sse_lines: bool = False
 
     def __init__(
         self,
@@ -79,6 +84,7 @@ class SSEStreamHandler:
         request_headers: Optional[Dict] = None,
         client_ip: Optional[str] = None,
         user_id: str = "anonymous",
+        max_raw_capture_bytes: int = 0,
     ) -> None:
         self.response = response
         self.request_id = request_id
@@ -95,6 +101,17 @@ class SSEStreamHandler:
         # Every ``data:`` payload seen on the wire, in order. This is what gets
         # persisted to the cache for later inspection -- no transformation.
         self.raw_events: List[str] = []
+        # Logical SSE lines, including event headers, comments, unknown fields
+        # and blank frame separators. Protocol-specific durable audit stores
+        # can use this without changing the bounded dashboard cache contract.
+        self.raw_sse_lines: List[str] = []
+        self.max_raw_capture_bytes = max(0, int(max_raw_capture_bytes or 0))
+        # Combined retained-content budget across raw_events and raw_sse_lines.
+        # A data payload is intentionally charged for both copies because both
+        # views are kept in memory and persisted in the encrypted audit record.
+        self.raw_capture_bytes = 0
+        self.raw_capture_truncated = False
+        self.response_wire_bytes = 0
 
         # Bookkeeping for cache totals -- populated by ``on_event``.
         self.input_tokens: int = 0
@@ -110,6 +127,7 @@ class SSEStreamHandler:
         # :meth:`stream` so the request shows up in /api/requests before the
         # first byte streams (Flask iterates the generator lazily).
         self._cache_seeded: bool = False
+        self._cache_completed: bool = False
 
     # ------------------------------------------------------------------ hooks
 
@@ -133,6 +151,13 @@ class SSEStreamHandler:
         if self.status_code > 399:
             yield f"{line}\n\n"
 
+    def forward_malformed_data(self, data: str) -> Iterator[str]:
+        """Handle malformed JSON from an SSE ``data:`` line."""
+        yield f"data: {data}\n\n"
+
+    def parse_event_data(self, data: str) -> Any:
+        return json.loads(data)
+
     def finalize_stream(self) -> Iterator[tuple]:
         """Emit any pending events after the upstream iterator ends. Default: none."""
         return iter(())
@@ -148,6 +173,22 @@ class SSEStreamHandler:
     def extra_cache_fields(self) -> Dict[str, Any]:
         """Extra keys for ``cache.complete_request``. Default: none."""
         return {}
+
+    def raw_events_for_cache(self) -> List[str]:
+        """Dashboard projection of captured data payloads."""
+
+        return list(self.raw_events)
+
+    def _capture_raw_value(self, target: List[str], value: str) -> None:
+        size = len(value.encode("utf-8", errors="strict"))
+        if (
+            self.max_raw_capture_bytes > 0
+            and self.raw_capture_bytes + size > self.max_raw_capture_bytes
+        ):
+            self.raw_capture_truncated = True
+            return
+        target.append(value)
+        self.raw_capture_bytes += size
 
     # ----------------------------------------------------------- cache helpers
 
@@ -175,11 +216,14 @@ class SSEStreamHandler:
         )
 
     def _complete_cache(self) -> None:
+        if self._cache_completed:
+            return
+        self._cache_completed = True
         duration = round(time.time() - self.start_time, 2)
-        response_size = sum(len(e) for e in self.raw_events)
+        response_size = self.response_wire_bytes
         record = {
             "request_body": self.request_body_for_cache,
-            "raw_events": self.raw_events,
+            "raw_events": self.raw_events_for_cache(),
             "model": self.original_model,
             "translated_model": (
                 self.translated_model
@@ -235,12 +279,25 @@ class SSEStreamHandler:
                     continue
 
                 if not line:
+                    if self.capture_raw_sse_lines:
+                        self._capture_raw_value(self.raw_sse_lines, "")
                     continue
 
-                line = line.decode("utf-8")
+                try:
+                    line = line.decode("utf-8")
+                except UnicodeDecodeError:
+                    if self.capture_raw_sse_lines:
+                        self._capture_raw_value(
+                            self.raw_sse_lines, "hex:" + bytes(line).hex()
+                        )
+                    raise
+                if self.capture_raw_sse_lines:
+                    self._capture_raw_value(self.raw_sse_lines, line)
 
-                if line.startswith("event: "):
-                    sse_event_type = line[7:]
+                if line.startswith("event:"):
+                    sse_event_type = line[6:]
+                    if sse_event_type.startswith(" "):
+                        sse_event_type = sse_event_type[1:]
                     if sse_event_type == "ping":
                         counters.incr("ping_received")
                     if not self.emit_event_header:
@@ -252,8 +309,10 @@ class SSEStreamHandler:
                     # with each ``data:`` line below; do not yield it here.
                     continue
 
-                if line.startswith("data: "):
-                    data = line[6:]
+                if line.startswith("data:"):
+                    data = line[5:]
+                    if data.startswith(" "):
+                        data = data[1:]
                     if data == "[DONE]":
                         if self.emit_done_sentinel:
                             yield "data: [DONE]\n\n"
@@ -261,13 +320,15 @@ class SSEStreamHandler:
 
                     # Record the raw payload before anything else so even
                     # malformed JSON is preserved in the cache.
-                    self.raw_events.append(data)
+                    self.response_wire_bytes += len(data.encode("utf-8"))
+                    self._capture_raw_value(self.raw_events, data)
 
                     try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        # Forward malformed payloads verbatim and skip hooks.
-                        yield f"data: {data}\n\n"
+                        event = self.parse_event_data(data)
+                    except (ValueError, TypeError, UnicodeError):
+                        # The raw payload is already cached. Let protocol-aware
+                        # subclasses decide whether passthrough is safe.
+                        yield from self.forward_malformed_data(data)
                         sse_event_type = ""
                         continue
 
@@ -301,8 +362,12 @@ class SSEStreamHandler:
             self.error_occurred = True
             self.status_code = 504
             print(f"{self.log_prefix} Upstream timeout/connection error for request {self.request_id}: {type(e).__name__}")
+            formatted = self._format_transport_error(e)
+            if formatted:
+                yield formatted
         except GeneratorExit:
             self.error_occurred = True
+            self.status_code = 499
             print(f"{self.log_prefix} Client disconnected for request {self.request_id}")
             cache.update_request_state(self.request_id, cache.STATE_ERROR, status_code=499)
             return
@@ -313,12 +378,22 @@ class SSEStreamHandler:
             try:
                 yield self._format_generic_error(e)
             except GeneratorExit:
+                self.status_code = 499
                 cache.update_request_state(self.request_id, cache.STATE_ERROR, status_code=499)
                 return
-
-        self._complete_cache()
+        finally:
+            # Preserve partial raw events and diagnostics even when the client
+            # disconnects or the generator exits early.  Replay callbacks only
+            # run on a validated terminal event, so partial reasoning is never
+            # promoted to reusable state here.
+            self._complete_cache()
 
     def _format_generic_error(self, e: Exception) -> str:
         """SSE payload for the generic-Exception arm. Subclasses can override
         to emit an API-specific shape (e.g. Anthropic ``error`` event)."""
         return f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    def _format_transport_error(self, e: Exception) -> Optional[str]:
+        """Optional protocol-specific SSE error for an upstream timeout."""
+
+        return None

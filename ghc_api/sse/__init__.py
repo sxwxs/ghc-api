@@ -5,10 +5,11 @@ Base class plus per-endpoint subclasses. The base captures every upstream
 client unchanged. Subclasses opt into translations (request-shape rewriting,
 leaked-tool-call recovery) by overriding hook methods.
 
-Phase 1 covers the two passthrough paths:
+Available transports:
   - ``AnthropicDirectStreamHandler``         -> /v1/messages (passthrough)
   - ``AnthropicDirectStreamHandlerWithRecovery`` -> /v1/messages with leaked-tool-call recovery
   - ``OpenAIResponsesStreamHandler``         -> /v1/responses (passthrough)
+  - ``AnthropicResponsesStreamHandler``      -> Responses translated to /v1/messages
 """
 
 from .base import SSEStreamHandler
@@ -17,6 +18,11 @@ from .anthropic_direct import (
     AnthropicDirectStreamHandlerWithRecovery,
 )
 from .openai_responses import OpenAIResponsesStreamHandler, RetryingResponsesResponse
+from .anthropic_responses import (
+    AnthropicResponsesStreamHandler,
+    ResponsesAnthropicEventTranslator,
+    StopSequenceScanner,
+)
 from .proxy_chat_completions import ProxyChatCompletionsStreamHandler
 from .proxy_responses import ProxyResponsesStreamHandler
 
@@ -26,6 +32,9 @@ __all__ = [
     "AnthropicDirectStreamHandlerWithRecovery",
     "OpenAIResponsesStreamHandler",
     "RetryingResponsesResponse",
+    "AnthropicResponsesStreamHandler",
+    "ResponsesAnthropicEventTranslator",
+    "StopSequenceScanner",
     "ProxyChatCompletionsStreamHandler",
     "ProxyResponsesStreamHandler",
 ]

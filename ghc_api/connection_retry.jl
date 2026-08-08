@@ -1,0 +1,6 @@
+{"timestamp": "2026-07-13T03:22:27.652418", "request_id": "c192293d-d94a-4f0a-8dd0-740c978f074f", "endpoint": "/v1/messages (responses)", "attempt": 1, "max_attempts": 3, "error_type": "ReadTimeout", "error_message": "after acceptance simulation"}
+{"timestamp": "2026-07-13T03:22:56.052906", "request_id": "id", "endpoint": "/v1/messages (responses)", "attempt": 1, "max_attempts": 4, "error_type": "ConnectionError", "error_message": "boom"}
+{"timestamp": "2026-07-13T03:23:07.467100", "request_id": "id", "endpoint": "/v1/messages (responses)", "attempt": 1, "max_attempts": 4, "error_type": "ConnectionError", "error_message": "boom"}
+{"timestamp": "2026-07-13T03:23:07.469369", "request_id": "id", "endpoint": "/v1/messages (responses)", "attempt": 2, "max_attempts": 4, "error_type": "ConnectionError", "error_message": "boom"}
+{"timestamp": "2026-07-13T03:23:07.470804", "request_id": "id", "endpoint": "/v1/messages (responses)", "attempt": 3, "max_attempts": 4, "error_type": "ConnectionError", "error_message": "boom"}
+{"timestamp": "2026-07-13T03:23:07.471944", "request_id": "id", "endpoint": "/v1/messages (responses)", "attempt": 4, "max_attempts": 4, "error_type": "ConnectionError", "error_message": "boom"}
