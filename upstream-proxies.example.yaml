@@ -1,0 +1,76 @@
+# Configured Upstream Proxy
+# =========================
+# Copy this file to the ghc-api config directory as upstream-proxies.yaml,
+# or point GHC_API_PROXY_CONFIG at a private YAML file outside the repository.
+#
+# This example intentionally uses reserved example domains and placeholder
+# headers. Keep real endpoints, credential commands, headers, and model routes
+# in your private local configuration only.
+
+proxies:
+  example-llm:
+    enabled: true
+
+    # Authentication options:
+    #   type: none
+    #   type: bearer_env + env: VARIABLE_NAME
+    #   type: bearer_command + command: [executable, arg1, ...]
+    auth:
+      type: bearer_env
+      env: EXAMPLE_LLM_TOKEN
+
+    # Shared outbound headers. Client-supplied headers are not forwarded.
+    headers:
+      X-Client-Type: coding-agent
+      X-Quota-Id: ""
+
+    # Capture a routing/affinity header from an upstream response and include it
+    # on later requests for the same API/model route.
+    affinity:
+      enabled: true
+      response_header: X-Route-Token
+      request_header: X-Route-Token
+      scope: model
+      persist: true
+
+    apis:
+      responses:
+        enabled: true
+        upstream_url: https://gateway.example.test/responses
+        timeout_seconds: 180
+        max_connection_retries: 1
+        request_model: omit       # preserve | omit | upstream
+        response_model: public    # preserve | public
+        headers:
+          X-Protocol: responses
+
+      chat_completions:
+        enabled: true
+        upstream_url: https://gateway.example.test/chat/completions
+        timeout_seconds: 180
+        max_connection_retries: 1
+        request_model: upstream
+        response_model: public
+        headers:
+          X-Protocol: chat-completions
+
+    models:
+      example-coding-model:
+        display_name: Example Coding Model
+        reasoning: true
+        input: [text]
+        context_window: 128000
+        max_output_tokens: 16384
+
+        # Shared model-specific outbound headers.
+        headers:
+          X-Upstream-Model: example-route
+
+        apis:
+          responses:
+            enabled: true
+            upstream_model: null
+
+          chat_completions:
+            enabled: true
+            upstream_model: example-chat-deployment
