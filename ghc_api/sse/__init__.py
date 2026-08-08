@@ -23,6 +23,8 @@ from .anthropic_responses import (
     ResponsesAnthropicEventTranslator,
     StopSequenceScanner,
 )
+from .proxy_chat_completions import ProxyChatCompletionsStreamHandler
+from .proxy_responses import ProxyResponsesStreamHandler
 
 __all__ = [
     "SSEStreamHandler",
@@ -33,4 +35,6 @@ __all__ = [
     "AnthropicResponsesStreamHandler",
     "ResponsesAnthropicEventTranslator",
     "StopSequenceScanner",
+    "ProxyChatCompletionsStreamHandler",
+    "ProxyResponsesStreamHandler",
 ]

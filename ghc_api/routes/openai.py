@@ -36,6 +36,7 @@ from ..utils import (
     log_error_request,
     remove_encrypted_content_items,
 )
+from ..webiq import LEGACY_OPTION_MESSAGE, pop_legacy_option
 
 openai_bp = Blueprint('openai', __name__)
 
@@ -1019,6 +1020,16 @@ def chat_completions():
             payload = dict(payload)
             payload["model"] = translated_model
 
+        # Web IQ is no longer applied inside the proxy path. Strip the retired
+        # option so it can never reach Copilot as an unknown parameter, and
+        # tell callers that still send it where the feature moved.
+        if pop_legacy_option(payload):
+            return jsonify({"error": {
+                "message": LEGACY_OPTION_MESSAGE,
+                "type": "invalid_request_error",
+                "code": "webiq_search_options_removed",
+            }}), 400
+
         # Check for vision content
         enable_vision = False
         for msg in payload.get("messages", []):
@@ -1306,6 +1317,13 @@ def responses():
         if translated_model != original_model:
             payload = dict(payload)
             payload["model"] = translated_model
+
+        if pop_legacy_option(payload):
+            return jsonify({"error": {
+                "message": LEGACY_OPTION_MESSAGE,
+                "type": "invalid_request_error",
+                "code": "webiq_search_options_removed",
+            }}), 400
 
         # Check if this model supports the Responses API
         if not supports_responses_api(translated_model):

@@ -10,10 +10,12 @@ import argparse
 import json
 import os
 import re
+import sys
 import tempfile
+import traceback
 import yaml
 
-from . import __version__
+from . import __version__, webiq
 from .anthropic_responses import VALID_MODES, WIRE_PROFILES
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
@@ -301,9 +303,14 @@ def main():
     if not os.path.exists(config_path):
         print(f"No config file found at {config_path}, will generate one.")
         generate_config_file()
+    # Server defaults; a config error aborts startup instead of silently
+    # running with a half-applied configuration.
+    host = 'localhost'
+    port = 8313
+    debug = DEBUG
+
     try:
         config = load_config(config_path)
-        print(config)
         # Load server settings from config (can be overridden by command line)
         host = config.get('address', 'localhost')
         port = config.get('port', 8313)
@@ -369,6 +376,31 @@ def main():
         if 'web_search_proxy_endpoint' in config:
             state.web_search_proxy_endpoint = config['web_search_proxy_endpoint']
 
+        # Load Microsoft Web IQ settings. The API key is deliberately kept in
+        # server-side state and only a configured/not-configured flag reaches UI.
+        if 'enable_webiq_search' in config:
+            state.enable_webiq_search = bool(config['enable_webiq_search'])
+        if 'webiq_api_key' in config:
+            state.webiq_api_key = str(config['webiq_api_key'] or '')
+        if 'webiq_endpoint' in config:
+            state.webiq_endpoint = str(config['webiq_endpoint'] or state.webiq_endpoint)
+        if 'webiq_max_results' in config:
+            # Clamp to the same limit the webiq_search tool contract advertises,
+            # so a larger config value cannot look accepted but be capped later.
+            state.webiq_max_results = max(1, min(webiq.MAX_RESULTS_LIMIT, int(config['webiq_max_results'])))
+        if 'webiq_max_length' in config:
+            state.webiq_max_length = max(1, min(500000, int(config['webiq_max_length'])))
+        if 'webiq_content_format' in config:
+            state.webiq_content_format = str(config['webiq_content_format'])
+        if 'webiq_language' in config:
+            state.webiq_language = str(config['webiq_language'])
+        if 'webiq_region' in config:
+            state.webiq_region = str(config['webiq_region'])
+        if 'webiq_safe_search' in config:
+            state.webiq_safe_search = str(config['webiq_safe_search'])
+        if 'webiq_timeout' in config:
+            state.webiq_timeout = max(1, int(config['webiq_timeout']))
+
         # Load user-token auth setting
         if 'enable_auth' in config:
             state.enable_auth = bool(config['enable_auth'])
@@ -391,16 +423,21 @@ def main():
         print(f"Loaded configuration from: {config_path}")
 
     except Exception as e:
-        print(f"Error loading config file: {e}")
-        # Never fall back from a requested lossless policy to the more
-        # permissive in-memory defaults after a validation error.
+        # Do not start with a half-applied config: some settings (enable_auth,
+        # model_mappings, port) would silently differ from what the file asks for,
+        # which is worse than not starting at all. Also ensure a caller that catches
+        # SystemExit cannot use a partially applied Anthropic compatibility policy.
         state.anthropic_responses_compat_enabled = False
-        print("[AnthropicResponsesCompat] Disabled because configuration validation failed")
-        # Use default mappings on error
-        model_mappings.load_from_config({"model_mappings": DEFAULT_MODEL_MAPPINGS})
-        chat_completions_model_support.load_from_config({
-            "chat_completions_model_support": DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
-        })
+        print(f"Error loading config file ({config_path}): {e!r}", file=sys.stderr)
+        traceback.print_exc()
+        print(
+            "Configuration was not applied; refusing to start with a partially "
+            "loaded configuration.\n"
+            f"Fix {config_path}, or move it aside and run 'ghc-api --config' to "
+            "regenerate a default one.",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
 
     # Command line args override config file
     if args.address is not None:

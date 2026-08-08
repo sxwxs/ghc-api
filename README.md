@@ -23,6 +23,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Safe Backups**: Auto backup overwritten config files as `*.YYYYMMDD_HHMMSS.bak`
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
+- **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
 
 ## Maintenance Guides
 
@@ -310,7 +311,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, plus their non-`/v1` aliases) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -391,6 +392,17 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 ### Anthropic Compatible
 
 - `POST /v1/messages` - Messages API (Anthropic format)
+
+### Configured Upstream Proxy
+
+Optional private upstream profiles expose isolated routes without changing the existing Copilot endpoints:
+
+- `POST /proxy/<profile>/v1/responses`
+- `POST /proxy/<profile>/v1/chat/completions`
+- `GET /proxy/<profile>/v1/models`
+- `GET /proxy/models` - First-party model catalog used by the built-in Chat page
+
+Configured models are selectable from `/chat` and participate in the same request cache, request browser, token statistics, per-user usage reporting, and persisted request-file statistics as existing endpoints. Configuration lives in a separate private `upstream-proxies.yaml` file and supports independent upstream authentication, profile/API/model headers, public-to-upstream model mapping, and response-header affinity persistence. See [Configured Upstream Proxy](UPSTREAM_PROXY.md).
 
 ### Dashboard & Monitoring
 
@@ -530,7 +542,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
@@ -562,6 +574,16 @@ server {
     }
     # Aliases without the /v1 prefix
     location ~ ^/(chat/completions|responses|models)(/|$) {
+        auth_basic off;
+        proxy_pass http://127.0.0.1:8313;
+        proxy_buffering off;
+        proxy_read_timeout 1200s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Configured upstream proxy routes use the same client bearer-token model.
+    location ^~ /proxy/ {
         auth_basic off;
         proxy_pass http://127.0.0.1:8313;
         proxy_buffering off;

@@ -261,6 +261,37 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
         self.assertEqual(entry["output_tokens"], 4)
         self.assertEqual(entry["cache_creation_input_tokens"], 2)
 
+    def test_incomplete_response_records_terminal_usage(self):
+        incomplete = json.dumps({
+            "type": "response.incomplete",
+            "response": {
+                "usage": {
+                    "input_tokens": 7,
+                    "output_tokens": 3,
+                    "input_tokens_details": {"cached_tokens": 1},
+                }
+            },
+        })
+        handler = OpenAIResponsesStreamHandler(
+            response=_FakeResponse([
+                b"event: response.incomplete",
+                f"data: {incomplete}".encode(),
+            ]),
+            request_id="req-incomplete",
+            request_size=10,
+            start_time=0.0,
+            original_model="gpt-5",
+            translated_model="gpt-5",
+            request_body_for_cache={"model": "gpt-5"},
+        )
+
+        _collect(handler._generate())
+
+        entry = self.cache.get_request("req-incomplete")
+        self.assertEqual(entry["input_tokens"], 7)
+        self.assertEqual(entry["output_tokens"], 3)
+        self.assertEqual(entry["cache_creation_input_tokens"], 1)
+
     def test_terminal_response_failed_is_recorded_as_error(self):
         failed = json.dumps({
             "type": "response.failed",

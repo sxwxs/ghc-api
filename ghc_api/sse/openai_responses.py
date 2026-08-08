@@ -142,7 +142,7 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     emit_event_header = False
 
     def on_event(self, event_type: str, event: Dict) -> None:
-        if event_type == "response.completed":
+        if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
             usage = resp.get("usage", {}) or {}
             self.input_tokens = usage.get("input_tokens", 0)

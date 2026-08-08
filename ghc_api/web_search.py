@@ -1,10 +1,14 @@
 """
-Web search proxy fallback.
+Web search proxy fallback for the Anthropic (/v1/messages) routes.
 
 When the Copilot backend rejects a request containing the web_search tool,
 this module calls an external search proxy, injects the results into the
 system prompt, removes the web_search tool, and returns a modified payload
 ready for retry.
+
+Note: this is a reactive fallback for a backend rejection, not a user-facing
+search feature. Microsoft Web IQ lives in ``ghc_api/webiq.py`` and is exposed
+as an LLM-callable tool instead.
 """
 
 from typing import Any, Dict, List
@@ -115,6 +119,13 @@ def remove_web_search_tools(payload: Dict) -> Dict:
         new_payload["tools"] = filtered
     else:
         new_payload.pop("tools", None)
+
+    tool_choice = new_payload.get("tool_choice")
+    choice_type = tool_choice.get("type", "") if isinstance(tool_choice, dict) else ""
+    choice_name = tool_choice.get("name", "") if isinstance(tool_choice, dict) else ""
+    if (not filtered or
+            (isinstance(choice_type, str) and choice_type.startswith("web_search")) or
+            choice_name == "web_search"):
         new_payload.pop("tool_choice", None)
     return new_payload
 

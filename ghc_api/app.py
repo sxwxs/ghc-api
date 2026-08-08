@@ -10,6 +10,8 @@ from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
 from .routes.dashboard import dashboard_bp
 from .routes.openai import openai_bp
+from .routes.proxy import proxy_bp
+from .routes.webiq import webiq_bp
 from .state import state
 
 
@@ -30,6 +32,8 @@ PROTECTED_PATHS = frozenset({
     "/models",
     "/v1/models/full/",
     "/models/full/",
+    # Spends the server-held Web IQ quota, so it is gated like the LLM paths.
+    "/v1/webiq/search",
 })
 
 
@@ -62,9 +66,11 @@ def create_app() -> Flask:
     # Register blueprints
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(openai_bp)
+    app.register_blueprint(proxy_bp)
     app.register_blueprint(anthropic_bp)
     app.register_blueprint(agent_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(webiq_bp)
 
     # Error handlers
     @app.errorhandler(404)

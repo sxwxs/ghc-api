@@ -102,6 +102,19 @@ class State:
         self.enable_web_search_proxy: bool = False
         self.web_search_proxy_endpoint: str = ""
 
+        # Microsoft Web IQ search settings. The API key may be loaded directly
+        # from config.yaml; it is never exposed to browser clients.
+        self.enable_webiq_search: bool = False
+        self.webiq_api_key: str = ""
+        self.webiq_endpoint: str = "https://api.microsoftol.com/v3/search/web"
+        self.webiq_max_results: int = 5
+        self.webiq_max_length: int = 3000
+        self.webiq_content_format: str = "passage"
+        self.webiq_language: str = "en"
+        self.webiq_region: str = "US"
+        self.webiq_safe_search: str = "strict"
+        self.webiq_timeout: int = 30
+
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses,
         # /v1/embeddings, and /v1/models require an approved user token.

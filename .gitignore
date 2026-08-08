@@ -7,6 +7,10 @@ dist/
 workspace/
 build/
 
+# Private configured-upstream definitions belong outside the repository.
+/upstream-proxies.yaml
+/upstream-proxies.local.yaml
+
 # Local request dumps may contain private prompts and responses.
 /opus.jl
 /gpt.jl
