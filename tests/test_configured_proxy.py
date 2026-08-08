@@ -236,12 +236,26 @@ class ConfiguredProxyAuthTest(unittest.TestCase):
 
 
 class ConfiguredProxyRouteTest(unittest.TestCase):
+    @staticmethod
+    def _reset_request_cache():
+        with cache.lock:
+            cache.cache.clear()
+            cache.request_count = 0
+            cache.bytes_sent = 0
+            cache.bytes_received = 0
+            cache.model_stats.clear()
+            cache.endpoint_stats.clear()
+            cache.user_model_stats.clear()
+            cache.user_endpoint_stats.clear()
+            cache.user_totals.clear()
+
     def setUp(self):
         self.saved_enable_auth = state.enable_auth
         state.enable_auth = False
-        cache.cache.clear()
+        self._reset_request_cache()
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
+        self.root = root
         config_path = root / "proxies.yaml"
         config_path.write_text(CONFIG, encoding="utf-8")
         self.runtime = ProxyRuntime(
@@ -256,7 +270,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.runtime_patch.stop()
         self.temp_dir.cleanup()
         state.enable_auth = self.saved_enable_auth
-        cache.cache.clear()
+        self._reset_request_cache()
 
     def test_responses_proxy_omits_model_rewrites_response_and_reuses_affinity(self):
         first = FakeResponse(
@@ -329,6 +343,22 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["json"]["model"], "chat-deployment")
         cached = next(iter(cache.cache.values()))
         self.assertEqual(cached["translated_model"], "chat-deployment")
+        self.assertEqual(cached["input_tokens"], 2)
+        self.assertEqual(cached["output_tokens"], 1)
+        stats = cache.get_stats()
+        self.assertEqual(stats["model_stats"]["chat-deployment"]["input_tokens"], 2)
+        self.assertEqual(stats["model_stats"]["chat-deployment"]["output_tokens"], 1)
+        self.assertEqual(
+            stats["endpoint_stats"]["/proxy/demo-profile/v1/chat/completions"]["request_count"],
+            1,
+        )
+        self.assertEqual(cached["upstream_provider"], "configured_proxy")
+        self.assertEqual(cached["upstream_profile"], "demo-profile")
+        self.assertEqual(cached["upstream_api"], "chat_completions")
+        self.assertEqual(
+            cache.get_user_model_token_snapshot()[("anonymous", "chat-deployment")]["request_count"],
+            1,
+        )
 
     def test_responses_stream_rewrites_nested_model_and_extracts_usage(self):
         lines = [
@@ -360,6 +390,10 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(cached["output_tokens"], 2)
         self.assertEqual(cached["cache_creation_input_tokens"], 1)
         self.assertIn('"model":"private-deployment"', cached["raw_events"][-1])
+        stats = cache.get_stats()
+        self.assertEqual(stats["model_stats"]["demo-model"]["input_tokens"], 4)
+        self.assertEqual(stats["model_stats"]["demo-model"]["output_tokens"], 2)
+        self.assertEqual(stats["model_stats"]["demo-model"]["cache_creation_input_tokens"], 1)
 
     def test_non_stream_cache_records_effective_upstream_model(self):
         upstream = FakeResponse(payload={
@@ -380,6 +414,72 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         cached = next(iter(cache.cache.values()))
         self.assertEqual(cached["model"], "demo-model")
         self.assertEqual(cached["translated_model"], "chat-deployment")
+
+    def test_error_responses_do_not_add_usage_to_token_stats(self):
+        upstream = FakeResponse(
+            status_code=429,
+            payload={
+                "error": {"message": "rate limited"},
+                "usage": {
+                    "prompt_tokens": 99,
+                    "completion_tokens": 88,
+                    "prompt_tokens_details": {"cached_tokens": 77},
+                },
+            },
+        )
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/chat/completions", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                })
+
+        self.assertEqual(response.status_code, 429)
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["input_tokens"], 0)
+        self.assertEqual(cached["output_tokens"], 0)
+        self.assertEqual(cached["cache_read_input_tokens"], 0)
+
+    def test_invalid_model_catalog_returns_configuration_error(self):
+        config_path = self.root / "invalid-proxies.yaml"
+        config_path.write_text("proxies: [invalid", encoding="utf-8")
+        invalid_runtime = ProxyRuntime(
+            registry=ProxyRegistry(config_path),
+            affinity_store=ProxyAffinityStore(self.root / "invalid-affinity.json"),
+        )
+
+        with mock.patch.object(proxy_routes, "proxy_runtime", invalid_runtime):
+            with self.app.test_client() as client:
+                response = client.get("/proxy/models")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error"]["code"], "proxy_config_error")
+
+    def test_model_catalog_exposes_profile_routing_without_private_config(self):
+        with self.app.test_client() as client:
+            response = client.get("/proxy/models")
+
+        self.assertEqual(response.status_code, 200)
+        model = response.get_json()["data"][0]
+        self.assertEqual(model["id"], "demo-model")
+        self.assertEqual(model["profile"], "demo-profile")
+        self.assertEqual(model["base_url"], "/proxy/demo-profile/v1")
+        self.assertEqual(model["supported_endpoints"], ["/responses", "/chat/completions"])
+        self.assertNotIn("headers", model)
+        self.assertNotIn("upstream_url", model)
+
+    def test_chat_ui_discovers_and_routes_configured_proxy_models(self):
+        with self.app.test_client() as client:
+            response = client.get("/chat")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        self.assertIn("fetch('/proxy/models')", html)
+        self.assertIn("Configured proxy unavailable: ", html)
+        self.assertIn("Configured proxy: ", html)
+        self.assertIn("baseUrl + (apiStyle === 'responses'", html)
+        self.assertIn("stream_options: { include_usage: true }", html)
 
     def test_models_are_isolated_to_profile_endpoint(self):
         with self.app.test_client() as client:
@@ -419,6 +519,31 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(response.status_code, 404)
         post.assert_not_called()
 
+    def test_approved_proxy_user_is_recorded_in_per_user_usage(self):
+        state.enable_auth = True
+        upstream = FakeResponse(payload={
+            "id": "chat-1",
+            "model": "private-deployment",
+            "choices": [],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        })
+
+        with mock.patch.object(
+            proxy_routes, "require_auth", return_value=AuthResult(user_id="alice")
+        ), mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/chat/completions", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                })
+
+        self.assertEqual(response.status_code, 200)
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["user_id"], "alice")
+        snapshot = cache.get_user_model_token_snapshot()
+        self.assertEqual(snapshot[("alice", "chat-deployment")]["input_tokens"], 2)
+        self.assertEqual(snapshot[("alice", "chat-deployment")]["output_tokens"], 1)
+
     def test_proxy_auth_is_blueprint_local(self):
         state.enable_auth = True
         denied = AuthResult(
@@ -429,7 +554,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         )
         with mock.patch.object(proxy_routes, "require_auth", return_value=denied) as require:
             with self.app.test_client() as client:
-                response = client.get("/proxy/demo-profile/v1/models")
+                response = client.get("/proxy/models")
 
         self.assertEqual(response.status_code, 401)
         require.assert_called_once()

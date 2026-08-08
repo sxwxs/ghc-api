@@ -708,8 +708,7 @@
         let isStreaming = false;
         let abortController = null;
         let modelsData = [];
-        let modelEndpoints = {};  // model id -> supported_endpoints array
-        let modelContextSizes = {}; // model id -> max_context_window_tokens
+        let modelTargets = {}; // selection key -> model id, provider, endpoints, and base URL
         let rawMode = false;
 
         // ---- Session management ----
@@ -757,6 +756,7 @@
             if (session && session.model) {
                 document.getElementById('model-select').value = session.model;
             }
+            updateEndpointOptions();
             updateWebSearchAvailability();
             renderSessionList();
             renderMessages();
@@ -1020,59 +1020,148 @@
             return String(n);
         }
 
+        function configuredModelKey(profile, modelId) {
+            return 'proxy:' + encodeURIComponent(profile) + ':' + encodeURIComponent(modelId);
+        }
+
+        function selectedModelTarget(selectionKey) {
+            const key = selectionKey || document.getElementById('model-select').value;
+            return modelTargets[key] || null;
+        }
+
+        function endpointForModel(selectionKey, apiStyle) {
+            const target = selectedModelTarget(selectionKey);
+            const baseUrl = target ? target.baseUrl : '/v1';
+            return baseUrl + (apiStyle === 'responses' ? '/responses' : '/chat/completions');
+        }
+
+        function addModelOption(group, key, model, target) {
+            modelTargets[key] = target;
+            modelsData.push({ key, model });
+            const opt = document.createElement('option');
+            opt.value = key;
+            let label = model.display_name || model.id;
+            if (model.display_name && model.display_name !== model.id) {
+                label += ' (' + model.id + ')';
+            } else if (model.owned_by) {
+                label += ' (' + model.owned_by + ')';
+            }
+            if (target.contextWindow) {
+                label += ' [' + formatTokenCount(target.contextWindow) + ' ctx]';
+            }
+            opt.textContent = label;
+            group.appendChild(opt);
+        }
+
         async function loadModels() {
             const select = document.getElementById('model-select');
+            const copilotModels = [];
+            const copilotMetadata = {};
+            const configuredModels = [];
+            let configuredModelsError = null;
+            modelTargets = {};
+            modelsData = [];
+
             try {
                 const res = await fetch('/v1/models');
                 const data = await res.json();
-                modelsData = data.data || [];
-
-                // Also fetch full model data for endpoint + context info
-                try {
-                    const fullRes = await fetch('/v1/models/full/');
-                    const fullData = await fullRes.json();
-                    const fullModels = fullData.data || fullData || [];
-                    if (Array.isArray(fullModels)) {
-                        for (const m of fullModels) {
-                            if (m.id && m.supported_endpoints) {
-                                modelEndpoints[m.id] = m.supported_endpoints;
-                            }
-                            const ctx = m.capabilities?.limits?.max_context_window_tokens;
-                            if (m.id && ctx) {
-                                modelContextSizes[m.id] = ctx;
-                            }
-                        }
-                    }
-                } catch {
-                    // Ignore - will fall back to chat completions, no context info
-                }
-
-                select.innerHTML = '';
-                if (modelsData.length === 0) {
-                    select.innerHTML = '<option value="">No models available</option>';
-                    return;
-                }
-
-                for (const m of modelsData) {
-                    const opt = document.createElement('option');
-                    opt.value = m.id;
-                    let label = m.id;
-                    if (m.owned_by) label += ' (' + m.owned_by + ')';
-                    const ctx = modelContextSizes[m.id];
-                    if (ctx) label += ' [' + formatTokenCount(ctx) + ' ctx]';
-                    opt.textContent = label;
-                    select.appendChild(opt);
-                }
-
-                // Restore last used model
-                const last = localStorage.getItem(MODEL_KEY);
-                if (last && modelsData.some(m => m.id === last)) {
-                    select.value = last;
-                }
-                updateWebSearchAvailability();
-            } catch (err) {
-                select.innerHTML = '<option value="">Failed to load models</option>';
+                if (res.ok && Array.isArray(data.data)) copilotModels.push(...data.data);
+            } catch {
+                // Configured proxies can still be available without Copilot models.
             }
+
+            try {
+                const fullRes = await fetch('/v1/models/full/');
+                const fullData = await fullRes.json();
+                const fullModels = fullData.data || fullData || [];
+                if (fullRes.ok && Array.isArray(fullModels)) {
+                    for (const model of fullModels) {
+                        if (model.id) copilotMetadata[model.id] = model;
+                    }
+                }
+            } catch {
+                // The compact model response remains usable without capabilities.
+            }
+
+            try {
+                const proxyRes = await fetch('/proxy/models');
+                const proxyData = await proxyRes.json();
+                if (proxyRes.ok && Array.isArray(proxyData.data)) {
+                    configuredModels.push(...proxyData.data);
+                } else if (!proxyRes.ok) {
+                    configuredModelsError = proxyData?.error?.message ||
+                        'Configured proxy models could not be loaded.';
+                }
+            } catch {
+                configuredModelsError = 'Configured proxy models could not be loaded.';
+            }
+
+            select.innerHTML = '';
+            if (copilotModels.length) {
+                const group = document.createElement('optgroup');
+                group.label = 'Copilot';
+                for (const model of copilotModels) {
+                    const metadata = copilotMetadata[model.id] || model;
+                    addModelOption(group, model.id, model, {
+                        type: 'copilot',
+                        id: model.id,
+                        baseUrl: '/v1',
+                        supportedEndpoints: metadata.supported_endpoints || model.supported_endpoints || [],
+                        contextWindow: metadata.capabilities?.limits?.max_context_window_tokens || null,
+                    });
+                }
+                select.appendChild(group);
+            }
+
+            if (configuredModels.length) {
+                const groups = {};
+                for (const model of configuredModels) {
+                    if (!model.id || !model.profile || !model.base_url) continue;
+                    if (!groups[model.profile]) {
+                        groups[model.profile] = document.createElement('optgroup');
+                        groups[model.profile].label = 'Configured proxy: ' + model.profile;
+                        select.appendChild(groups[model.profile]);
+                    }
+                    const key = configuredModelKey(model.profile, model.id);
+                    addModelOption(groups[model.profile], key, model, {
+                        type: 'configured_proxy',
+                        id: model.id,
+                        profile: model.profile,
+                        baseUrl: model.base_url,
+                        supportedEndpoints: model.supported_endpoints || [],
+                        contextWindow: model.context_window || null,
+                    });
+                }
+            } else if (configuredModelsError && copilotModels.length) {
+                const group = document.createElement('optgroup');
+                group.label = 'Configured proxy';
+                const option = document.createElement('option');
+                option.disabled = true;
+                option.textContent = 'Unavailable: ' + configuredModelsError;
+                group.appendChild(option);
+                select.appendChild(group);
+            }
+
+            if (modelsData.length === 0) {
+                const message = configuredModelsError
+                    ? 'Configured proxy unavailable: ' + configuredModelsError
+                    : 'No models available';
+                select.innerHTML = '';
+                const option = document.createElement('option');
+                option.value = '';
+                option.textContent = message;
+                select.appendChild(option);
+                updateEndpointOptions();
+                updateWebSearchAvailability();
+                return;
+            }
+
+            const last = localStorage.getItem(MODEL_KEY);
+            if (last && modelsData.some(item => item.key === last)) {
+                select.value = last;
+            }
+            updateEndpointOptions();
+            updateWebSearchAvailability();
         }
 
         function onModelChange() {
@@ -1083,30 +1172,58 @@
                 session.model = model;
                 saveSessions();
             }
+            updateEndpointOptions();
             updateWebSearchAvailability();
+        }
+
+        function updateEndpointOptions() {
+            const select = document.getElementById('endpoint-select');
+            const previous = select.value;
+            const target = selectedModelTarget();
+            const endpoints = [{ value: 'auto', label: 'auto' }];
+
+            if (target && target.type === 'configured_proxy') {
+                if (target.supportedEndpoints.some(e => e === '/responses' || e === 'responses')) {
+                    endpoints.push({ value: endpointForModel(null, 'responses'), label: endpointForModel(null, 'responses') });
+                }
+                if (target.supportedEndpoints.some(e => e === '/chat/completions' || e === 'chat/completions')) {
+                    endpoints.push({ value: endpointForModel(null, 'chat'), label: endpointForModel(null, 'chat') });
+                }
+            } else {
+                endpoints.push({ value: '/v1/responses', label: '/v1/responses' });
+                endpoints.push({ value: '/v1/chat/completions', label: '/v1/chat/completions' });
+            }
+
+            select.innerHTML = '';
+            for (const endpoint of endpoints) {
+                const option = document.createElement('option');
+                option.value = endpoint.value;
+                option.textContent = endpoint.label;
+                select.appendChild(option);
+            }
+            select.value = endpoints.some(endpoint => endpoint.value === previous) ? previous : 'auto';
         }
 
         function isGptModel(modelId) {
             return /^gpt(?:-|$)/i.test(modelId || '');
         }
 
-        function supportsResponses(modelId) {
-            const endpoints = modelEndpoints[modelId];
-            if (!endpoints) return false;
-            return endpoints.some(e =>
+        function supportsResponses(selectionKey) {
+            const target = selectedModelTarget(selectionKey);
+            if (!target) return false;
+            return target.supportedEndpoints.some(e =>
                 e === '/v1/responses' || e === '/responses' || e === 'responses'
             );
         }
 
-        function shouldUseResponses(modelId) {
-            // GPT models prefer their native Responses API whenever model
-            // metadata advertises it. Responses-only non-GPT models continue
-            // to use the same endpoint as before.
-            return supportsResponses(modelId);
+        function shouldUseResponses(selectionKey) {
+            return supportsResponses(selectionKey);
         }
 
-        function canUseWebSearch(modelId) {
-            return !rawMode && isGptModel(modelId) && shouldUseResponses(modelId);
+        function canUseWebSearch(selectionKey) {
+            const target = selectedModelTarget(selectionKey);
+            return !rawMode && target?.type === 'copilot' &&
+                isGptModel(target.id) && shouldUseResponses(selectionKey);
         }
 
         function updateWebSearchAvailability() {
@@ -1187,12 +1304,13 @@
                 session = getActiveSession();
             }
 
-            const model = document.getElementById('model-select').value;
-            if (!model) {
+            const modelSelection = document.getElementById('model-select').value;
+            const modelTarget = selectedModelTarget(modelSelection);
+            if (!modelTarget) {
                 appendMessageEl('error', 'Please select a model first.');
                 return;
             }
-            session.model = model;
+            session.model = modelSelection;
 
             // Add user message
             session.messages.push({ role: 'user', content: text });
@@ -1223,10 +1341,10 @@
 
             try {
                 let result;
-                if (shouldUseResponses(model)) {
-                    result = await streamResponses(model, session.messages, assistantDiv, contentDiv);
+                if (shouldUseResponses(modelSelection)) {
+                    result = await streamResponses(modelSelection, session.messages, assistantDiv, contentDiv);
                 } else {
-                    result = await streamChatCompletions(model, session.messages, assistantDiv, contentDiv);
+                    result = await streamChatCompletions(modelSelection, session.messages, assistantDiv, contentDiv);
                 }
 
                 const totalTime = (performance.now() - startTime) / 1000;
@@ -1502,9 +1620,12 @@
 
         // ---- Streaming: /v1/responses ----
 
-        async function streamResponses(model, messages, assistantDiv, contentDiv) {
+        async function streamResponses(modelSelection, messages, assistantDiv, contentDiv) {
+            const target = selectedModelTarget(modelSelection);
+            const model = target.id;
+            const endpoint = endpointForModel(modelSelection, 'responses');
             const input = buildResponsesInput(messages);
-            const tools = webIqTools(model, 'responses');
+            const tools = webIqTools(modelSelection, 'responses');
             const acc = newTurnAccumulator();
             const indicator = { el: null };
             // The final round is forced to 'none' so the model must produce an
@@ -1514,7 +1635,7 @@
             try {
                 for (let round = 0; round <= WEBIQ_MAX_TOOL_ROUNDS; round++) {
                     const turn = await streamResponsesRound(
-                        model, input, tools, toolChoice, assistantDiv, contentDiv, acc, indicator);
+                        endpoint, model, input, tools, toolChoice, assistantDiv, contentDiv, acc, indicator);
 
                     if (!turn.functionCalls.length) break;
                     // Defensive: the forced-answer round must not search again.
@@ -1556,7 +1677,7 @@
 
         // One request/response round. Streamed text is appended onto acc.text so
         // that a multi-round turn still reads as a single answer.
-        async function streamResponsesRound(model, input, tools, toolChoice, assistantDiv, contentDiv, acc, indicator) {
+        async function streamResponsesRound(endpoint, model, input, tools, toolChoice, assistantDiv, contentDiv, acc, indicator) {
             const body = {
                 model: model,
                 input: input.slice(),
@@ -1567,7 +1688,7 @@
                 body.tool_choice = toolChoice;
             }
 
-            const res = await fetch('/v1/responses', {
+            const res = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -1720,9 +1841,12 @@
 
         // ---- Streaming: /v1/chat/completions ----
 
-        async function streamChatCompletions(model, messages, assistantDiv, contentDiv) {
+        async function streamChatCompletions(modelSelection, messages, assistantDiv, contentDiv) {
+            const target = selectedModelTarget(modelSelection);
+            const model = target.id;
+            const endpoint = endpointForModel(modelSelection, 'chat');
             const msgs = buildChatMessages(messages);
-            const tools = webIqTools(model, 'chat');
+            const tools = webIqTools(modelSelection, 'chat');
             const acc = newTurnAccumulator();
             const indicator = { el: null };
             let toolChoice = 'auto';
@@ -1730,7 +1854,7 @@
             try {
                 for (let round = 0; round <= WEBIQ_MAX_TOOL_ROUNDS; round++) {
                     const turn = await streamChatCompletionsRound(
-                        model, msgs, tools, toolChoice, assistantDiv, contentDiv, acc, indicator);
+                        endpoint, model, msgs, tools, toolChoice, assistantDiv, contentDiv, acc, indicator);
 
                     if (!turn.toolCalls.length) break;
                     if (toolChoice === 'none') break;
@@ -1771,18 +1895,19 @@
             return acc;
         }
 
-        async function streamChatCompletionsRound(model, msgs, tools, toolChoice, assistantDiv, contentDiv, acc, indicator) {
+        async function streamChatCompletionsRound(endpoint, model, msgs, tools, toolChoice, assistantDiv, contentDiv, acc, indicator) {
             const body = {
                 model: model,
                 messages: msgs.slice(),
                 stream: true,
+                stream_options: { include_usage: true },
             };
             if (tools.length) {
                 body.tools = tools;
                 body.tool_choice = toolChoice;
             }
 
-            const res = await fetch('/v1/chat/completions', {
+            const res = await fetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -1905,10 +2030,15 @@
         }
 
         function resolveEndpoint(payload) {
-            const sel = document.getElementById('endpoint-select').value;
-            if (sel !== 'auto') return sel;
-            const model = payload.model || document.getElementById('model-select').value;
-            if (model && shouldUseResponses(model)) return '/v1/responses';
+            const selectedEndpoint = document.getElementById('endpoint-select').value;
+            if (selectedEndpoint !== 'auto') return selectedEndpoint;
+            const selectionKey = document.getElementById('model-select').value;
+            if (selectedModelTarget(selectionKey)) {
+                return endpointForModel(
+                    selectionKey,
+                    shouldUseResponses(selectionKey) ? 'responses' : 'chat'
+                );
+            }
             return '/v1/chat/completions';
         }
 
@@ -1947,10 +2077,10 @@
                 return;
             }
 
-            // Inject model from selector if not specified in payload
+            // Inject the public model id, not the UI's provider-qualified key.
             if (!payload.model) {
-                const model = document.getElementById('model-select').value;
-                if (model) payload.model = model;
+                const target = selectedModelTarget();
+                if (target) payload.model = target.id;
             }
 
             const endpoint = resolveEndpoint(payload);

@@ -12,7 +12,10 @@ For a profile named `example-llm`:
 POST /proxy/example-llm/v1/responses
 POST /proxy/example-llm/v1/chat/completions
 GET  /proxy/example-llm/v1/models
+GET  /proxy/models
 ```
+
+`GET /proxy/models` is a first-party discovery catalog used by the built-in `/chat` page. It adds the profile name and profile base URL to each public model entry without exposing upstream URLs, headers, credentials, or affinity values.
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 
@@ -194,6 +197,17 @@ Supported scopes:
 Responses and Chat Completions always use separate affinity keys. First-request discovery is serialized per key so concurrent cold requests do not establish conflicting routes.
 
 Affinity values are persisted atomically and are not exposed through the API or dashboard.
+
+## Built-in Chat page and accounting
+
+The built-in `/chat` page loads both Copilot models and configured-proxy models. Configured models are grouped by profile, and both Chat mode and Raw mode send requests directly to the selected profile's `/proxy/<profile>/v1/...` route. Model ids remain the public ids declared in this file.
+
+Configured-proxy requests use the same request cache, request browser, in-memory statistics, per-user statistics, persisted request JSONL, request-file statistics, and token-usage reporter as the existing endpoints. Token fields are extracted using the matching API shape:
+
+- Responses: `input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens`.
+- Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
+
+The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Error responses are recorded with zero usage, matching the existing endpoints.
 
 ## Client configuration
 

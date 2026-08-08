@@ -400,8 +400,9 @@ Optional private upstream profiles expose isolated routes without changing the e
 - `POST /proxy/<profile>/v1/responses`
 - `POST /proxy/<profile>/v1/chat/completions`
 - `GET /proxy/<profile>/v1/models`
+- `GET /proxy/models` - First-party model catalog used by the built-in Chat page
 
-Configuration lives in a separate private `upstream-proxies.yaml` file and supports independent upstream authentication, profile/API/model headers, public-to-upstream model mapping, and response-header affinity persistence. See [Configured Upstream Proxy](UPSTREAM_PROXY.md).
+Configured models are selectable from `/chat` and participate in the same request cache, request browser, token statistics, per-user usage reporting, and persisted request-file statistics as existing endpoints. Configuration lives in a separate private `upstream-proxies.yaml` file and supports independent upstream authentication, profile/API/model headers, public-to-upstream model mapping, and response-header affinity persistence. See [Configured Upstream Proxy](UPSTREAM_PROXY.md).
 
 ### Dashboard & Monitoring
 
