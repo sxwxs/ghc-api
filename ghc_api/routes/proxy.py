@@ -120,7 +120,10 @@ def _cache_non_stream(
     response_size: int,
     duration: float,
 ) -> None:
-    input_tokens, output_tokens, cache_creation, cache_read = _usage_for_api(api_name, result)
+    if status_code < 400:
+        input_tokens, output_tokens, cache_creation, cache_read = _usage_for_api(api_name, result)
+    else:
+        input_tokens, output_tokens, cache_creation, cache_read = 0, 0, 0, 0
     cache.add_request(request_id, {
         "request_headers": request_headers,
         "client_ip": client_ip,
@@ -198,7 +201,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     translated_model = upstream_payload.get("model")
     if not isinstance(translated_model, str) or not translated_model:
         translated_model = original_model
-    request_size = len(json.dumps(upstream_payload, ensure_ascii=False).encode("utf-8"))
+    request_size = len(json.dumps(upstream_payload).encode("utf-8"))
 
     if use_streaming and response.ok:
         content_length = response.headers.get("Content-Length")
@@ -292,6 +295,60 @@ def proxy_chat_completions(profile_name: str):
     return _handle_proxy_request(profile_name, "chat_completions")
 
 
+def _model_data(
+    profile_name: str,
+    profile: ProxyProfileConfig,
+    model: ProxyModelConfig,
+    include_profile: bool = False,
+) -> Optional[Dict]:
+    supported_endpoints = []
+    if model.api_config("responses") is not None and "responses" in profile.apis:
+        supported_endpoints.append("/responses")
+    if model.api_config("chat_completions") is not None and "chat_completions" in profile.apis:
+        supported_endpoints.append("/chat/completions")
+    if not supported_endpoints:
+        return None
+
+    data = {
+        "id": model.id,
+        "object": "model",
+        "type": "model",
+        "created": 0,
+        "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
+        "owned_by": "configured-proxy",
+        "display_name": model.display_name,
+        "supported_endpoints": supported_endpoints,
+        "reasoning": model.reasoning,
+        "input": list(model.input_types),
+        "context_window": model.context_window,
+        "max_output_tokens": model.max_output_tokens,
+    }
+    if include_profile:
+        data["profile"] = profile_name
+        data["base_url"] = f"/proxy/{profile_name}/v1"
+    return data
+
+
+@proxy_bp.route("/proxy/models", methods=["GET"])
+def proxy_model_catalog():
+    """List configured-proxy models across profiles for first-party clients."""
+    snapshot = proxy_runtime.registry.snapshot()
+    if not snapshot.profiles and proxy_runtime.registry.last_error:
+        return _error(
+            "Configured proxy models are unavailable because the private configuration is invalid.",
+            "proxy_config_error",
+            503,
+        )
+
+    models = []
+    for profile_name, profile in snapshot.profiles.items():
+        for model in profile.models.values():
+            data = _model_data(profile_name, profile, model, include_profile=True)
+            if data is not None:
+                models.append(data)
+    return jsonify({"object": "list", "data": models, "has_more": False})
+
+
 @proxy_bp.route("/proxy/<profile_name>/v1/models", methods=["GET"])
 def proxy_models(profile_name: str):
     profile = proxy_runtime.registry.get_profile(profile_name)
@@ -302,26 +359,8 @@ def proxy_models(profile_name: str):
 
     models = []
     for model in profile.models.values():
-        supported_endpoints = []
-        if model.api_config("responses") is not None and "responses" in profile.apis:
-            supported_endpoints.append("/responses")
-        if model.api_config("chat_completions") is not None and "chat_completions" in profile.apis:
-            supported_endpoints.append("/chat/completions")
-        if not supported_endpoints:
-            continue
-        models.append({
-            "id": model.id,
-            "object": "model",
-            "type": "model",
-            "created": 0,
-            "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
-            "owned_by": "configured-proxy",
-            "display_name": model.display_name,
-            "supported_endpoints": supported_endpoints,
-            "reasoning": model.reasoning,
-            "input": list(model.input_types),
-            "context_window": model.context_window,
-            "max_output_tokens": model.max_output_tokens,
-        })
+        data = _model_data(profile_name, profile, model)
+        if data is not None:
+            models.append(data)
 
     return jsonify({"object": "list", "data": models, "has_more": False})
