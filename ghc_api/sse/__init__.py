@@ -17,6 +17,8 @@ from .anthropic_direct import (
     AnthropicDirectStreamHandlerWithRecovery,
 )
 from .openai_responses import OpenAIResponsesStreamHandler, RetryingResponsesResponse
+from .proxy_chat_completions import ProxyChatCompletionsStreamHandler
+from .proxy_responses import ProxyResponsesStreamHandler
 
 __all__ = [
     "SSEStreamHandler",
@@ -24,4 +26,6 @@ __all__ = [
     "AnthropicDirectStreamHandlerWithRecovery",
     "OpenAIResponsesStreamHandler",
     "RetryingResponsesResponse",
+    "ProxyChatCompletionsStreamHandler",
+    "ProxyResponsesStreamHandler",
 ]
