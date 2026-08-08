@@ -106,6 +106,52 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         with self.assertRaises(ProxyConfigError):
             parse_proxy_config(config)
 
+    def test_rejects_non_boolean_flags(self):
+        paths = [
+            ("enabled",),
+            ("affinity", "enabled"),
+            ("affinity", "persist"),
+            ("apis", "responses", "enabled"),
+            ("models", "demo-model", "reasoning"),
+            ("models", "demo-model", "apis", "responses", "enabled"),
+        ]
+        for path in paths:
+            with self.subTest(path=path):
+                config = __import__("yaml").safe_load(CONFIG)
+                target = config["proxies"]["demo-profile"]
+                for part in path[:-1]:
+                    target = target[part]
+                target[path[-1]] = "false"
+                with self.assertRaises(ProxyConfigError):
+                    parse_proxy_config(config)
+
+    def test_header_names_are_trimmed_and_duplicates_rejected(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["headers"] = {" X-Profile ": "profile"}
+        profile = parse_proxy_config(config).profiles["demo-profile"]
+        self.assertEqual(profile.headers, {"X-Profile": "profile"})
+
+        config["proxies"]["demo-profile"]["headers"] = {
+            "X-Profile": "one",
+            " X-Profile ": "two",
+        }
+        with self.assertRaises(ProxyConfigError):
+            parse_proxy_config(config)
+
+    def test_unspecified_model_apis_remain_enabled_by_default(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        profile = config["proxies"]["demo-profile"]
+        profile["apis"]["chat_completions"]["request_model"] = "preserve"
+        profile["models"]["demo-model"]["apis"] = {
+            "responses": {"upstream_model": None},
+        }
+
+        parsed = parse_proxy_config(config).profiles["demo-profile"]
+        self.assertEqual(
+            set(parsed.models["demo-model"].apis),
+            {"responses", "chat_completions"},
+        )
+
     def test_registry_keeps_last_known_good_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "proxies.yaml"
@@ -116,6 +162,17 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
             path.write_text("proxies: [invalid", encoding="utf-8")
             self.assertIsNotNone(registry.get_profile("demo-profile"))
             self.assertIsNotNone(registry.last_error)
+
+    def test_registry_disables_profiles_when_config_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "proxies.yaml"
+            path.write_text(CONFIG, encoding="utf-8")
+            registry = ProxyRegistry(path)
+            self.assertIsNotNone(registry.get_profile("demo-profile"))
+
+            path.unlink()
+            self.assertIsNone(registry.get_profile("demo-profile"))
+            self.assertIsNone(registry.last_error)
 
 
 class ConfiguredProxyAffinityTest(unittest.TestCase):
@@ -270,6 +327,59 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertIn('"model":"demo-model"', body)
         self.assertIn("data: [DONE]", body)
         self.assertEqual(post.call_args.kwargs["json"]["model"], "chat-deployment")
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["translated_model"], "chat-deployment")
+
+    def test_responses_stream_rewrites_nested_model_and_extracts_usage(self):
+        lines = [
+            b'data: {"type":"response.created","response":{"id":"resp-1","model":"private-deployment"}}',
+            b'data: {"type":"response.completed","response":{"id":"resp-1","model":"private-deployment","usage":{"input_tokens":4,"output_tokens":2,"input_tokens_details":{"cached_tokens":1}}}}',
+            b"data: [DONE]",
+        ]
+        upstream = FakeResponse(
+            headers={"Content-Type": "text/event-stream"},
+            lines=lines,
+            content=b"unused",
+        )
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/responses", json={
+                    "model": "demo-model",
+                    "input": "hello",
+                    "stream": True,
+                })
+                body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('"model":"demo-model"', body)
+        self.assertNotIn('"model":"private-deployment"', body)
+        self.assertIn("data: [DONE]", body)
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["input_tokens"], 4)
+        self.assertEqual(cached["output_tokens"], 2)
+        self.assertEqual(cached["cache_creation_input_tokens"], 1)
+        self.assertIn('"model":"private-deployment"', cached["raw_events"][-1])
+
+    def test_non_stream_cache_records_effective_upstream_model(self):
+        upstream = FakeResponse(payload={
+            "id": "chat-1",
+            "model": "private-deployment",
+            "choices": [],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+        })
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/chat/completions", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                })
+
+        self.assertEqual(response.status_code, 200)
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["model"], "demo-model")
+        self.assertEqual(cached["translated_model"], "chat-deployment")
 
     def test_models_are_isolated_to_profile_endpoint(self):
         with self.app.test_client() as client:

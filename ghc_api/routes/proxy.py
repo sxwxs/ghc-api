@@ -108,6 +108,7 @@ def _cache_non_stream(
     profile_name: str,
     api_name: str,
     original_model: str,
+    translated_model: str,
     original_request_body: Dict,
     upstream_payload: Dict,
     request_headers: Dict,
@@ -127,6 +128,7 @@ def _cache_non_stream(
         "request_body": upstream_payload,
         "response_body": result,
         "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": endpoint,
         "status_code": status_code,
         "request_size": request_size,
@@ -193,6 +195,9 @@ def _handle_proxy_request(profile_name: str, api_name: str):
 
     response = upstream.response
     upstream_payload = upstream.payload
+    translated_model = upstream_payload.get("model")
+    if not isinstance(translated_model, str) or not translated_model:
+        translated_model = original_model
     request_size = len(json.dumps(upstream_payload, ensure_ascii=False).encode("utf-8"))
 
     if use_streaming and response.ok:
@@ -211,7 +216,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             "request_size": request_size,
             "start_time": start_time,
             "original_model": original_model,
-            "translated_model": original_model,
+            "translated_model": translated_model,
             "request_body_for_cache": upstream_payload,
             "original_request_body": original_request_body,
             "request_headers": request_headers,
@@ -241,7 +246,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         }
         _cache_non_stream(
             request_id, endpoint, profile_name, api_name, original_model,
-            original_request_body, upstream_payload, request_headers, client_ip,
+            translated_model, original_request_body, upstream_payload, request_headers, client_ip,
             user_id, 502, result, request_size, 0, duration,
         )
         return jsonify(result), 502
@@ -260,7 +265,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
 
     _cache_non_stream(
         request_id, endpoint, profile_name, api_name, original_model,
-        original_request_body, upstream_payload, request_headers, client_ip,
+        translated_model, original_request_body, upstream_payload, request_headers, client_ip,
         user_id, response.status_code, result, request_size, response_size, duration,
     )
 

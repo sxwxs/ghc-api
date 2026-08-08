@@ -130,15 +130,24 @@ def _require_mapping(value, field_name: str) -> dict:
     return value
 
 
+def _parse_bool(value, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ProxyConfigError(f"'{field_name}' must be a boolean")
+    return value
+
+
 def _parse_headers(value, field_name: str) -> Dict[str, str]:
     mapping = _require_mapping(value, field_name)
     headers: Dict[str, str] = {}
     for name, header_value in mapping.items():
         if not isinstance(name, str) or not name.strip():
             raise ProxyConfigError(f"'{field_name}' header names must be non-empty strings")
+        normalized_name = name.strip()
+        if normalized_name in headers:
+            raise ProxyConfigError(f"'{field_name}' contains duplicate header '{normalized_name}'")
         if not isinstance(header_value, str):
-            raise ProxyConfigError(f"'{field_name}.{name}' must be a string")
-        headers[name] = header_value
+            raise ProxyConfigError(f"'{field_name}.{normalized_name}' must be a string")
+        headers[normalized_name] = header_value
     return headers
 
 
@@ -191,11 +200,11 @@ def _parse_auth(value, field_name: str) -> ProxyAuthConfig:
 
 def _parse_affinity(value, field_name: str) -> ProxyAffinityConfig:
     raw = _require_mapping(value, field_name)
-    enabled = bool(raw.get("enabled", False))
+    enabled = _parse_bool(raw.get("enabled", False), f"{field_name}.enabled")
     response_header = raw.get("response_header", "")
     request_header = raw.get("request_header", response_header)
     scope = raw.get("scope", "model")
-    persist = bool(raw.get("persist", True))
+    persist = _parse_bool(raw.get("persist", True), f"{field_name}.persist")
 
     if scope not in AFFINITY_SCOPES:
         raise ProxyConfigError(f"'{field_name}.scope' must be one of: {', '.join(sorted(AFFINITY_SCOPES))}")
@@ -223,7 +232,7 @@ def _parse_apis(value, field_name: str) -> Dict[str, ProxyApiConfig]:
                 f"Unsupported API '{api_name}' in '{field_name}'; supported APIs: {', '.join(sorted(SUPPORTED_APIS))}"
             )
         raw = _require_mapping(raw_value, f"{field_name}.{api_name}")
-        if not bool(raw.get("enabled", True)):
+        if not _parse_bool(raw.get("enabled", True), f"{field_name}.{api_name}.enabled"):
             continue
         upstream_url = raw.get("upstream_url")
         if not isinstance(upstream_url, str) or not upstream_url.startswith(("http://", "https://")):
@@ -264,14 +273,16 @@ def _parse_model_apis(value, enabled_apis: Dict[str, ProxyApiConfig], field_name
         return {name: ProxyModelApiConfig() for name in enabled_apis}
 
     raw_apis = _require_mapping(value, field_name)
-    result: Dict[str, ProxyModelApiConfig] = {}
+    result: Dict[str, ProxyModelApiConfig] = {
+        name: ProxyModelApiConfig() for name in enabled_apis
+    }
     for api_name, raw_value in raw_apis.items():
         if api_name not in SUPPORTED_APIS:
             raise ProxyConfigError(f"Unsupported API '{api_name}' in '{field_name}'")
         if api_name not in enabled_apis:
             continue
         raw = _require_mapping(raw_value, f"{field_name}.{api_name}")
-        enabled = bool(raw.get("enabled", True))
+        enabled = _parse_bool(raw.get("enabled", True), f"{field_name}.{api_name}.enabled")
         upstream_model = raw.get("upstream_model")
         if upstream_model is not None and (not isinstance(upstream_model, str) or not upstream_model):
             raise ProxyConfigError(f"'{field_name}.{api_name}.upstream_model' must be null or a non-empty string")
@@ -312,7 +323,7 @@ def _parse_models(value, enabled_apis: Dict[str, ProxyApiConfig], field_name: st
             display_name=display_name,
             headers=_parse_headers(raw.get("headers"), f"{field_name}.{model_id}.headers"),
             apis=model_apis,
-            reasoning=bool(raw.get("reasoning", False)),
+            reasoning=_parse_bool(raw.get("reasoning", False), f"{field_name}.{model_id}.reasoning"),
             input_types=tuple(input_types),
             context_window=_parse_positive_int(
                 raw.get("context_window"), 128000, f"{field_name}.{model_id}.context_window"
@@ -333,7 +344,7 @@ def parse_proxy_config(data) -> ProxyConfigSnapshot:
         if not isinstance(profile_name, str) or not PROFILE_NAME_RE.match(profile_name):
             raise ProxyConfigError("Proxy profile names may contain only letters, digits, '.', '_' and '-'")
         raw = _require_mapping(raw_value, f"proxies.{profile_name}")
-        if not bool(raw.get("enabled", True)):
+        if not _parse_bool(raw.get("enabled", True), f"proxies.{profile_name}.enabled"):
             continue
         apis = _parse_apis(raw.get("apis"), f"proxies.{profile_name}.apis")
         profiles[profile_name] = ProxyProfileConfig(
@@ -369,10 +380,10 @@ class ProxyRegistry:
             try:
                 stat = self.path.stat()
             except FileNotFoundError:
-                if not self._loaded_once:
-                    self._snapshot = ProxyConfigSnapshot()
-                    self._last_error = None
-                    self._loaded_once = True
+                self._snapshot = ProxyConfigSnapshot()
+                self._mtime_ns = None
+                self._last_error = None
+                self._loaded_once = True
                 return
             except OSError as exc:
                 self._last_error = f"Unable to stat private proxy configuration: {exc}"
