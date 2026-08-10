@@ -591,7 +591,11 @@ class ResponsesAnthropicEventTranslator:
             state.done = True
         return None
 
-    def _terminal_events(self, response: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    def _terminal_events(
+        self,
+        response: Dict[str, Any],
+        terminal_event_type: str,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
         if self.message_stopped:
             return []
         self.terminal_response = copy.deepcopy(response)
@@ -615,7 +619,7 @@ class ResponsesAnthropicEventTranslator:
             return events
         try:
             self.terminal_result = convert_responses_to_anthropic(
-                response,
+                {"type": terminal_event_type, "response": response},
                 original_model=self.original_model,
                 reasoning_model=self.reasoning_model,
                 wire_profile=self.wire_profile,
@@ -915,7 +919,7 @@ class ResponsesAnthropicEventTranslator:
             return self._drain()
         if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response") if isinstance(event.get("response"), dict) else event
-            return self._terminal_events(response)
+            return self._terminal_events(response, event_type)
         if event_type in ("response.failed", "error"):
             error_value = event.get("response") if event_type == "response.failed" else event
             error = anthropic_error_from_responses(error_value, 500)

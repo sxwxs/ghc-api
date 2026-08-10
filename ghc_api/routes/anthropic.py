@@ -1256,6 +1256,9 @@ def _make_anthropic_responses_stream_handler(
 def _stream_pending_anthropic_responses_request(
     pending_response: BackgroundResult,
     *,
+    headers: Dict[str, Any],
+    initial_conn_attempt: int,
+    connection_retries: int,
     request_id: str,
     request_size: int,
     start_time: float,
@@ -1272,7 +1275,12 @@ def _stream_pending_anthropic_responses_request(
     request_audit: Any,
     mode: str,
 ) -> Response:
-    """Commit an Anthropic SSE response while upstream headers are pending."""
+    """Commit an Anthropic SSE response while upstream headers are pending.
+
+    Once the first keepalive is emitted the HTTP response is committed, so any
+    configured connection retries must continue inside this generator rather
+    than returning to the route-level retry loop.
+    """
     cache.start_request(request_id, {
         "request_headers": request_headers,
         "client_ip": client_ip,
@@ -1291,10 +1299,53 @@ def _stream_pending_anthropic_responses_request(
     def generate() -> Generator[str, None, None]:
         cache_finished = False
         response: Optional[requests.Response] = None
+        active_pending: Optional[BackgroundResult] = pending_response
+        last_connection_error: Optional[Exception] = None
         try:
-            response = yield from _wait_anthropic_response_with_ping(
-                pending_response, emit_initial_ping=True
-            )
+            for active_conn_attempt in range(
+                initial_conn_attempt, connection_retries + 1
+            ):
+                try:
+                    if active_pending is None:
+                        active_pending = BackgroundResult(lambda: requests.post(
+                            f"{get_copilot_base_url()}/v1/responses",
+                            headers=headers,
+                            json=responses_payload,
+                            stream=True,
+                            timeout=state.upstream_read_timeout,
+                        ))
+                        response = yield from _wait_anthropic_response_with_ping(
+                            active_pending
+                        )
+                    else:
+                        response = yield from _wait_anthropic_response_with_ping(
+                            active_pending, emit_initial_ping=True
+                        )
+                    active_pending = None
+                    last_connection_error = None
+                    break
+                except (
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.ConnectionError,
+                ) as exc:
+                    active_pending = None
+                    last_connection_error = exc
+                    log_connection_retry(
+                        request_id,
+                        "/v1/messages (responses)",
+                        active_conn_attempt,
+                        connection_retries,
+                        exc,
+                    )
+                    ensure_copilot_token()
+                    if active_conn_attempt < connection_retries:
+                        time.sleep(min(2 ** active_conn_attempt, 8))
+
+            if last_connection_error is not None or response is None:
+                raise last_connection_error or requests.exceptions.ConnectionError(
+                    "Upstream Responses request returned no response"
+                )
+
             if not response.ok:
                 try:
                     upstream_error = _strict_upstream_json(response)
@@ -1378,7 +1429,8 @@ def _stream_pending_anthropic_responses_request(
             cache_finished = True
             yield f"event: error\ndata: {json.dumps(event)}\n\n"
         except GeneratorExit:
-            pending_response.abandon()
+            if active_pending is not None:
+                active_pending.abandon()
             if response is not None:
                 try:
                     response.close()
@@ -1449,8 +1501,8 @@ def _stream_pending_anthropic_responses_request(
             cache_finished = True
             yield f"event: error\ndata: {json.dumps(event)}\n\n"
         finally:
-            if not cache_finished and response is None:
-                pending_response.abandon()
+            if not cache_finished and response is None and active_pending is not None:
+                active_pending.abandon()
 
     result = Response(
         stream_with_context(generate()),
@@ -1616,6 +1668,9 @@ def handle_responses_anthropic_request(
                     _log_compatibility_warnings(request_id, warnings)
                     return _stream_pending_anthropic_responses_request(
                         pending_response,
+                        headers=headers,
+                        initial_conn_attempt=conn_attempt,
+                        connection_retries=connection_retries,
                         request_id=request_id,
                         request_size=request_size,
                         start_time=start_time,

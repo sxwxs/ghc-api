@@ -319,19 +319,47 @@ class IdentifierCodec:
         self._encoded_to_original: Dict[str, str] = {}
         self._original_to_encoded: Dict[str, str] = {}
 
+    def _hashed_candidate(self, value: str, kind: str, attempt: int) -> str:
+        digest_source = value if attempt == 0 else f"{value}\x00{attempt}"
+        digest = hashlib.sha256(digest_source.encode("utf-8")).hexdigest()[:16]
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", value).strip("_")
+        prefix = "ghc_call_" if kind == "call" else "ghc_tool_"
+        room = max(0, self.max_length - len(prefix) - len(digest) - 1)
+        candidate = (
+            f"{prefix}{safe[:room]}_{digest}"
+            if room
+            else f"{prefix}{digest}"
+        )
+        return candidate[:self.max_length]
+
     def encode(self, value: str, kind: str = "id") -> str:
         value = str(value or "")
         if value in self._original_to_encoded:
             return self._original_to_encoded[value]
-        if value and len(value) <= self.max_length and _IDENTIFIER_RE.fullmatch(value):
-            encoded = value
+
+        direct = (
+            value
+            if value
+            and len(value) <= self.max_length
+            and _IDENTIFIER_RE.fullmatch(value)
+            else None
+        )
+        if direct is not None and direct not in self._encoded_to_original:
+            encoded = direct
         else:
-            digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
-            safe = re.sub(r"[^A-Za-z0-9_-]", "_", value).strip("_")
-            prefix = "ghc_call_" if kind == "call" else "ghc_tool_"
-            room = max(0, self.max_length - len(prefix) - len(digest) - 1)
-            encoded = f"{prefix}{safe[:room]}_{digest}" if room else f"{prefix}{digest}"
-            encoded = encoded[:self.max_length]
+            encoded = ""
+            # A client can deliberately choose a valid identifier equal to the
+            # hashed representation of another value. Keep the codec injective
+            # instead of silently aliasing two tools or call IDs.
+            for attempt in range(1024):
+                candidate = self._hashed_candidate(value, kind, attempt)
+                owner = self._encoded_to_original.get(candidate)
+                if owner is None or owner == value:
+                    encoded = candidate
+                    break
+            if not encoded:
+                raise ValueError("Unable to allocate a unique encoded identifier")
+
         self._encoded_to_original[encoded] = value
         self._original_to_encoded[value] = encoded
         return encoded
@@ -1337,23 +1365,61 @@ _KNOWN_RESPONSE_SIDECAR_FIELDS = {
 }
 
 
+def _usage_token_count(
+    value: Any,
+    path: str,
+    report: ConversionReport,
+) -> int:
+    if value is None:
+        return 0
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        report.mark(
+            path,
+            PRESERVATION_UNSUPPORTED,
+            detail="Responses token counts must be non-negative integers",
+        )
+        raise AnthropicResponsesConversionError(
+            "Responses usage contains an invalid token count",
+            report,
+        )
+    return value
+
+
 def _responses_usage_to_anthropic(
     usage: Any,
-    tool_usage: Any = None,
+    tool_usage: Any,
+    report: ConversionReport,
 ) -> Dict[str, Any]:
     usage = usage if isinstance(usage, dict) else {}
     details = usage.get("input_tokens_details") if isinstance(usage.get("input_tokens_details"), dict) else {}
     output_details = usage.get("output_tokens_details") if isinstance(usage.get("output_tokens_details"), dict) else {}
-    total_input = int(usage.get("input_tokens") or 0)
-    cached = int(details.get("cached_tokens") or 0)
-    cache_write = int(details.get("cache_write_tokens") or 0)
+    total_input = _usage_token_count(
+        usage.get("input_tokens"), "/usage/input_tokens", report
+    )
+    cached = _usage_token_count(
+        details.get("cached_tokens"),
+        "/usage/input_tokens_details/cached_tokens",
+        report,
+    )
+    cache_write = _usage_token_count(
+        details.get("cache_write_tokens"),
+        "/usage/input_tokens_details/cache_write_tokens",
+        report,
+    )
+    output_tokens = _usage_token_count(
+        usage.get("output_tokens"), "/usage/output_tokens", report
+    )
     result: Dict[str, Any] = {
         "input_tokens": max(0, total_input - cached - cache_write),
-        "output_tokens": int(usage.get("output_tokens") or 0),
+        "output_tokens": output_tokens,
         "cache_creation_input_tokens": cache_write,
         "cache_read_input_tokens": cached,
     }
-    reasoning_tokens = int(output_details.get("reasoning_tokens") or 0)
+    reasoning_tokens = _usage_token_count(
+        output_details.get("reasoning_tokens"),
+        "/usage/output_tokens_details/reasoning_tokens",
+        report,
+    )
     if reasoning_tokens:
         result["output_tokens_details"] = {"thinking_tokens": reasoning_tokens}
     if isinstance(tool_usage, dict):
@@ -1761,6 +1827,7 @@ def convert_responses_to_anthropic(
         "usage": _responses_usage_to_anthropic(
             response.get("usage"),
             response.get("tool_usage"),
+            report,
         ),
     }
     if "usage" in response:

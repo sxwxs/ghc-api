@@ -716,6 +716,52 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         post.assert_called_once()
         self.assertTrue(post.call_args.kwargs["stream"])
 
+    def test_pre_header_connection_failure_uses_configured_retry_budget(self):
+        completed = {
+            "type": "response.completed",
+            "response": self._terminal_response(),
+        }
+        upstream = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(completed, separators=(",", ":"))).encode()
+        ])
+        attempts = []
+
+        def post_with_slow_first_failure(*args, **kwargs):
+            attempts.append(kwargs)
+            if len(attempts) == 1:
+                threading.Event().wait(0.05)
+                raise anthropic_module.requests.exceptions.ConnectionError(
+                    "first attempt failed"
+                )
+            return upstream
+
+        with mock.patch.object(
+            anthropic_module.state, "sse_keepalive_interval", 0.01
+        ), mock.patch.object(
+            anthropic_module.state, "max_connection_retries", 1
+        ), mock.patch.object(
+            anthropic_module.time, "sleep", return_value=None
+        ), mock.patch.object(
+            anthropic_module, "log_connection_retry"
+        ) as retry_log, mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            side_effect=post_with_slow_first_failure,
+        ):
+            response = self.client.post(
+                "/v1/messages", json=self._request_payload(stream=True)
+            )
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: ping\n", body)
+        self.assertIn("event: message_stop\n", body)
+        self.assertNotIn("event: error\n", body)
+        self.assertEqual(len(attempts), 2)
+        retry_log.assert_called_once()
+        cached = next(iter(self.cache.cache.values()))
+        self.assertEqual(cached["state"], self.cache.STATE_COMPLETED)
+
     def test_pre_header_disconnect_marks_499_and_closes_late_response(self):
         upstream = _FakeResponse({}, lines=[])
         post_started = threading.Event()

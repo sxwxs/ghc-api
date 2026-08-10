@@ -434,6 +434,26 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertNotEqual(encoded, original)
         self.assertEqual(codec.decode(encoded), original)
 
+    def test_identifier_codec_does_not_alias_hashed_and_literal_names(self):
+        unsafe = "tool name with spaces"
+        generated = IdentifierCodec().encode(unsafe, "name")
+
+        literal_first = IdentifierCodec()
+        literal_encoded = literal_first.encode(generated, "name")
+        unsafe_encoded = literal_first.encode(unsafe, "name")
+        self.assertEqual(literal_encoded, generated)
+        self.assertNotEqual(unsafe_encoded, literal_encoded)
+        self.assertEqual(literal_first.decode(literal_encoded), generated)
+        self.assertEqual(literal_first.decode(unsafe_encoded), unsafe)
+
+        hashed_first = IdentifierCodec()
+        first_encoded = hashed_first.encode(unsafe, "name")
+        colliding_literal = hashed_first.encode(generated, "name")
+        self.assertEqual(first_encoded, generated)
+        self.assertNotEqual(colliding_literal, first_encoded)
+        self.assertEqual(hashed_first.decode(first_encoded), unsafe)
+        self.assertEqual(hashed_first.decode(colliding_literal), generated)
+
     def test_lossless_mode_rejects_fields_not_represented_on_client_wire(self):
         payload = {
             "model": "gpt-test",
@@ -549,6 +569,34 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
             if record.source_path == "/usage/total_tokens"
         )
         self.assertEqual(total_record.disposition, "sidecar")
+
+    def test_invalid_usage_token_counts_fail_as_conversion_errors(self):
+        cases = (
+            ("input_tokens", "not-a-number", "/usage/input_tokens"),
+            ("output_tokens", -1, "/usage/output_tokens"),
+        )
+        for field, value, expected_path in cases:
+            response = self.terminal_response()
+            response["usage"][field] = value
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(AnthropicResponsesConversionError) as raised:
+                    convert_responses_to_anthropic(
+                        response,
+                        original_model="claude",
+                    )
+                self.assertIn(
+                    expected_path,
+                    {record.source_path for record in raised.exception.report.records},
+                )
+
+        nested = self.terminal_response()
+        nested["usage"]["input_tokens_details"]["cached_tokens"] = True
+        with self.assertRaises(AnthropicResponsesConversionError) as raised:
+            convert_responses_to_anthropic(nested, original_model="claude")
+        self.assertIn(
+            "/usage/input_tokens_details/cached_tokens",
+            {record.source_path for record in raised.exception.report.records},
+        )
 
     def test_lossless_usage_extension_requires_sidecar(self):
         response = {

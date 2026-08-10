@@ -532,6 +532,19 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertIn("error", event_types(output))
         self.assertNotIn("message_stop", event_types(output))
 
+    def test_incomplete_event_type_is_preserved_when_response_status_is_absent(self):
+        translator = self.translator()
+        output = translator.process("response.incomplete", {"response": {
+            "id": "resp", "model": "gpt",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [], "usage": {},
+        }})
+        message_delta = next(
+            event for name, event in output if name == "message_delta"
+        )
+        self.assertEqual(message_delta["delta"]["stop_reason"], "max_tokens")
+        self.assertEqual(event_types(output)[-1], "message_stop")
+
     def test_stop_sequence_across_text_deltas(self):
         translator = self.translator(stop_sequences=["<STOP>"])
         output = translator.process("response.created", {"response": {"id": "resp"}})
