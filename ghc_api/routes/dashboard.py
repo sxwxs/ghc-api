@@ -28,6 +28,7 @@ from ..api_helpers import (
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
 from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
+from ..webiq_log import MAX_MEMORY_ENTRIES_LIMIT, webiq_log
 from ..token_usage_reporter import get_token_usage_overview
 from ..token_manager import (
     get_token_file_path,
@@ -66,6 +67,8 @@ def _runtime_config() -> Dict[str, Any]:
         "sse_keepalive_interval": state.sse_keepalive_interval,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
         "save_request_to_file": state.save_request_to_file,
+        "log_webiq_requests": state.log_webiq_requests,
+        "webiq_log_max_entries": state.webiq_log_max_entries,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
         "model_mappings": {
@@ -185,6 +188,8 @@ def api_runtime_config_update():
         "sse_keepalive_interval",
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
+        "log_webiq_requests",
+        "webiq_log_max_entries",
         "disable_onedrive_access",
         "model_mappings",
         "chat_completions_model_support",
@@ -253,6 +258,21 @@ def api_runtime_config_update():
             if not isinstance(save_req, bool):
                 raise ValueError("'save_request_to_file' must be a boolean")
             state.save_request_to_file = save_req
+
+        if "log_webiq_requests" in payload:
+            log_webiq = payload["log_webiq_requests"]
+            if not isinstance(log_webiq, bool):
+                raise ValueError("'log_webiq_requests' must be a boolean")
+            state.log_webiq_requests = log_webiq
+
+        if "webiq_log_max_entries" in payload:
+            entries = payload["webiq_log_max_entries"]
+            if not isinstance(entries, int) or isinstance(entries, bool) or entries < 1:
+                raise ValueError("'webiq_log_max_entries' must be an integer >= 1")
+            if entries > MAX_MEMORY_ENTRIES_LIMIT:
+                raise ValueError(f"'webiq_log_max_entries' must be <= {MAX_MEMORY_ENTRIES_LIMIT}")
+            state.webiq_log_max_entries = entries
+            webiq_log.set_max_entries(entries)
 
         if "disable_onedrive_access" in payload:
             disable_onedrive = payload["disable_onedrive_access"]
@@ -386,6 +406,50 @@ def api_stats():
     stats = cache.get_stats(user_id=_user_filter_from_request())
     stats["counters"] = counters.snapshot()
     return jsonify(stats)
+
+
+@dashboard_bp.route("/api/webiq/requests", methods=["GET"])
+def api_webiq_requests():
+    """List recent Web IQ searches (newest first), optionally filtered by ?user=<id>.
+
+    Only the in-memory ring buffer is served here; the full history lives in
+    the daily .jl files under <config_dir>/webiq/. Result bodies are dropped
+    from the list view and fetched per entry from /api/webiq/request/<id>.
+    """
+    limit = request.args.get("limit", webiq_log.max_entries, type=int)
+    if limit < 1 or limit > MAX_MEMORY_ENTRIES_LIMIT:
+        return jsonify({"error": f"'limit' must be between 1 and {MAX_MEMORY_ENTRIES_LIMIT}"}), 400
+    user_filter = _user_filter_from_request()
+
+    items = []
+    for entry in webiq_log.recent():
+        if user_filter is not None and entry.get("user_id") != user_filter:
+            continue
+        summary = dict(entry)
+        summary.pop("results", None)
+        summary.pop("request_body", None)
+        summary.pop("upstream", None)
+        items.append(summary)
+        if len(items) >= limit:
+            break
+
+    return jsonify({
+        "items": items,
+        "stats": webiq_log.stats(),
+        "configured": webiq_is_configured(state),
+        "logging_enabled": state.log_webiq_requests,
+        "log_dir": webiq_log.log_dir(),
+        "user_filter": user_filter,
+    })
+
+
+@dashboard_bp.route("/api/webiq/request/<entry_id>", methods=["GET"])
+def api_webiq_request_detail(entry_id: str):
+    """Get one buffered Web IQ search with its full request and results."""
+    entry = webiq_log.get(entry_id)
+    if not entry:
+        return jsonify({"error": "Web IQ search not found (it may have been evicted from the buffer)"}), 404
+    return jsonify(entry)
 
 
 @dashboard_bp.route("/api/request-stats/files", methods=["GET"])

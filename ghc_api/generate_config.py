@@ -243,6 +243,13 @@ webiq_language: "en"
 webiq_region: "US"
 webiq_safe_search: "strict"
 webiq_timeout: 30
+# Every /v1/webiq/search call (query, upstream payload, results or error) is
+# appended to <config_dir>/webiq/YYYY-MM-DD.jl and the newest
+# webiq_log_max_entries are kept in memory for the dashboard's Web IQ Searches
+# panel. Unlike save_request_to_file these records are small, so logging is on
+# by default. The API key is never written to the log.
+log_webiq_requests: true
+webiq_log_max_entries: 20
 
 # User Authentication
 # -------------------

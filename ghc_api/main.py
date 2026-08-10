@@ -17,6 +17,7 @@ import yaml
 
 from . import __version__
 from . import webiq
+from .webiq_log import MAX_MEMORY_ENTRIES_LIMIT as WEBIQ_LOG_MAX_ENTRIES, webiq_log
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
 from .config import (
@@ -280,6 +281,13 @@ def main():
             state.webiq_safe_search = str(config['webiq_safe_search'])
         if 'webiq_timeout' in config:
             state.webiq_timeout = max(1, int(config['webiq_timeout']))
+        if 'log_webiq_requests' in config:
+            state.log_webiq_requests = bool(config['log_webiq_requests'])
+        if 'webiq_log_max_entries' in config:
+            state.webiq_log_max_entries = max(
+                1, min(WEBIQ_LOG_MAX_ENTRIES, int(config['webiq_log_max_entries']))
+            )
+        webiq_log.set_max_entries(state.webiq_log_max_entries)
 
         # Load user-token auth setting
         if 'enable_auth' in config:

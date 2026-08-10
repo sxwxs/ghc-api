@@ -135,16 +135,41 @@ def normalize_max_results(raw: Any, default: int) -> int:
     return max(1, min(MAX_RESULTS_LIMIT, value))
 
 
-def search(query: str, settings: Any, *, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
+def search(
+    query: str,
+    settings: Any,
+    *,
+    max_results: Optional[int] = None,
+    trace: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """Run one Web IQ v3 web search and return normalized results.
 
     Raises WebIQError; never returns partial or fabricated data.
+
+    ``trace`` is an optional dict filled in place with what actually happened
+    upstream (endpoint, the request body sent, the HTTP status). Callers use it
+    to log the exchange, including for the error paths that raise below. The
+    API key travels in a header and is deliberately never written there.
     """
+    if trace is None:
+        trace = {}
+    trace["endpoint"] = getattr(settings, "webiq_endpoint", "")
+
     if not is_configured(settings):
         raise WebIQError("Microsoft Web IQ is not configured on this server.", 503)
 
     query = normalize_query(query)
     count = normalize_max_results(max_results, settings.webiq_max_results)
+    payload = {
+        "query": query,
+        "maxResults": count,
+        "language": settings.webiq_language,
+        "region": settings.webiq_region,
+        "maxLength": settings.webiq_max_length,
+        "contentFormat": settings.webiq_content_format,
+        "safeSearch": settings.webiq_safe_search,
+    }
+    trace["request"] = payload
 
     try:
         response = requests.post(
@@ -153,21 +178,15 @@ def search(query: str, settings: Any, *, max_results: Optional[int] = None) -> L
                 "x-apikey": settings.webiq_api_key,
                 "content-type": "application/json",
             },
-            json={
-                "query": query,
-                "maxResults": count,
-                "language": settings.webiq_language,
-                "region": settings.webiq_region,
-                "maxLength": settings.webiq_max_length,
-                "contentFormat": settings.webiq_content_format,
-                "safeSearch": settings.webiq_safe_search,
-            },
+            json=payload,
             timeout=settings.webiq_timeout,
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
         raise WebIQError(f"Web IQ connection failed: {type(exc).__name__}", 504) from exc
     except requests.RequestException as exc:
         raise WebIQError(f"Web IQ request failed: {type(exc).__name__}") from exc
+
+    trace["status_code"] = getattr(response, "status_code", None)
 
     if not response.ok:
         raise WebIQError(
@@ -181,7 +200,9 @@ def search(query: str, settings: Any, *, max_results: Optional[int] = None) -> L
         raise WebIQError("Web IQ returned invalid JSON.") from exc
 
     raw_results = body.get("webResults") if isinstance(body, dict) else None
-    return _normalize_results(raw_results, settings.webiq_max_length)
+    results = _normalize_results(raw_results, settings.webiq_max_length)
+    trace["result_count"] = len(results)
+    return results
 
 
 def _normalize_results(raw_results: Any, max_length: int) -> List[Dict[str, Any]]:

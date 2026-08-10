@@ -91,6 +91,12 @@ class State:
         self.webiq_region: str = "US"
         self.webiq_safe_search: str = "strict"
         self.webiq_timeout: int = 30
+        # Record every /v1/webiq/search request and response. Entries go to a
+        # daily .jl file under <config_dir>/webiq/ (on by default, unlike the
+        # much larger LLM request dumps) and to an in-memory ring buffer of the
+        # most recent webiq_log_max_entries searches for the dashboard.
+        self.log_webiq_requests: bool = True
+        self.webiq_log_max_entries: int = 20
 
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses,
