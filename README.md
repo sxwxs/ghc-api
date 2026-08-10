@@ -276,6 +276,8 @@ When `save_request_to_file: true`, ghc-api appends each completed request to:
 
 The saved `.jl` line format is the same as dashboard export (`/api/requests/export`) and can be imported by dashboard import (`/api/requests/import`).
 
+Web IQ searches are recorded as requests too (model name `webiq_search`, zero tokens), so they appear in these files, in `/api/stats` and in the request statistics alongside LLM traffic. Their full detail additionally lives in `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`.
+
 Open `/request-stats` to select one or more daily files and generate request-size, request-duration, and billing-token distributions overall, by model, or by exact HTTP response code. Scans run asynchronously and write one lightweight JSONL sidecar plus metadata per request file under `requests/.request-stats-index/`. Each sidecar row stores scalar metrics and the source byte offset/length/hash, never request/response bodies or headers. If a source file is unchanged its sidecar is reused without reopening the source; append-only growth is indexed incrementally, while truncated, replaced, corrupt, or incompatible files are rebuilt safely.
 
 Histogram bars are interactive: selecting a bucket shows the exact indexed requests that contributed to it. Each result opens a stable `/request-file-detail` link which seeks directly to the original `.jl` line and verifies its SHA-256 before returning the complete persisted record. These links remain valid while the source file is unchanged; a changed source reports that the index must be rebuilt. Detail rendering is capped at 4 MiB per JSONL line.

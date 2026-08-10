@@ -13,8 +13,11 @@ Failures are recorded too: a search that never reached upstream, or that came
 back 429/502, is exactly the thing you want in the log. The Web IQ API key is
 sent as a header and is never part of a recorded payload.
 
-The files live in their own directory rather than under ``requests/`` so the
-request-statistics indexer keeps seeing only LLM proxy traffic.
+The files live in their own directory rather than under ``requests/`` because
+they keep Web IQ specifics (query, upstream payload, upstream status) that the
+shared request cache does not model. A search is also added to that cache, so
+with ``save_request_to_file: true`` it appears in ``requests/YYYY-MM-DD.jl`` and
+in the request statistics as well, under the model name ``webiq_search``.
 """
 
 import json
