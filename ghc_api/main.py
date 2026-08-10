@@ -197,6 +197,8 @@ def main():
         host = config.get('address', 'localhost')
         port = config.get('port', 8313)
         debug = config.get('debug', DEBUG)
+        if 'server_threads' in config:
+            state.server_threads = max(4, int(config['server_threads']))
 
         # Set account type and optional upstream URL overrides. The overrides
         # are useful for GHE data residency, private gateways, and offline E2E benchmarks.
@@ -373,7 +375,61 @@ def main():
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
 
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    serve_app(app, host=host, port=port, debug=debug)
+
+
+def serve_app(app, host: str, port: int, debug: bool = False) -> None:
+    """Serve the app with a WSGI server that supports HTTP/1.1 keep-alive.
+
+    The Werkzeug development server is deliberately not used for normal runs.
+    It speaks HTTP/1.0, so every response carries ``Connection: close`` and the
+    connection is torn down after each request. A request that a client writes
+    onto a connection the server is concurrently closing is silently dropped:
+    no response, no reset, the client just waits. Browsers hit that race
+    constantly on the chat page, where an SSE round ends and the next request
+    (for example a webiq_search tool call) goes out immediately, and the
+    request then hangs for minutes.
+
+    waitress speaks HTTP/1.1 with real keep-alive and chunked transfer
+    encoding, which removes the race and still streams SSE incrementally.
+
+    Note that SSE responses must not set hop-by-hop headers such as
+    ``Connection``; PEP 3333 forbids them and waitress rejects them with a 500.
+    """
+    if debug:
+        print("Debug mode: using the Werkzeug development server (auto-reload).")
+        app.run(host=host, port=port, debug=True, threaded=True)
+        return
+
+    try:
+        from waitress import serve
+    except ImportError:
+        print(
+            "WARNING: waitress is not installed; falling back to the Werkzeug\n"
+            "         development server. It has no HTTP keep-alive, so browser\n"
+            "         requests can hang. Install it with: pip install waitress",
+            file=sys.stderr,
+        )
+        app.run(host=host, port=port, threaded=True)
+        return
+
+    # A streaming request occupies a thread for its whole lifetime, so the pool
+    # must be comfortably larger than the number of concurrent chat streams.
+    threads = max(4, int(state.server_threads))
+    # Do not let waitress time out a long, quiet SSE stream. Keepalive pings
+    # normally keep it busy, but they can be disabled (sse_keepalive_interval=0).
+    channel_timeout = max(300, int(state.upstream_read_timeout))
+    print(f"Serving with waitress ({threads} threads, channel_timeout={channel_timeout}s)")
+    serve(
+        app,
+        host=host,
+        port=port,
+        threads=threads,
+        channel_timeout=channel_timeout,
+        # The banner would advertise waitress' own host/port formatting; ours
+        # is already printed above.
+        _quiet=True,
+    )
 
 
 if __name__ == "__main__":

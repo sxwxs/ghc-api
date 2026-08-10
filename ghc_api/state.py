@@ -115,6 +115,10 @@ class State:
         # Background worker guards
         self.token_usage_reporter_started: bool = False
 
+        # WSGI server thread pool. Every streaming request holds a thread for
+        # its whole lifetime, so this bounds concurrent chat streams.
+        self.server_threads: int = 16
+
     @property
     def editor_plugin_version(self) -> str:
         """Get the editor plugin version string"""

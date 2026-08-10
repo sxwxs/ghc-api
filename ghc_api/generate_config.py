@@ -20,7 +20,13 @@ def generate_config_file():
 
 address: localhost
 port: 8313
+# debug: true switches to the Werkzeug development server (auto-reload). That
+# server has no HTTP keep-alive, so browser requests can hang for minutes;
+# keep it false for normal use, where waitress serves the app instead.
 debug: false
+# WSGI thread pool. Each streaming request holds one thread for its lifetime,
+# so this is roughly the number of concurrent chat streams you can serve.
+server_threads: 16
 
 # GitHub Copilot Account Type
 # Options:
