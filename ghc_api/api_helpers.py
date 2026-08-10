@@ -314,26 +314,21 @@ def count_message_tokens(messages: List[Dict], model: str = "gpt-4") -> int:
     return total
 
 
-def supports_direct_anthropic_api(model_id: str) -> bool:
-    """Check if a model supports direct Anthropic API.
-
-    Returns True if:
-    1. redirect_anthropic is not enabled (direct API is on)
-    2. The model's supported_endpoints includes "/v1/messages"
-    """
-    # Check if redirect to OpenAI translation is enabled
-    if state.redirect_anthropic:
-        return False
-
+def advertises_anthropic_messages_api(model_id: str) -> bool:
+    """Return whether model metadata advertises the native Messages endpoint."""
     if not state.models or not state.models.get("data"):
         return False
-
     model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
     if not model:
         return False
+    return "/v1/messages" in model.get("supported_endpoints", [])
 
-    supported_endpoints = model.get("supported_endpoints", [])
-    return "/v1/messages" in supported_endpoints
+
+def supports_direct_anthropic_api(model_id: str) -> bool:
+    """Check if a model should use the direct Anthropic API path."""
+    if state.redirect_anthropic:
+        return False
+    return advertises_anthropic_messages_api(model_id)
 
 
 def supports_responses_api(model_id: str) -> bool:

@@ -73,12 +73,18 @@ def parse_strict_json_bytes(raw: bytes) -> Any:
         value, end = decoder.raw_decode(text)
     except StrictJSONError:
         raise
+    except RecursionError as exc:
+        raise StrictJSONError("JSON nesting is too deep") from exc
     except json.JSONDecodeError as exc:
         raise StrictJSONError(f"Invalid JSON at character {exc.pos}: {exc.msg}") from exc
     if text[end:].strip():
         raise StrictJSONError(f"Trailing data after JSON value at character {end}")
 
-    def validate_unicode(node: Any, path: str = "$") -> None:
+    # Walk iteratively so the validation boundary cannot itself overflow the
+    # Python stack after the decoder accepted a deeply nested document.
+    stack: List[Tuple[Any, str]] = [(value, "$")]
+    while stack:
+        node, path = stack.pop()
         if isinstance(node, float) and not math.isfinite(node):
             raise StrictJSONError(f"Non-finite JSON number is not allowed at {path}")
         if isinstance(node, str):
@@ -90,13 +96,11 @@ def parse_strict_json_bytes(raw: bytes) -> Any:
                 ) from exc
         elif isinstance(node, dict):
             for key, child in node.items():
-                validate_unicode(key, path + ".<key>")
-                validate_unicode(child, path + ".<value>")
+                stack.append((child, path + ".<value>"))
+                stack.append((key, path + ".<key>"))
         elif isinstance(node, list):
-            for index, child in enumerate(node):
-                validate_unicode(child, f"{path}[{index}]")
-
-    validate_unicode(value)
+            for index in range(len(node) - 1, -1, -1):
+                stack.append((node[index], f"{path}[{index}]"))
     return value
 
 
@@ -165,6 +169,7 @@ class ConversionReport:
     unaccounted_paths: List[str] = field(default_factory=list)
     _marked_paths: Set[str] = field(default_factory=set, repr=False)
     _marked_subtrees: Set[str] = field(default_factory=set, repr=False)
+    _seen_records: Set[Tuple[Any, ...]] = field(default_factory=set, repr=False)
 
     def mark(
         self,
@@ -177,15 +182,9 @@ class ConversionReport:
         if not source_path:
             source_path = "/"
         key = (source_path, disposition, target_path, detail, subtree)
-        for existing in self.records:
-            if (
-                existing.source_path,
-                existing.disposition,
-                existing.target_path,
-                existing.detail,
-                existing.subtree,
-            ) == key:
-                return
+        if key in self._seen_records:
+            return
+        self._seen_records.add(key)
         self.records.append(PreservationRecord(
             source_path=source_path,
             disposition=disposition,
@@ -210,7 +209,17 @@ class ConversionReport:
     def _is_accounted(self, path: str) -> bool:
         if path in self._marked_paths:
             return True
-        return any(path == prefix or path.startswith(prefix + "/") for prefix in self._marked_subtrees)
+        if "" in self._marked_subtrees:
+            return True
+        candidate = path.rstrip("/")
+        while candidate:
+            if candidate in self._marked_subtrees:
+                return True
+            separator = candidate.rfind("/")
+            if separator <= 0:
+                break
+            candidate = candidate[:separator]
+        return False
 
     def account_unknown_paths(self, source: Any) -> None:
         self.unaccounted_paths = []
@@ -267,6 +276,8 @@ class ResponsesWireProfile:
     supports_temperature: bool
     supports_top_p: bool
     supports_max_output_tokens: bool
+    supports_message_phase: bool
+    supports_reasoning_context: bool
     reasoning_efforts: Tuple[str, ...]
     default_text_verbosity: Optional[str] = None
 
@@ -281,7 +292,9 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
         supports_temperature=True,
         supports_top_p=True,
         supports_max_output_tokens=True,
-        reasoning_efforts=("none", "minimal", "low", "medium", "high", "xhigh", "max"),
+        supports_message_phase=False,
+        supports_reasoning_context=False,
+        reasoning_efforts=("none", "minimal", "low", "medium", "high", "xhigh"),
     ),
     "copilot_responses_lite": ResponsesWireProfile(
         name="copilot_responses_lite",
@@ -295,6 +308,8 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
         supports_temperature=False,
         supports_top_p=False,
         supports_max_output_tokens=True,
+        supports_message_phase=True,
+        supports_reasoning_context=True,
         reasoning_efforts=("none", "low", "medium", "high", "xhigh", "max"),
         default_text_verbosity="low",
     ),
@@ -577,7 +592,7 @@ def _append_message_items(
         if not current_parts:
             return
         item: Dict[str, Any] = {"type": "message", "role": role, "content": current_parts}
-        if role == "assistant":
+        if role == "assistant" and profile.supports_message_phase:
             item["phase"] = "commentary" if has_tool_use else "final_answer"
             report.mark(base, PRESERVATION_SEMANTIC, detail="Assistant phase inferred from visible Anthropic content")
         input_items.append(item)
@@ -840,6 +855,16 @@ def _convert_tool_choice(
         result = "auto"
         report.mark("/tool_choice/type", PRESERVATION_UNSUPPORTED, detail=f"Unknown tool_choice type: {choice_type}")
     if "disable_parallel_tool_use" in value:
+        if not isinstance(value["disable_parallel_tool_use"], bool):
+            report.mark(
+                "/tool_choice/disable_parallel_tool_use",
+                PRESERVATION_UNSUPPORTED,
+                detail="disable_parallel_tool_use must be a boolean",
+            )
+            raise AnthropicResponsesConversionError(
+                "Anthropic tool_choice.disable_parallel_tool_use must be a boolean",
+                report,
+            )
         report.mark("/tool_choice/disable_parallel_tool_use", PRESERVATION_SEMANTIC, "/parallel_tool_calls")
     return result
 
@@ -1057,6 +1082,7 @@ def convert_anthropic_to_responses(
     wire_profile: str = "copilot_responses_lite",
     mode: str = MODE_COMPATIBILITY,
     session_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> AnthropicToResponsesResult:
     """Convert one Anthropic Messages request to a Responses request."""
     if not isinstance(payload, dict):
@@ -1069,11 +1095,22 @@ def convert_anthropic_to_responses(
     call_id_codec = IdentifierCodec()
     input_items: List[Dict[str, Any]] = []
     model = str(payload.get("model") or "")
+    stream_value = payload.get("stream", False)
+    if not isinstance(stream_value, bool):
+        report.mark(
+            "/stream",
+            PRESERVATION_UNSUPPORTED,
+            detail="stream must be a boolean",
+        )
+        raise AnthropicResponsesConversionError(
+            "Anthropic request field 'stream' must be a boolean",
+            report,
+        )
     responses: Dict[str, Any] = {
         "model": model,
         "input": input_items,
         "store": False,
-        "stream": bool(payload.get("stream", False)),
+        "stream": stream_value,
         "include": ["reasoning.encrypted_content"],
     }
     if "model" in payload:
@@ -1169,17 +1206,22 @@ def convert_anthropic_to_responses(
         )
         disable_parallel = tool_choice.get("disable_parallel_tool_use") if isinstance(tool_choice, dict) else None
         if disable_parallel is not None:
-            responses["parallel_tool_calls"] = not bool(disable_parallel)
+            responses["parallel_tool_calls"] = not disable_parallel
     elif tools:
         responses["tool_choice"] = "auto"
     if "parallel_tool_calls" not in responses and tools:
         responses["parallel_tool_calls"] = True
 
     effort = _map_reasoning_effort(payload, profile, report)
+    reasoning_options: Dict[str, Any] = {}
     if effort:
-        responses["reasoning"] = {"effort": effort, "context": "all_turns"}
-    elif "context_management" in payload:
-        responses["reasoning"] = {"context": "all_turns"}
+        reasoning_options["effort"] = effort
+    if profile.supports_reasoning_context and (
+        effort or "context_management" in payload
+    ):
+        reasoning_options["context"] = "all_turns"
+    if reasoning_options:
+        responses["reasoning"] = reasoning_options
 
     if "thinking" in payload and isinstance(payload.get("thinking"), dict):
         for key in payload["thinking"]:
@@ -1197,11 +1239,18 @@ def convert_anthropic_to_responses(
                 and edit.get("keep") == "all"
                 for edit in context["edits"]
             )
+        can_map_context = known and profile.supports_reasoning_context
         report.mark(
             "/context_management",
-            PRESERVATION_SEMANTIC if known else PRESERVATION_UNSUPPORTED,
-            "/reasoning/context" if known else None,
-            "Mapped clear_thinking keep=all to all_turns" if known else "Unknown context-management edit",
+            PRESERVATION_SEMANTIC if can_map_context else PRESERVATION_UNSUPPORTED,
+            "/reasoning/context" if can_map_context else None,
+            (
+                "Mapped clear_thinking keep=all to all_turns"
+                if can_map_context
+                else "The selected Responses profile has no reasoning context mapping"
+                if known
+                else "Unknown context-management edit"
+            ),
             subtree=True,
         )
 
@@ -1253,12 +1302,18 @@ def convert_anthropic_to_responses(
             report.mark("/metadata", PRESERVATION_UNSUPPORTED, detail="metadata must be an object", subtree=True)
 
     if session_id:
-        cache_scope = f"{session_id}\x00{model}"
+        tenant_scope = str(tenant_id or "anonymous")
+        cache_scope = f"{tenant_scope}\x00{session_id}\x00{model}"
         responses["prompt_cache_key"] = hashlib.sha256(
             cache_scope.encode("utf-8")
         ).hexdigest()
         if profile.name == "copilot_responses_lite":
-            responses["client_metadata"] = {"session_id": session_id}
+            metadata_scope = f"{tenant_scope}\x00{session_id}"
+            responses["client_metadata"] = {
+                "session_id": hashlib.sha256(
+                    metadata_scope.encode("utf-8")
+                ).hexdigest()
+            }
 
     if "service_tier" in payload:
         value = payload["service_tier"]

@@ -79,7 +79,14 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
             mimetype="application/json",
         )
 
-    def _selection_patches(self, *, direct, responses, translated_model="gpt-5.6-sol"):
+    def _selection_patches(
+        self,
+        *,
+        direct,
+        responses,
+        translated_model="gpt-5.6-sol",
+        advertises_messages=False,
+    ):
         stack = ExitStack()
         patches = {
             "ensure": stack.enter_context(
@@ -97,6 +104,13 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
                     anthropic_module,
                     "supports_direct_anthropic_api",
                     return_value=direct,
+                )
+            ),
+            "advertises_messages": stack.enter_context(
+                mock.patch.object(
+                    anthropic_module,
+                    "advertises_anthropic_messages_api",
+                    return_value=advertises_messages,
                 )
             ),
             # create=True keeps this test importable while the route branch is
@@ -193,7 +207,39 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
             cached_original["messages"][1]["content"][0]["signature"],
         )
 
-    def test_responses_branch_receives_unfiltered_request_with_only_model_translated(self):
+    def test_legacy_fallback_strips_and_redacts_responses_reasoning_carriers(self):
+        signature = build_reasoning_carrier(
+            model="gpt-5.6-sol",
+            wire_profile="copilot_responses_lite",
+            encrypted_content="opaque-secret",
+        )
+        payload = {
+            "model": "gpt-5.6-sol",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "summary", "signature": signature},
+                    {"type": "text", "text": "answer"},
+                ]},
+                {"role": "user", "content": "continue"},
+            ],
+            "max_tokens": 32,
+        }
+        stack, patched = self._selection_patches(direct=False, responses=False)
+        with stack:
+            response = self.client.post("/v1/messages", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = patched["fallback"].call_args.args[0]
+        self.assertEqual(
+            forwarded["messages"][0]["content"],
+            [{"type": "text", "text": "answer"}],
+        )
+        cached_original = patched["fallback"].call_args.args[5]
+        cached_signature = cached_original["messages"][0]["content"][0]["signature"]
+        self.assertIn("Responses reasoning carrier", cached_signature)
+        self.assertNotIn("opaque-secret", json.dumps(cached_original))
+
+    def test_responses_branch_applies_policy_filters_without_legacy_thinking_rewrites(self):
         payload = {
             "model": "client-model-alias",
             "system": [{
@@ -222,12 +268,12 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
                 "system": stack.enter_context(mock.patch.object(
                     anthropic_module,
                     "apply_system_prompt_filters_to_payload",
-                    side_effect=AssertionError("Responses path ran legacy system filters"),
+                    side_effect=lambda value: value,
                 )),
                 "tool_result": stack.enter_context(mock.patch.object(
                     anthropic_module,
                     "apply_tool_result_suffix_filter_to_payload",
-                    side_effect=AssertionError("Responses path ran legacy tool-result filters"),
+                    side_effect=lambda value: value,
                 )),
                 "thinking": stack.enter_context(mock.patch.object(
                     anthropic_module,
@@ -259,11 +305,31 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
             self.assertEqual(_call_argument(call, 4, "translated_model"), "gpt-5.6-sol")
             self.assertEqual(_call_argument(call, 5, "original_request_body"), payload)
             self.assertEqual(_call_argument(call, 6, "original_request_raw"), raw)
-            for filter_mock in filters.values():
-                filter_mock.assert_not_called()
+            filters["system"].assert_called_once()
+            filters["tool_result"].assert_called_once()
+            filters["thinking"].assert_not_called()
+            filters["effort"].assert_not_called()
 
         patched["direct"].assert_not_called()
         patched["fallback"].assert_not_called()
+
+    def test_redirected_model_that_still_advertises_messages_uses_legacy_fallback(self):
+        stack, patched = self._selection_patches(
+            direct=False,
+            responses=True,
+            advertises_messages=True,
+        )
+        with stack:
+            response = self.client.post("/v1/messages", json={
+                "model": "client-model-alias",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 32,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), {"path": "fallback"})
+        patched["fallback"].assert_called_once()
+        patched["responses"].assert_not_called()
 
     def test_disabled_responses_compatibility_uses_legacy_fallback(self):
         anthropic_module.state.anthropic_responses_compat_enabled = False
@@ -293,6 +359,27 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
         self.assertEqual(response.get_json(), {"path": "fallback"})
         patched["fallback"].assert_called_once()
         patched["responses"].assert_not_called()
+
+    def test_deeply_nested_json_is_rejected_before_any_upstream_path(self):
+        depth = 2000
+        raw = (
+            b'{"model":"gpt-5.6-sol","messages":[],"max_tokens":16,"nested":'
+            + b"[" * depth
+            + b"]" * depth
+            + b"}"
+        )
+        stack, patched = self._selection_patches(direct=False, responses=True)
+        with stack:
+            response = self.client.post(
+                "/v1/messages", data=raw, content_type="application/json"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["type"], "error")
+        self.assertIn("nesting", response.get_json()["error"]["message"].lower())
+        patched["direct"].assert_not_called()
+        patched["responses"].assert_not_called()
+        patched["fallback"].assert_not_called()
 
     def test_duplicate_json_key_is_rejected_before_any_upstream_path(self):
         raw = (
@@ -332,6 +419,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 "max_connection_retries",
                 "sse_keepalive_interval",
                 "upstream_read_timeout",
+                "enable_responses_early_failure_retry",
             )
         }
         state.anthropic_responses_compat_enabled = True
@@ -341,6 +429,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         state.max_connection_retries = 0
         state.sse_keepalive_interval = 0
         state.upstream_read_timeout = 123
+        state.enable_responses_early_failure_retry = True
 
         self._patches = [
             mock.patch.object(anthropic_module, "cache", self.cache),
@@ -463,8 +552,11 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         forwarded = post.call_args.kwargs["json"]
         self.assertRegex(forwarded["prompt_cache_key"], r"^[0-9a-f]{64}$")
-        self.assertEqual(
-            forwarded["client_metadata"], {"session_id": "session-fixture"}
+        self.assertRegex(
+            forwarded["client_metadata"]["session_id"], r"^[0-9a-f]{64}$"
+        )
+        self.assertNotEqual(
+            forwarded["client_metadata"]["session_id"], "session-fixture"
         )
 
     def test_nonstream_converts_web_search_billing_and_structured_output(self):
@@ -685,6 +777,57 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("stream", cached["conversion_report"])
         self.assertIn("response", cached["conversion_report"])
 
+    def test_stream_retries_early_response_failed_before_anthropic_output(self):
+        failed_events = [
+            {
+                "type": "response.created",
+                "sequence_number": 0,
+                "response": {"id": "resp_failed", "model": "gpt-5.6-sol"},
+            },
+            {
+                "type": "response.failed",
+                "sequence_number": 1,
+                "response": {
+                    "id": "resp_failed",
+                    "model": "gpt-5.6-sol",
+                    "status": "failed",
+                    "error": {"message": "transient failure"},
+                    "output": [],
+                    "usage": {},
+                },
+            },
+        ]
+        first = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(event, separators=(",", ":"))).encode()
+            for event in failed_events
+        ])
+        completed = {
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": self._terminal_response(),
+        }
+        second = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(completed, separators=(",", ":"))).encode()
+        ])
+
+        with mock.patch.object(
+            anthropic_module.state, "max_connection_retries", 1
+        ), mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            side_effect=[first, second],
+        ) as post:
+            response = self.client.post(
+                "/v1/messages", json=self._request_payload(stream=True)
+            )
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(post.call_count, 2)
+        self.assertIn("event: message_stop\n", body)
+        self.assertIn('"text":"hello back"', body)
+        self.assertNotIn("event: error\n", body)
+        self.assertNotIn("transient failure", body)
+
     def test_stream_slow_upstream_headers_emit_anthropic_ping_before_completion(self):
         completed = {
             "type": "response.completed",
@@ -883,6 +1026,16 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
         self.assertEqual(cached["status_code"], 429)
         self.assertEqual(cached["response_body"], body)
+
+    def test_non_boolean_stream_is_rejected_before_upstream(self):
+        payload = self._request_payload(stream=False)
+        payload["stream"] = "false"
+        with mock.patch.object(anthropic_module.requests, "post") as post:
+            response = self.client.post("/v1/messages", json=payload)
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("stream", response.get_json()["error"]["message"])
+        post.assert_not_called()
 
     def test_null_messages_is_rejected_before_upstream_in_compatibility_mode(self):
         payload = self._request_payload(stream=False)

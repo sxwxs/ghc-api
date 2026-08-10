@@ -9,7 +9,7 @@ import queue
 import threading
 import time
 import uuid
-from typing import Dict, Generator, Any, List, Optional, Tuple
+from typing import Callable, Dict, Generator, Any, List, Optional, Tuple
 
 import requests
 from flask import Blueprint, Response, g, jsonify, request, stream_with_context
@@ -19,6 +19,7 @@ from ..api_helpers import (
     get_copilot_base_url,
     get_copilot_headers,
     anthropic_responses_wire_profile,
+    advertises_anthropic_messages_api,
     supports_direct_anthropic_api,
     supports_responses_api,
     supported_reasoning_efforts,
@@ -50,6 +51,7 @@ from ..sse import (
     AnthropicDirectStreamHandler,
     AnthropicDirectStreamHandlerWithRecovery,
     AnthropicResponsesStreamHandler,
+    RetryingResponsesResponse,
 )
 from ..sse.keepalive import (
     BackgroundResult,
@@ -989,8 +991,13 @@ def anthropic_messages():
     client_ip = get_client_ip(request)
     user_id = _current_user_id()
 
-    # Store original request before any modifications
+    # Keep an unmodified copy for compatibility auditing, and a separate safe
+    # projection for every dashboard/cache path. Reasoning carriers are
+    # reversible and must never be persisted verbatim.
     original_request_body = copy.deepcopy(anthropic_payload)
+    cached_original_request_body = redact_reasoning_carriers_for_cache(
+        original_request_body
+    )
 
     original_model = anthropic_payload.get("model", "unknown")
 
@@ -1000,9 +1007,6 @@ def anthropic_messages():
         print(f"[Anthropic API] Model name translated: {original_model} -> {translated_model}")
         anthropic_payload = {**anthropic_payload, "model": translated_model}
 
-    # Capability routing deliberately happens before any legacy content or
-    # thinking rewrite. The Responses converter owns its loss accounting and
-    # must see the original request semantics.
     use_direct_api = supports_direct_anthropic_api(translated_model)
 
     if use_direct_api:
@@ -1010,9 +1014,6 @@ def anthropic_messages():
             anthropic_payload
         )
         if removed_carriers:
-            original_request_body = redact_reasoning_carriers_for_cache(
-                original_request_body
-            )
             counters.incr("mod.responses_reasoning_carrier_strip", removed_carriers)
             print(
                 f"[Anthropic API] Removed {removed_carriers} synthetic Responses "
@@ -1023,12 +1024,17 @@ def anthropic_messages():
         anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
         anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
         print(f"[Anthropic API] Using direct Anthropic API path for model: {translated_model}")
-        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, cached_original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
 
     if (
         bool(getattr(state, "anthropic_responses_compat_enabled", False))
         and supports_responses_api(translated_model)
+        and not advertises_anthropic_messages_api(translated_model)
     ):
+        # Operator-configured content filters are endpoint-independent policy;
+        # unlike legacy thinking/effort rewrites they must also apply here.
+        anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
+        anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
         print(f"[Anthropic API] Using Responses compatibility path for model: {translated_model}")
         return handle_responses_anthropic_request(
             anthropic_payload=anthropic_payload,
@@ -1043,12 +1049,23 @@ def anthropic_messages():
             user_id=user_id,
         )
 
+    # A carrier only has meaning to a Responses backend. Strip it before the
+    # legacy chat-completions translator can turn thinking into visible text.
+    anthropic_payload, removed_carriers = strip_reasoning_carriers_from_messages_payload(
+        anthropic_payload
+    )
+    if removed_carriers:
+        counters.incr("mod.responses_reasoning_carrier_strip", removed_carriers)
+        print(
+            f"[Anthropic API] Removed {removed_carriers} synthetic Responses "
+            f"reasoning carrier block(s) before OpenAI translation"
+        )
     anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
     anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
     anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
     anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
     print(f"[Anthropic API] Using OpenAI translation path for model: {translated_model}")
-    return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+    return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, cached_original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
 
 
 def _strict_upstream_json(response: requests.Response) -> Dict[str, Any]:
@@ -1207,6 +1224,23 @@ def _cache_responses_local_failure(
     ))
 
 
+def _maybe_wrap_responses_early_failure_retry(
+    response: requests.Response,
+    *,
+    response_factory: Callable[[], requests.Response],
+    max_retries: int,
+    request_id: str,
+) -> Any:
+    if not bool(getattr(state, "enable_responses_early_failure_retry", False)):
+        return response
+    return RetryingResponsesResponse(
+        response=response,
+        response_factory=response_factory,
+        max_retries=max_retries,
+        request_id=request_id,
+    )
+
+
 def _make_anthropic_responses_stream_handler(
     *,
     response: requests.Response,
@@ -1257,6 +1291,7 @@ def _stream_pending_anthropic_responses_request(
     pending_response: BackgroundResult,
     *,
     headers: Dict[str, Any],
+    early_failure_response_factory: Callable[[], requests.Response],
     initial_conn_attempt: int,
     connection_retries: int,
     request_id: str,
@@ -1375,8 +1410,14 @@ def _stream_pending_anthropic_responses_request(
                 cache_finished = True
                 response.close()
                 return
+            upstream_response = _maybe_wrap_responses_early_failure_retry(
+                response,
+                response_factory=early_failure_response_factory,
+                max_retries=connection_retries,
+                request_id=request_id,
+            )
             handler = _make_anthropic_responses_stream_handler(
-                response=response,
+                response=upstream_response,
                 request_id=request_id,
                 request_size=request_size,
                 start_time=start_time,
@@ -1580,6 +1621,7 @@ def handle_responses_anthropic_request(
             wire_profile=wire_profile,
             mode=mode,
             session_id=session_id,
+            tenant_id=user_id,
         )
     except AnthropicResponsesConversionError as exc:
         conversion_warnings = _merge_compatibility_warnings(
@@ -1642,7 +1684,20 @@ def handle_responses_anthropic_request(
         isinstance(message, dict) and message.get("role") == "assistant"
         for message in anthropic_payload.get("messages", [])
     )
-    headers["X-Initiator"] = "agent" if is_agent_call else "user"
+    initiator = "agent" if is_agent_call else "user"
+    headers["X-Initiator"] = initiator
+
+    def retry_early_failed_stream() -> requests.Response:
+        ensure_copilot_token()
+        retry_headers = get_copilot_headers(enable_vision)
+        retry_headers["X-Initiator"] = initiator
+        return requests.post(
+            f"{get_copilot_base_url()}/v1/responses",
+            headers=retry_headers,
+            json=responses_payload,
+            stream=True,
+            timeout=state.upstream_read_timeout,
+        )
 
     connection_retries = int(getattr(state, "max_connection_retries", 0))
     response = None
@@ -1669,6 +1724,7 @@ def handle_responses_anthropic_request(
                     return _stream_pending_anthropic_responses_request(
                         pending_response,
                         headers=headers,
+                        early_failure_response_factory=retry_early_failed_stream,
                         initial_conn_attempt=conn_attempt,
                         connection_retries=connection_retries,
                         request_id=request_id,
@@ -1788,8 +1844,14 @@ def handle_responses_anthropic_request(
         return _set_compatibility_headers(result, warnings)
 
     if responses_payload.get("stream"):
+        upstream_response = _maybe_wrap_responses_early_failure_retry(
+            response,
+            response_factory=retry_early_failed_stream,
+            max_retries=connection_retries,
+            request_id=request_id,
+        )
         handler = _make_anthropic_responses_stream_handler(
-            response=response,
+            response=upstream_response,
             request_id=request_id,
             request_size=request_size,
             start_time=start_time,

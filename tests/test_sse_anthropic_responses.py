@@ -500,6 +500,94 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             "responses.late_reasoning_item",
         )
 
+    def test_multiple_content_parts_are_validated_independently(self):
+        translator = self.translator()
+        output = translator.process(
+            "response.created", {"response": {"id": "resp", "model": "gpt"}}
+        )
+        output += translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        })
+        for content_index, text in enumerate(("Hello", " World")):
+            output += translator.process("response.content_part.added", {
+                "output_index": 0,
+                "content_index": content_index,
+                "part": {"type": "output_text", "text": ""},
+            })
+            output += translator.process("response.output_text.delta", {
+                "output_index": 0,
+                "content_index": content_index,
+                "delta": text,
+            })
+            output += translator.process("response.output_text.done", {
+                "output_index": 0,
+                "content_index": content_index,
+                "text": text,
+            })
+            output += translator.process("response.content_part.done", {
+                "output_index": 0,
+                "content_index": content_index,
+                "part": {"type": "output_text", "text": text},
+            })
+        output += translator.process("response.output_item.done", {
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Hello"},
+                    {"type": "output_text", "text": " World"},
+                ],
+            },
+        })
+        output += translator.process("response.completed", {"response": {
+            "id": "resp", "model": "gpt", "status": "completed",
+            "output": [{
+                "type": "message", "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "Hello"},
+                    {"type": "output_text", "text": " World"},
+                ],
+            }],
+            "usage": {},
+        }})
+        visible = "".join(
+            event["delta"]["text"]
+            for name, event in output
+            if name == "content_block_delta"
+            and event.get("delta", {}).get("type") == "text_delta"
+        )
+        self.assertEqual(visible, "Hello World")
+        self.assertNotIn("error", event_types(output))
+        self.assertEqual(event_types(output)[-1], "message_stop")
+
+    def test_terminal_response_identity_and_status_must_match_created_event(self):
+        cases = (
+            ({
+                "id": "resp_other", "model": "gpt", "status": "completed",
+                "output": [], "usage": {},
+            }, "responses.terminal_response_id_mismatch"),
+            ({
+                "id": "resp", "model": "gpt", "status": "failed",
+                "error": {"message": "failed"}, "output": [], "usage": {},
+            }, "responses.terminal_status_mismatch"),
+        )
+        for terminal, expected_code in cases:
+            translator = self.translator()
+            output = translator.process(
+                "response.created", {"response": {"id": "resp", "model": "gpt"}}
+            )
+            output += translator.process(
+                "response.completed", {"response": terminal}
+            )
+            with self.subTest(code=expected_code):
+                self.assertEqual(event_types(output)[-1], "error")
+                self.assertEqual(
+                    translator.compatibility_warnings[-1]["code"], expected_code
+                )
+                self.assertTrue(translator.protocol_failed)
+
     def test_event_after_closed_output_index_is_fatal(self):
         translator = self.translator()
         output = translator.process(

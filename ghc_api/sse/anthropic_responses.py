@@ -102,6 +102,7 @@ class _OutputState:
     call_id: str = ""
     name: str = ""
     text: str = ""
+    text_parts: Dict[int, str] = field(default_factory=dict)
     text_forwarded: int = 0
     arguments: str = ""
     arguments_forwarded: int = 0
@@ -152,6 +153,8 @@ class ResponsesAnthropicEventTranslator:
 
         self.message_started = False
         self.message_stopped = False
+        self.response_created_seen = False
+        self.created_response_model = ""
         self.response_id = ""
         self.response_model = original_model
         self.next_block_index = 0
@@ -213,6 +216,54 @@ class ResponsesAnthropicEventTranslator:
     @staticmethod
     def _item_type(item: Any) -> str:
         return str(item.get("type") or "") if isinstance(item, dict) else ""
+
+    @staticmethod
+    def _content_index(event: Dict[str, Any]) -> Optional[int]:
+        value = event.get("content_index", 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            return None
+        return value
+
+    @staticmethod
+    def _combined_text_parts(state: _OutputState) -> str:
+        return "".join(state.text_parts[index] for index in sorted(state.text_parts))
+
+    def _append_text_part(
+        self,
+        state: _OutputState,
+        content_index: int,
+        delta: str,
+    ) -> bool:
+        if not state.text_parts and state.text:
+            state.text_parts[0] = state.text
+        previous = state.text
+        state.text_parts[content_index] = (
+            state.text_parts.get(content_index, "") + delta
+        )
+        combined = self._combined_text_parts(state)
+        if previous and not combined.startswith(previous):
+            return False
+        state.text = combined
+        return True
+
+    def _set_text_part(
+        self,
+        state: _OutputState,
+        content_index: int,
+        full: str,
+    ) -> bool:
+        if not state.text_parts and state.text:
+            state.text_parts[0] = state.text
+        current = state.text_parts.get(content_index, "")
+        if not full.startswith(current) and full != current:
+            return False
+        previous = state.text
+        state.text_parts[content_index] = full
+        combined = self._combined_text_parts(state)
+        if previous and not combined.startswith(previous):
+            return False
+        state.text = combined
+        return True
 
     def _merge_item(
         self,
@@ -299,10 +350,14 @@ class ResponsesAnthropicEventTranslator:
             full_text = ""
             parts = item.get("content")
             if isinstance(parts, list):
-                full_text = "".join(
-                    str(part.get("text") or part.get("refusal") or "")
-                    for part in parts if isinstance(part, dict)
-                )
+                full_parts = {
+                    index: str(part.get("text") or part.get("refusal") or "")
+                    for index, part in enumerate(parts)
+                    if isinstance(part, dict)
+                }
+                full_text = "".join(full_parts[index] for index in sorted(full_parts))
+                if not state.text_parts and not state.text:
+                    state.text_parts = full_parts
             if full_text.startswith(state.text):
                 state.text = full_text
             elif not state.text:
@@ -598,9 +653,47 @@ class ResponsesAnthropicEventTranslator:
     ) -> List[Tuple[str, Dict[str, Any]]]:
         if self.message_stopped:
             return []
+
+        terminal_id = str(response.get("id") or "")
+        terminal_model = str(response.get("model") or "")
+        if self.response_id and terminal_id != self.response_id:
+            return self._protocol_error(
+                "responses.terminal_response_id_mismatch", "/response/id"
+            )
+        if (
+            self.response_created_seen
+            and self.created_response_model
+            and terminal_model
+            and terminal_model != self.created_response_model
+        ):
+            return self._protocol_error(
+                "responses.terminal_response_model_mismatch", "/response/model"
+            )
+        expected_status = {
+            "response.completed": "completed",
+            "response.incomplete": "incomplete",
+        }[terminal_event_type]
+        terminal_status = response.get("status")
+        if terminal_status is not None and terminal_status != expected_status:
+            return self._protocol_error(
+                "responses.terminal_status_mismatch", "/response/status"
+            )
+        if response.get("error") is not None:
+            return self._protocol_error(
+                "responses.error_on_success_terminal", "/response/error"
+            )
+        output = response.get("output")
+        if isinstance(output, list):
+            missing_indices = sorted(set(self.states) - set(range(len(output))))
+            if missing_indices:
+                return self._protocol_error(
+                    "responses.terminal_output_missing_item",
+                    f"/output/{missing_indices[0]}",
+                )
+
         self.terminal_response = copy.deepcopy(response)
-        self.response_id = str(response.get("id") or self.response_id)
-        self.response_model = str(response.get("model") or self.response_model)
+        self.response_id = terminal_id or self.response_id
+        self.response_model = terminal_model or self.response_model
         events = self._start_message()
         terminal_drift = self._hydrate_terminal(response)
         if terminal_drift is not None:
@@ -612,7 +705,7 @@ class ResponsesAnthropicEventTranslator:
         # Any remaining unknown/missing index is a fatal lifecycle drift.
         remaining = [
             index for index, state in self.states.items()
-            if not state.closed and state.item_type != "reasoning"
+            if not state.closed
         ]
         if remaining:
             events.extend(self._protocol_error("responses.unclosed_output_item", f"/output/{min(remaining)}"))
@@ -653,8 +746,25 @@ class ResponsesAnthropicEventTranslator:
         event_type = event_type or str(event.get("type") or "")
         if event_type == "response.created":
             response = event.get("response") if isinstance(event.get("response"), dict) else {}
-            self.response_id = str(response.get("id") or event.get("response_id") or "")
-            self.response_model = str(response.get("model") or self.original_model)
+            response_id = str(response.get("id") or event.get("response_id") or "")
+            response_model = str(response.get("model") or "")
+            if not response_id:
+                return self._protocol_error(
+                    "responses.missing_created_response_id", "/response/id"
+                )
+            if self.response_created_seen:
+                if (
+                    response_id != self.response_id
+                    or response_model != self.created_response_model
+                ):
+                    return self._protocol_error(
+                        "responses.created_response_mutation", "/response"
+                    )
+                return []
+            self.response_created_seen = True
+            self.response_id = response_id
+            self.created_response_model = response_model
+            self.response_model = response_model or self.original_model
             return self._start_message()
         if event_type in self._NO_CONTENT_EVENTS:
             state = None
@@ -773,18 +883,20 @@ class ResponsesAnthropicEventTranslator:
             part = event.get("part") if isinstance(event.get("part"), dict) else {}
             if not state.item_type:
                 state.item_type = "message"
+            content_index = self._content_index(event)
+            if content_index is None:
+                return self._protocol_error(
+                    "responses.invalid_content_index",
+                    f"/output/{state.output_index}/content",
+                )
             part_type = part.get("type")
             key = "refusal" if part_type == "refusal" else "text"
             full = part.get(key)
             if part_type in ("output_text", "refusal") and isinstance(full, str):
-                if event_type == "response.content_part.added" and not full:
-                    pass
-                elif full.startswith(state.text):
-                    state.text = full
-                elif full != state.text:
+                if not self._set_text_part(state, content_index, full):
                     return self._protocol_error(
                         "responses.text_done_mismatch",
-                        f"/output/{state.output_index}/content",
+                        f"/output/{state.output_index}/content/{content_index}",
                     )
             return self._drain()
         if event_type == "response.output_text.delta":
@@ -800,7 +912,19 @@ class ResponsesAnthropicEventTranslator:
                     f"/output/{state.output_index}/type",
                 )
             state.item_type = state.item_type or "message"
-            state.text += str(event.get("delta") or "")
+            content_index = self._content_index(event)
+            if content_index is None:
+                return self._protocol_error(
+                    "responses.invalid_content_index",
+                    f"/output/{state.output_index}/content",
+                )
+            if not self._append_text_part(
+                state, content_index, str(event.get("delta") or "")
+            ):
+                return self._protocol_error(
+                    "responses.content_part_reordering",
+                    f"/output/{state.output_index}/content/{content_index}",
+                )
             return self._drain()
         if event_type == "response.output_text.done":
             state = self._state(event.get("output_index"))
@@ -814,15 +938,20 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            content_index = self._content_index(event)
+            if content_index is None:
+                return self._protocol_error(
+                    "responses.invalid_content_index",
+                    f"/output/{state.output_index}/content",
+                )
             full = event.get("text")
-            if isinstance(full, str):
-                if full.startswith(state.text):
-                    state.text = full
-                elif full != state.text:
-                    return self._protocol_error(
-                        "responses.text_done_mismatch",
-                        f"/output/{state.output_index}/content",
-                    )
+            if isinstance(full, str) and not self._set_text_part(
+                state, content_index, full
+            ):
+                return self._protocol_error(
+                    "responses.text_done_mismatch",
+                    f"/output/{state.output_index}/content/{content_index}",
+                )
             return self._drain()
         if event_type in ("response.function_call_arguments.delta", "response.custom_tool_call_input.delta"):
             state = self._state(event.get("output_index"))
@@ -886,7 +1015,19 @@ class ResponsesAnthropicEventTranslator:
                     f"/output/{state.output_index}/type",
                 )
             state.item_type = state.item_type or "message"
-            state.text += str(event.get("delta") or "")
+            content_index = self._content_index(event)
+            if content_index is None:
+                return self._protocol_error(
+                    "responses.invalid_content_index",
+                    f"/output/{state.output_index}/content",
+                )
+            if not self._append_text_part(
+                state, content_index, str(event.get("delta") or "")
+            ):
+                return self._protocol_error(
+                    "responses.content_part_reordering",
+                    f"/output/{state.output_index}/content/{content_index}",
+                )
             self._warn("responses.refusal_projected_as_text", f"/output/{state.output_index}", "approximation")
             return self._drain()
         if event_type == "response.refusal.done":
@@ -902,18 +1043,22 @@ class ResponsesAnthropicEventTranslator:
                     f"/output/{state.output_index}/type",
                 )
             state.item_type = state.item_type or "message"
+            content_index = self._content_index(event)
+            if content_index is None:
+                return self._protocol_error(
+                    "responses.invalid_content_index",
+                    f"/output/{state.output_index}/content",
+                )
             full = event.get("refusal")
             if not isinstance(full, str):
                 return self._protocol_error(
                     "responses.invalid_refusal",
-                    f"/output/{state.output_index}/content",
+                    f"/output/{state.output_index}/content/{content_index}",
                 )
-            if full.startswith(state.text):
-                state.text = full
-            elif full != state.text:
+            if not self._set_text_part(state, content_index, full):
                 return self._protocol_error(
                     "responses.text_done_mismatch",
-                    f"/output/{state.output_index}/content",
+                    f"/output/{state.output_index}/content/{content_index}",
                 )
             self._warn("responses.refusal_projected_as_text", f"/output/{state.output_index}", "approximation")
             return self._drain()

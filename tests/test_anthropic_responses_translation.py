@@ -1,5 +1,6 @@
 import copy
 import json
+import time
 import unittest
 
 from ghc_api.anthropic_responses import (
@@ -38,6 +39,12 @@ class StrictJsonTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 with self.assertRaises(StrictJSONError):
                     parse_strict_json_bytes(raw)
+
+    def test_deep_nesting_is_reported_as_strict_json_error(self):
+        raw = b"[" * 5000 + b"]" * 5000
+        with self.assertRaises(StrictJSONError) as raised:
+            parse_strict_json_bytes(raw)
+        self.assertIn("nesting", str(raised.exception).lower())
 
     def test_accepts_valid_surrogate_pair_as_unicode_scalar(self):
         self.assertEqual(
@@ -112,6 +119,72 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertIn("$schema", schema)
         self.assertTrue(result.payload["input"][0]["tools"][0]["strict"])
         self.assertNotIn("prompt_cache_key", result.payload)
+
+    def test_invalid_stream_and_parallel_flags_are_rejected(self):
+        payload = {
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": "false",
+        }
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(payload)
+
+        payload["stream"] = False
+        payload["tool_choice"] = {
+            "type": "auto",
+            "disable_parallel_tool_use": "false",
+        }
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_anthropic_to_responses(payload)
+
+    def test_prompt_cache_scope_includes_tenant_and_hides_raw_session_id(self):
+        payload = {
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        alice = convert_anthropic_to_responses(
+            payload,
+            session_id="shared-session",
+            tenant_id="alice",
+        )
+        bob = convert_anthropic_to_responses(
+            payload,
+            session_id="shared-session",
+            tenant_id="bob",
+        )
+        self.assertNotEqual(
+            alice.payload["prompt_cache_key"], bob.payload["prompt_cache_key"]
+        )
+        self.assertNotEqual(
+            alice.payload["client_metadata"], bob.payload["client_metadata"]
+        )
+        self.assertNotIn(
+            "shared-session", json.dumps(alice.payload["client_metadata"])
+        )
+
+    def test_public_profile_omits_copilot_only_phase_context_and_max_effort(self):
+        payload = {
+            "model": "gpt-test",
+            "messages": [
+                {"role": "assistant", "content": "prior answer"},
+                {"role": "user", "content": "continue"},
+            ],
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+            "context_management": {
+                "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+            },
+        }
+        result = convert_anthropic_to_responses(
+            payload,
+            wire_profile="public_responses",
+        )
+        assistant = next(
+            item for item in result.payload["input"]
+            if item.get("role") == "assistant"
+        )
+        self.assertNotIn("phase", assistant)
+        self.assertEqual(result.payload["reasoning"], {"effort": "xhigh"})
+        self.assertNotIn("context", result.payload["reasoning"])
 
     def test_billing_system_block_is_omitted_without_other_prompt_rewrites(self):
         payload = {
@@ -425,6 +498,25 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         paths = {record.source_path for record in raised.exception.report.records}
         self.assertIn("/top_k", paths)
         self.assertIn("/future_field/new", paths)
+
+    def test_large_conversion_report_scales_linearly(self):
+        payload = {
+            "model": "gpt-test",
+            "messages": [
+                {
+                    "role": "user" if index % 2 == 0 else "assistant",
+                    "content": [{"type": "text", "text": "x" * 800}],
+                }
+                for index in range(1600)
+            ],
+        }
+        started = time.perf_counter()
+        result = convert_anthropic_to_responses(payload)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(result.report.unaccounted_paths, [])
+        # The previous list-scan de-duplication took ~10 seconds for this shape;
+        # leave ample headroom for slower CI while guarding against O(n^2).
+        self.assertLess(elapsed, 2.0)
 
     def test_identifier_codec_is_reversible_and_bounded(self):
         codec = IdentifierCodec(max_length=32)
