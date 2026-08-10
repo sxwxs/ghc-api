@@ -2,17 +2,13 @@
 Anthropic-compatible API routes
 """
 
-import base64
 import copy
 import hashlib
 import json
-import os
 import queue
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, Generator, Any, List, Optional, Tuple
 
 import requests
@@ -30,15 +26,12 @@ from ..api_helpers import (
 )
 from ..anthropic_responses import (
     MODE_COMPATIBILITY,
-    MODE_LOSSLESS_REQUIRED,
     AnthropicResponsesConversionError,
-    ResponsesToAnthropicResult,
     StrictJSONError,
     anthropic_error_from_responses,
     convert_anthropic_to_responses,
     convert_responses_to_anthropic,
     parse_strict_json_bytes,
-    prepare_replay_items_for_wire,
 )
 from ..compat_profiles import (
     CLAUDE_CLI_TOOL_CONTRACT_BASELINES,
@@ -73,12 +66,10 @@ from ..translator import (
 )
 from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup, log_connection_retry, get_client_ip
 from ..state import state
-from ..reasoning_replay import (
-    ReplayEncryptionConfigurationError,
-    ReplayQuotaExceededError,
-    ReasoningReplayStore,
+from ..reasoning_carrier import (
+    redact_reasoning_carriers_for_cache,
+    strip_reasoning_carriers_from_messages_payload,
 )
-from ..utils import get_config_dir
 from ..web_search import has_web_search_tool, is_web_search_unsupported_error, apply_web_search_fallback
 
 
@@ -190,6 +181,27 @@ def _set_compatibility_headers(response: Response, warnings: List[Dict[str, Any]
     return response
 
 
+def _extract_responses_session_id(
+    headers: Dict[str, Any], payload: Dict[str, Any]
+) -> Optional[str]:
+    lowered = {str(key).lower(): value for key, value in (headers or {}).items()}
+    for name in ("x-claude-code-session-id", "x-session-id"):
+        value = lowered.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("user_id"), str):
+        try:
+            user_metadata = json.loads(metadata["user_id"])
+        except (TypeError, ValueError):
+            user_metadata = None
+        if isinstance(user_metadata, dict):
+            value = user_metadata.get("session_id")
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
 def _anthropic_json_error(
     message: str,
     status_code: int = 400,
@@ -202,403 +214,6 @@ def _anthropic_json_error(
     })
     response.status_code = status_code
     return _set_compatibility_headers(response, warnings or [])
-
-
-def _header_value(headers: Dict[str, Any], *names: str) -> Optional[str]:
-    lowered = {str(key).lower(): value for key, value in (headers or {}).items()}
-    for name in names:
-        value = lowered.get(name.lower())
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return None
-
-
-def _extract_anthropic_session_id(
-    headers: Dict[str, Any], payload: Dict[str, Any]
-) -> Tuple[Optional[str], List[Dict[str, Any]]]:
-    warnings: List[Dict[str, Any]] = []
-    header_session = _header_value(
-        headers,
-        "X-Claude-Code-Session-Id",
-        "X-Session-Id",
-    )
-    metadata_session: Optional[str] = None
-    metadata = payload.get("metadata")
-    if isinstance(metadata, dict):
-        user_value = metadata.get("user_id")
-        if isinstance(user_value, str):
-            try:
-                parsed = json.loads(user_value)
-            except (TypeError, ValueError):
-                parsed = None
-            if isinstance(parsed, dict) and parsed.get("session_id") is not None:
-                candidate = str(parsed.get("session_id") or "").strip()
-                metadata_session = candidate or None
-    if header_session and metadata_session and header_session != metadata_session:
-        warnings.append(_compatibility_warning(
-            "replay.session_identity_mismatch", "/metadata/user_id", "disabled"
-        ))
-        return None, warnings
-    session_id = header_session or metadata_session
-    if not session_id:
-        warnings.append(_compatibility_warning(
-            "replay.session_identity_missing", "/metadata", "disabled"
-        ))
-    return session_id, warnings
-
-
-_replay_store_lock = threading.RLock()
-_replay_store: Optional[ReasoningReplayStore] = None
-_replay_store_signature: Optional[Tuple[Any, ...]] = None
-
-
-def _configured_replay_path() -> str:
-    configured = str(getattr(state, "anthropic_responses_replay_path", "") or "").strip()
-    if configured:
-        return configured
-    return str(Path(get_config_dir()) / "anthropic-responses-replay.sqlite3")
-
-
-def _reset_anthropic_responses_replay_store() -> None:
-    """Close the lazy replay store (also used by runtime-config tests)."""
-    global _replay_store, _replay_store_signature
-    with _replay_store_lock:
-        if _replay_store is not None:
-            _replay_store.close()
-        _replay_store = None
-        _replay_store_signature = None
-
-
-def _get_anthropic_responses_replay_store() -> Tuple[ReasoningReplayStore, str]:
-    global _replay_store, _replay_store_signature
-    path = _configured_replay_path()
-    ttl = int(getattr(state, "anthropic_responses_replay_ttl_seconds", 86400))
-    key_env = str(getattr(
-        state, "anthropic_responses_replay_encryption_key_env", ""
-    ) or "").strip()
-    encryption_key = os.environ.get(key_env) if key_env else None
-    key_fingerprint = (
-        hashlib.sha256(encryption_key.encode("utf-8")).hexdigest()
-        if encryption_key else ""
-    )
-    signature = (str(Path(path).expanduser()) if path != ":memory:" else path, ttl, key_env, key_fingerprint)
-    with _replay_store_lock:
-        if _replay_store is not None and signature == _replay_store_signature:
-            return _replay_store, path
-        if _replay_store is not None:
-            _replay_store.close()
-        _replay_store = ReasoningReplayStore(
-            path,
-            ttl_seconds=ttl,
-            encryption_key=encryption_key,
-            require_encryption=True,
-        )
-        _replay_store_signature = signature
-        return _replay_store, path
-
-
-def _assistant_visible_blocks(message: Dict[str, Any]) -> List[Any]:
-    content = message.get("content")
-    if isinstance(content, list):
-        return copy.deepcopy(content)
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    return []
-
-
-@dataclass
-class _ReplayContext:
-    mode: str
-    wire_profile: str
-    model: str
-    tenant_id: Optional[str]
-    session_id: Optional[str]
-    store: Optional[ReasoningReplayStore] = None
-    max_bytes: int = 0
-    max_tenant_bytes: int = 0
-    max_record_bytes: int = 0
-    warnings: List[Dict[str, Any]] = field(default_factory=list)
-    parent_replay_id: Optional[str] = None
-    matched_profiles: List[Dict[str, Any]] = field(default_factory=list)
-    fatal_message: Optional[str] = None
-
-    def warn(self, code: str, path: str = "/", action: str = "warning") -> None:
-        warning = _compatibility_warning(code, path, action, profile=self.wire_profile)
-        if warning not in self.warnings:
-            self.warnings.append(warning)
-
-    def fail_if_lossless(self, message: str) -> None:
-        if self.mode == MODE_LOSSLESS_REQUIRED and self.fatal_message is None:
-            self.fatal_message = message
-
-
-def _create_replay_context(
-    *,
-    payload: Dict[str, Any],
-    request_headers: Dict[str, Any],
-    user_id: str,
-    model: str,
-    wire_profile: str,
-    mode: str,
-) -> _ReplayContext:
-    session_id, session_warnings = _extract_anthropic_session_id(request_headers, payload)
-    trusted_single_user = bool(getattr(
-        state, "anthropic_responses_replay_trusted_single_user", False
-    ))
-    require_trusted = bool(getattr(
-        state, "anthropic_responses_replay_require_trusted_tenant", True
-    ))
-    if bool(getattr(state, "enable_auth", False)) and user_id and user_id != "anonymous":
-        tenant_id: Optional[str] = user_id
-    elif trusted_single_user:
-        tenant_id = "trusted-single-user"
-    elif not require_trusted:
-        tenant_id = user_id or "anonymous"
-    else:
-        tenant_id = None
-
-    context = _ReplayContext(
-        mode=mode,
-        wire_profile=wire_profile,
-        model=model,
-        tenant_id=tenant_id,
-        session_id=session_id,
-        max_bytes=int(getattr(state, "anthropic_responses_replay_max_bytes", 0) or 0),
-        max_tenant_bytes=int(getattr(
-            state, "anthropic_responses_replay_max_tenant_bytes", 0
-        ) or 0),
-        max_record_bytes=int(getattr(
-            state, "anthropic_responses_replay_max_record_bytes", 0
-        ) or 0),
-        warnings=list(session_warnings),
-    )
-    if session_warnings:
-        context.fail_if_lossless("A stable Claude Code session identity is required for lossless reasoning replay")
-    if tenant_id is None:
-        context.warn("replay.trusted_tenant_missing", "/", "disabled")
-        context.fail_if_lossless("A trusted tenant identity is required for lossless reasoning replay")
-    if session_id is None or tenant_id is None:
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        return context
-
-    try:
-        store, _ = _get_anthropic_responses_replay_store()
-        context.store = store
-        store.purge(expired_only=True)
-    except ReplayEncryptionConfigurationError:
-        context.warn("replay.encryption_required", "/", "disabled")
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        context.fail_if_lossless("Replay encryption is required but is not configured")
-        return context
-    except Exception:
-        context.warn("replay.store_unavailable", "/", "disabled")
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        context.fail_if_lossless("The reasoning replay store is unavailable")
-        return context
-
-    if (
-        context.max_bytes <= 0
-        or context.max_tenant_bytes <= 0
-        or context.max_record_bytes <= 0
-    ):
-        context.warn("replay.invalid_quota", "/", "disabled")
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        context.fail_if_lossless("Replay store byte quotas must be positive")
-        context.store = None
-    elif context.max_record_bytes > context.max_tenant_bytes:
-        context.warn("replay.invalid_quota", "/", "disabled")
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        context.fail_if_lossless("Replay per-record quota exceeds the tenant quota")
-        context.store = None
-    elif context.max_tenant_bytes > context.max_bytes:
-        context.warn("replay.invalid_quota", "/", "disabled")
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        context.fail_if_lossless("Replay tenant quota exceeds the total quota")
-        context.store = None
-    elif store.logical_size_bytes() >= context.max_bytes:
-        context.warn("replay.quota_exhausted", "/", "disabled")
-        context.warn("audit.full_snapshot_unavailable", "/", "not_stored")
-        context.fail_if_lossless("Reasoning replay store byte quota is exhausted")
-        context.store = None
-    return context
-
-
-def _replay_resolver(context: _ReplayContext):
-    if context.store is None or not context.tenant_id or not context.session_id:
-        return None
-
-    def resolve(message_index: int, message: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-        path = f"/messages/{message_index}"
-        try:
-            lookup = context.store.get(
-                tenant_id=context.tenant_id,
-                session_id=context.session_id,
-                model=context.model,
-                assistant_visible_blocks=_assistant_visible_blocks(message),
-            )
-        except Exception:
-            context.warn("replay.lookup_failed", path, "miss")
-            context.fail_if_lossless("Reasoning replay lookup failed")
-            return None
-        if lookup.issues:
-            context.warn("replay.integrity_failed", path, "miss")
-            context.fail_if_lossless("Reasoning replay state failed integrity validation")
-            return None
-        candidates = [
-            record for record in lookup.records
-            if record.parent_replay_id == context.parent_replay_id
-        ]
-        if len(candidates) > 1:
-            context.warn("replay.ambiguous", path, "miss")
-            context.fail_if_lossless("Reasoning replay state is ambiguous after a retry or fork")
-            return None
-        if not candidates:
-            context.warn("replay.state_miss", path, "miss")
-            context.fail_if_lossless("Required reasoning replay state was not found")
-            return None
-        record = candidates[0]
-        profile_data = record.profile if isinstance(record.profile, dict) else {}
-        if profile_data.get("name") != context.wire_profile:
-            context.warn("replay.profile_mismatch", path, "miss")
-            context.fail_if_lossless("Reasoning replay state belongs to a different wire profile")
-            return None
-        try:
-            wire_items = prepare_replay_items_for_wire(
-                record.output_items, context.wire_profile
-            )
-        except Exception:
-            context.warn("replay.wire_encoding_failed", path, "miss")
-            context.fail_if_lossless("Stored reasoning state cannot be encoded for this wire profile")
-            return None
-        context.parent_replay_id = record.replay_id
-        context.matched_profiles.append({
-            "name": profile_data.get("name"),
-            "name_codec": copy.deepcopy(profile_data.get("name_codec", {})),
-            "call_id_codec": copy.deepcopy(profile_data.get("call_id_codec", {})),
-        })
-        return wire_items
-
-    return resolve
-
-
-def _restore_replay_identifier_mappings(context: _ReplayContext, conversion: Any) -> None:
-    try:
-        for profile in context.matched_profiles:
-            conversion.name_codec.restore_mapping(profile.get("name_codec", {}))
-            conversion.call_id_codec.restore_mapping(profile.get("call_id_codec", {}))
-    except Exception:
-        context.warn("replay.identifier_mapping_conflict", "/messages", "miss")
-        context.fail_if_lossless("Replay identifier mapping conflicts with this request")
-
-
-def _persist_replay_result(
-    context: _ReplayContext,
-    conversion: Any,
-    result: ResponsesToAnthropicResult,
-    audit_snapshot: Optional[Dict[str, Any]] = None,
-) -> None:
-    if context.store is None or not context.tenant_id or not context.session_id:
-        return
-    profile = {
-        "name": context.wire_profile,
-        "name_codec": conversion.name_codec.mapping(),
-        "call_id_codec": conversion.call_id_codec.mapping(),
-    }
-    if audit_snapshot is not None:
-        profile["audit_snapshot"] = copy.deepcopy(audit_snapshot)
-    try:
-        record = context.store.put(
-            tenant_id=context.tenant_id,
-            session_id=context.session_id,
-            model=context.model,
-            output_items=result.replay_items,
-            assistant_visible_blocks=result.visible_assistant_message.get("content", []),
-            profile=profile,
-            parent_replay_id=context.parent_replay_id,
-            max_record_bytes=context.max_record_bytes,
-            max_tenant_bytes=context.max_tenant_bytes,
-            max_total_bytes=context.max_bytes,
-        )
-        context.parent_replay_id = record.replay_id
-    except ReplayQuotaExceededError:
-        context.warn("replay.quota_exhausted", "/response/output", "not_stored")
-        context.warn("audit.full_snapshot_unavailable", "/response", "not_stored")
-        context.fail_if_lossless("Reasoning replay result exceeded a configured byte quota")
-    except Exception:
-        context.warn("replay.write_failed", "/response/output", "not_stored")
-        context.warn("audit.full_snapshot_unavailable", "/response", "not_stored")
-        context.fail_if_lossless("Reasoning replay result could not be persisted")
-
-
-def _persist_audit_only_snapshot(
-    context: _ReplayContext,
-    request_id: str,
-    snapshot: Dict[str, Any],
-) -> None:
-    """Persist a failed/unknown exchange without making it replay-eligible."""
-    if context.store is None or not context.tenant_id or not context.session_id:
-        return
-    try:
-        context.store.put(
-            tenant_id=context.tenant_id,
-            session_id=context.session_id,
-            model=context.model,
-            output_items=[],
-            assistant_visible_blocks=[{
-                "type": "ghc_compatibility_audit_record",
-                "request_id": request_id,
-            }],
-            profile={
-                "name": context.wire_profile,
-                "audit_only": True,
-                "audit_snapshot": copy.deepcopy(snapshot),
-            },
-            max_record_bytes=context.max_record_bytes,
-            max_tenant_bytes=context.max_tenant_bytes,
-            max_total_bytes=context.max_bytes,
-        )
-    except ReplayQuotaExceededError:
-        context.warn("audit.quota_exhausted", "/response", "not_stored")
-    except Exception:
-        context.warn("audit.write_failed", "/response", "not_stored")
-
-
-def _compatibility_audit_snapshot(
-    *,
-    original_request_raw: bytes,
-    original_request_body: Dict[str, Any],
-    request_headers: Dict[str, Any],
-    responses_payload: Dict[str, Any],
-    conversion: Any,
-    request_audit: Any,
-    warnings: List[Dict[str, Any]],
-    raw_response_events: Optional[List[str]] = None,
-    raw_response_sse_lines: Optional[List[str]] = None,
-    upstream_response_raw: Optional[bytes] = None,
-    response_report: Any = None,
-) -> Dict[str, Any]:
-    """Complete encrypted sidecar payload stored with a replay DAG node."""
-    snapshot: Dict[str, Any] = {
-        "version": 1,
-        "request_raw_base64": base64.b64encode(original_request_raw).decode("ascii"),
-        "parsed_request": copy.deepcopy(original_request_body),
-        "request_headers": copy.deepcopy(request_headers),
-        "responses_request": copy.deepcopy(responses_payload),
-        "request_conversion_report": conversion.report.to_dict(),
-        "request_compatibility_audit": request_audit.to_dict(),
-        "compatibility_warnings": copy.deepcopy(warnings),
-    }
-    if raw_response_events is not None:
-        snapshot["raw_response_events"] = list(raw_response_events)
-    if raw_response_sse_lines is not None:
-        snapshot["raw_response_sse_lines"] = list(raw_response_sse_lines)
-    if upstream_response_raw is not None:
-        snapshot["upstream_response_raw_base64"] = base64.b64encode(
-            upstream_response_raw
-        ).decode("ascii")
-    if response_report is not None:
-        snapshot["response_conversion_report"] = response_report.to_dict()
-    return snapshot
 
 
 def _upstream_response_bytes(response: requests.Response) -> bytes:
@@ -1391,6 +1006,18 @@ def anthropic_messages():
     use_direct_api = supports_direct_anthropic_api(translated_model)
 
     if use_direct_api:
+        anthropic_payload, removed_carriers = strip_reasoning_carriers_from_messages_payload(
+            anthropic_payload
+        )
+        if removed_carriers:
+            original_request_body = redact_reasoning_carriers_for_cache(
+                original_request_body
+            )
+            counters.incr("mod.responses_reasoning_carrier_strip", removed_carriers)
+            print(
+                f"[Anthropic API] Removed {removed_carriers} synthetic Responses "
+                f"reasoning carrier block(s) before native Anthropic forwarding"
+            )
         anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
         anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
         anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
@@ -1488,9 +1115,11 @@ def _responses_request_cache_record(
     record = {
         "request_headers": request_headers,
         "client_ip": client_ip,
-        "original_request_body": original_request_body,
+        "original_request_body": redact_reasoning_carriers_for_cache(
+            original_request_body
+        ),
         "request_body": redact_responses_value_for_cache(responses_payload),
-        "response_body": response_body,
+        "response_body": redact_reasoning_carriers_for_cache(response_body),
         "upstream_response_body": cached_upstream_body,
         "original_request_raw_sha256": hashlib.sha256(original_request_raw).hexdigest(),
         "model": original_model,
@@ -1588,96 +1217,15 @@ def _make_anthropic_responses_stream_handler(
     translated_model: str,
     responses_payload: Dict[str, Any],
     original_request_body: Dict[str, Any],
-    original_request_raw: bytes,
     request_headers: Dict[str, Any],
     client_ip: Optional[str],
     user_id: str,
     conversion: Any,
     warnings: List[Dict[str, Any]],
     request_audit: Any,
-    replay_context: _ReplayContext,
     mode: str,
 ) -> AnthropicResponsesStreamHandler:
-    holder: Dict[str, Any] = {}
-
-    def on_completed(result: ResponsesToAnthropicResult) -> Optional[str]:
-        handler = holder.get("handler")
-        if handler is not None and handler.raw_capture_truncated:
-            replay_context.warn(
-                "audit.capture_limit_exceeded", "/response", "not_fully_stored"
-            )
-            replay_context.fail_if_lossless(
-                "The complete Responses stream exceeded the encrypted audit capture limit"
-            )
-            if replay_context.fatal_message:
-                handler._compatibility_warnings = _merge_compatibility_warnings(
-                    handler._compatibility_warnings, replay_context.warnings
-                )
-                return replay_context.fatal_message
-        audit_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=_merge_compatibility_warnings(warnings, replay_context.warnings),
-            raw_response_events=(handler.raw_events if handler is not None else []),
-            raw_response_sse_lines=(
-                handler.raw_sse_lines if handler is not None else []
-            ),
-            response_report=result.report,
-        )
-        _persist_replay_result(
-            replay_context, conversion, result, audit_snapshot=audit_snapshot
-        )
-        if handler is not None:
-            handler._compatibility_warnings = _merge_compatibility_warnings(
-                handler._compatibility_warnings, replay_context.warnings
-            )
-        return replay_context.fatal_message
-
-    def on_audit_finalized(
-        raw_events: List[str],
-        raw_sse_lines: List[str],
-        terminal_result: Optional[ResponsesToAnthropicResult],
-    ) -> None:
-        if terminal_result is not None:
-            return
-        handler = holder.get("handler")
-        if handler is not None and handler.raw_capture_truncated:
-            replay_context.warn(
-                "audit.capture_limit_exceeded", "/response", "not_fully_stored"
-            )
-            replay_context.fail_if_lossless(
-                "The complete Responses stream exceeded the encrypted audit capture limit"
-            )
-        stream_warnings = _merge_compatibility_warnings(
-            warnings,
-            replay_context.warnings,
-            (
-                handler.translator.compatibility_warnings
-                if handler is not None else []
-            ),
-        )
-        snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=stream_warnings,
-            raw_response_events=raw_events,
-            raw_response_sse_lines=raw_sse_lines,
-        )
-        _persist_audit_only_snapshot(replay_context, request_id, snapshot)
-        if handler is not None:
-            handler._compatibility_warnings = _merge_compatibility_warnings(
-                handler._compatibility_warnings, replay_context.warnings
-            )
-
-    handler = AnthropicResponsesStreamHandler(
+    return AnthropicResponsesStreamHandler(
         response=response,
         request_id=request_id,
         request_size=request_size,
@@ -1685,28 +1233,24 @@ def _make_anthropic_responses_stream_handler(
         original_model=original_model,
         translated_model=translated_model,
         request_body_for_cache=redact_responses_value_for_cache(responses_payload),
-        original_request_body=original_request_body,
+        original_request_body=redact_reasoning_carriers_for_cache(
+            original_request_body
+        ),
         request_headers=request_headers,
         client_ip=client_ip,
         user_id=user_id,
         conversion=conversion,
         compatibility_warnings=warnings,
         compatibility_audit=request_audit.to_dict(),
-        on_completed=on_completed,
-        on_audit_finalized=on_audit_finalized,
         mode=mode,
-        sidecar_available=replay_context.store is not None,
-        max_raw_capture_bytes=max(
-            1024,
-            min(
-                16 * 1024 * 1024,
-                replay_context.max_record_bytes // 3
-                if replay_context.max_record_bytes > 0 else 16 * 1024 * 1024,
+        max_raw_capture_bytes=min(
+            16 * 1024 * 1024,
+            max(
+                1024,
+                int(getattr(cache, "max_request_size", 0) or 1024 * 1024),
             ),
         ),
     )
-    holder["handler"] = handler
-    return handler
 
 
 def _stream_pending_anthropic_responses_request(
@@ -1726,22 +1270,18 @@ def _stream_pending_anthropic_responses_request(
     conversion: Any,
     warnings: List[Dict[str, Any]],
     request_audit: Any,
-    replay_context: _ReplayContext,
     mode: str,
 ) -> Response:
     """Commit an Anthropic SSE response while upstream headers are pending."""
-    # Seed synchronously before Flask starts iterating the generator. A client
-    # can disconnect after the first pre-header ping, and that attempt must
-    # still have a durable dashboard lifecycle record.
     cache.start_request(request_id, {
         "request_headers": request_headers,
         "client_ip": client_ip,
-        "original_request_body": original_request_body,
+        "original_request_body": redact_reasoning_carriers_for_cache(
+            original_request_body
+        ),
         "request_body": redact_responses_value_for_cache(responses_payload),
         "model": original_model,
-        "translated_model": (
-            translated_model if translated_model != original_model else None
-        ),
+        "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
         "request_size": request_size,
         "user_id": user_id,
@@ -1759,26 +1299,9 @@ def _stream_pending_anthropic_responses_request(
                 try:
                     upstream_error = _strict_upstream_json(response)
                 except Exception:
-                    upstream_error = {
-                        "message": "Upstream Responses API returned a non-JSON error"
-                    }
-                error = anthropic_error_from_responses(
-                    upstream_error, response.status_code
-                )
+                    upstream_error = {"message": "Upstream Responses API returned a non-JSON error"}
+                error = anthropic_error_from_responses(upstream_error, response.status_code)
                 yield _anthropic_error_event(error, response.status_code)
-                snapshot = _compatibility_audit_snapshot(
-                    original_request_raw=original_request_raw,
-                    original_request_body=original_request_body,
-                    request_headers=request_headers,
-                    responses_payload=responses_payload,
-                    conversion=conversion,
-                    request_audit=request_audit,
-                    warnings=warnings,
-                    upstream_response_raw=_upstream_response_bytes(response),
-                )
-                _persist_audit_only_snapshot(
-                    replay_context, request_id, snapshot
-                )
                 cache.add_request(request_id, _responses_request_cache_record(
                     request_headers=request_headers,
                     client_ip=client_ip,
@@ -1794,9 +1317,7 @@ def _stream_pending_anthropic_responses_request(
                     original_model=original_model,
                     translated_model=translated_model,
                     user_id=user_id,
-                    warnings=_merge_compatibility_warnings(
-                        warnings, replay_context.warnings
-                    ),
+                    warnings=warnings,
                     request_report=conversion.report,
                     compatibility_audit=request_audit,
                 ))
@@ -1812,18 +1333,14 @@ def _stream_pending_anthropic_responses_request(
                 translated_model=translated_model,
                 responses_payload=responses_payload,
                 original_request_body=original_request_body,
-                original_request_raw=original_request_raw,
                 request_headers=request_headers,
                 client_ip=client_ip,
                 user_id=user_id,
                 conversion=conversion,
                 warnings=warnings,
                 request_audit=request_audit,
-                replay_context=replay_context,
                 mode=mode,
             )
-            # The cache entry was seeded above; do not overwrite its timestamp
-            # and SENDING state when handing ownership to the normal handler.
             handler._cache_seeded = True
             yield from handler._generate()
             cache_finished = True
@@ -1832,17 +1349,6 @@ def _stream_pending_anthropic_responses_request(
                 warnings,
                 [_compatibility_warning("responses.connection_failed", "/", "error")],
             )
-            snapshot = _compatibility_audit_snapshot(
-                original_request_raw=original_request_raw,
-                original_request_body=original_request_body,
-                request_headers=request_headers,
-                responses_payload=responses_payload,
-                conversion=conversion,
-                request_audit=request_audit,
-                warnings=failure_warnings,
-                raw_response_events=[],
-            )
-            _persist_audit_only_snapshot(replay_context, request_id, snapshot)
             event = {
                 "type": "error",
                 "error": {
@@ -1865,9 +1371,7 @@ def _stream_pending_anthropic_responses_request(
                 original_model=original_model,
                 translated_model=translated_model,
                 user_id=user_id,
-                warnings=_merge_compatibility_warnings(
-                    failure_warnings, replay_context.warnings
-                ),
+                warnings=failure_warnings,
                 request_report=conversion.report,
                 compatibility_audit=request_audit,
             ))
@@ -1884,17 +1388,6 @@ def _stream_pending_anthropic_responses_request(
                 warnings,
                 [_compatibility_warning("responses.client_disconnected", "/", "error")],
             )
-            snapshot = _compatibility_audit_snapshot(
-                original_request_raw=original_request_raw,
-                original_request_body=original_request_body,
-                request_headers=request_headers,
-                responses_payload=responses_payload,
-                conversion=conversion,
-                request_audit=request_audit,
-                warnings=disconnect_warnings,
-                raw_response_events=[],
-            )
-            _persist_audit_only_snapshot(replay_context, request_id, snapshot)
             cache.add_request(request_id, _responses_request_cache_record(
                 request_headers=request_headers,
                 client_ip=client_ip,
@@ -1916,9 +1409,7 @@ def _stream_pending_anthropic_responses_request(
                 original_model=original_model,
                 translated_model=translated_model,
                 user_id=user_id,
-                warnings=_merge_compatibility_warnings(
-                    disconnect_warnings, replay_context.warnings
-                ),
+                warnings=disconnect_warnings,
                 request_report=conversion.report,
                 compatibility_audit=request_audit,
             ))
@@ -1929,17 +1420,6 @@ def _stream_pending_anthropic_responses_request(
                 warnings,
                 [_compatibility_warning("responses.pre_header_failed", "/", "error")],
             )
-            snapshot = _compatibility_audit_snapshot(
-                original_request_raw=original_request_raw,
-                original_request_body=original_request_body,
-                request_headers=request_headers,
-                responses_payload=responses_payload,
-                conversion=conversion,
-                request_audit=request_audit,
-                warnings=failure_warnings,
-                raw_response_events=[],
-            )
-            _persist_audit_only_snapshot(replay_context, request_id, snapshot)
             event = {
                 "type": "error",
                 "error": {
@@ -1962,9 +1442,7 @@ def _stream_pending_anthropic_responses_request(
                 original_model=original_model,
                 translated_model=translated_model,
                 user_id=user_id,
-                warnings=_merge_compatibility_warnings(
-                    failure_warnings, replay_context.warnings
-                ),
+                warnings=failure_warnings,
                 request_report=conversion.report,
                 compatibility_audit=request_audit,
             ))
@@ -2019,35 +1497,7 @@ def handle_responses_anthropic_request(
     warnings: List[Dict[str, Any]] = _merge_compatibility_warnings(
         request_audit.warnings
     )
-    replay_context = _create_replay_context(
-        payload=anthropic_payload,
-        request_headers=request_headers,
-        user_id=user_id,
-        model=translated_model,
-        wire_profile=wire_profile,
-        mode=mode,
-    )
-    warnings = _merge_compatibility_warnings(warnings, replay_context.warnings)
     if request_audit.should_fail:
-        if replay_context.fatal_message is None:
-            _persist_audit_only_snapshot(
-                replay_context,
-                request_id,
-                {
-                    "version": 1,
-                    "rejected_before_upstream": True,
-                    "request_raw_base64": base64.b64encode(
-                        original_request_raw
-                    ).decode("ascii"),
-                    "parsed_request": copy.deepcopy(original_request_body),
-                    "request_headers": copy.deepcopy(request_headers),
-                    "request_compatibility_audit": request_audit.to_dict(),
-                    "compatibility_warnings": copy.deepcopy(warnings),
-                },
-            )
-            warnings = _merge_compatibility_warnings(
-                warnings, replay_context.warnings
-            )
         _log_compatibility_warnings(request_id, warnings)
         _cache_responses_local_failure(
             request_id=request_id,
@@ -2070,59 +1520,18 @@ def handle_responses_anthropic_request(
             400,
             warnings=warnings,
         )
-    if replay_context.fatal_message:
-        _log_compatibility_warnings(request_id, warnings)
-        _cache_responses_local_failure(
-            request_id=request_id,
-            message=replay_context.fatal_message,
-            status_code=400,
-            request_headers=request_headers,
-            client_ip=client_ip,
-            original_request_body=original_request_body,
-            original_request_raw=original_request_raw,
-            responses_payload=None,
-            start_time=start_time,
-            original_model=original_model,
-            translated_model=translated_model,
-            user_id=user_id,
-            warnings=warnings,
-            compatibility_audit=request_audit,
-        )
-        return _anthropic_json_error(replay_context.fatal_message, 400, warnings=warnings)
 
-    resolver = _replay_resolver(replay_context)
+    session_id = _extract_responses_session_id(request_headers, anthropic_payload)
     try:
         conversion = convert_anthropic_to_responses(
             anthropic_payload,
             wire_profile=wire_profile,
             mode=mode,
-            session_id=replay_context.session_id,
-            tenant_id=replay_context.tenant_id,
-            replay_resolver=resolver,
-            sidecar_available=replay_context.store is not None,
+            session_id=session_id,
         )
     except AnthropicResponsesConversionError as exc:
         conversion_warnings = _merge_compatibility_warnings(
             warnings, exc.report.warnings
-        )
-        _persist_audit_only_snapshot(
-            replay_context,
-            request_id,
-            {
-                "version": 1,
-                "rejected_before_upstream": True,
-                "request_raw_base64": base64.b64encode(
-                    original_request_raw
-                ).decode("ascii"),
-                "parsed_request": copy.deepcopy(original_request_body),
-                "request_headers": copy.deepcopy(request_headers),
-                "request_compatibility_audit": request_audit.to_dict(),
-                "request_conversion_report": exc.report.to_dict(),
-                "compatibility_warnings": copy.deepcopy(conversion_warnings),
-            },
-        )
-        conversion_warnings = _merge_compatibility_warnings(
-            conversion_warnings, replay_context.warnings
         )
         _log_compatibility_warnings(request_id, conversion_warnings)
         _cache_responses_local_failure(
@@ -2162,39 +1571,7 @@ def handle_responses_anthropic_request(
         )
         return _anthropic_json_error(str(exc), 400, warnings=warnings)
 
-    _restore_replay_identifier_mappings(replay_context, conversion)
-    if resolver is None and any(
-        isinstance(message, dict) and message.get("role") == "assistant"
-        for message in anthropic_payload.get("messages", [])
-    ):
-        replay_context.warn("replay.unavailable_for_assistant_history", "/messages", "approximation")
-        replay_context.fail_if_lossless("Assistant history requires reasoning replay in lossless_required mode")
-    if conversion.replay_misses:
-        replay_context.fail_if_lossless("Required assistant reasoning replay state is missing")
-    warnings = _merge_compatibility_warnings(
-        warnings, replay_context.warnings, conversion.report.warnings
-    )
-    if replay_context.fatal_message:
-        _log_compatibility_warnings(request_id, warnings)
-        _cache_responses_local_failure(
-            request_id=request_id,
-            message=replay_context.fatal_message,
-            status_code=400,
-            request_headers=request_headers,
-            client_ip=client_ip,
-            original_request_body=original_request_body,
-            original_request_raw=original_request_raw,
-            responses_payload=conversion.payload,
-            start_time=start_time,
-            original_model=original_model,
-            translated_model=translated_model,
-            user_id=user_id,
-            warnings=warnings,
-            request_report=conversion.report,
-            compatibility_audit=request_audit,
-        )
-        return _anthropic_json_error(replay_context.fatal_message, 400, warnings=warnings)
-
+    warnings = _merge_compatibility_warnings(warnings, conversion.report.warnings)
     responses_payload = conversion.payload
     request_size = len(json.dumps(
         responses_payload, ensure_ascii=False, separators=(",", ":")
@@ -2253,7 +1630,6 @@ def handle_responses_anthropic_request(
                         conversion=conversion,
                         warnings=warnings,
                         request_audit=request_audit,
-                        replay_context=replay_context,
                         mode=mode,
                     )
             else:
@@ -2283,21 +1659,6 @@ def handle_responses_anthropic_request(
         warnings = _merge_compatibility_warnings(
             warnings,
             [_compatibility_warning("responses.connection_failed", "/", "error")],
-        )
-        connection_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=warnings,
-        )
-        _persist_audit_only_snapshot(
-            replay_context, request_id, connection_snapshot
-        )
-        warnings = _merge_compatibility_warnings(
-            warnings, replay_context.warnings
         )
         connection_error_body = {
             "type": "error",
@@ -2346,19 +1707,7 @@ def handle_responses_anthropic_request(
         anthropic_error = anthropic_error_from_responses(
             upstream_error, response.status_code
         )
-        error_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=warnings,
-            upstream_response_raw=_upstream_response_bytes(response),
-        )
-        _persist_audit_only_snapshot(replay_context, request_id, error_snapshot)
         response_size = len(getattr(response, "text", "").encode("utf-8"))
-        warnings = _merge_compatibility_warnings(warnings, replay_context.warnings)
         cache.add_request(request_id, _responses_request_cache_record(
             request_headers=request_headers,
             client_ip=client_ip,
@@ -2393,14 +1742,12 @@ def handle_responses_anthropic_request(
             translated_model=translated_model,
             responses_payload=responses_payload,
             original_request_body=original_request_body,
-            original_request_raw=original_request_raw,
             request_headers=request_headers,
             client_ip=client_ip,
             user_id=user_id,
             conversion=conversion,
             warnings=warnings,
             request_audit=request_audit,
-            replay_context=replay_context,
             mode=mode,
         )
         _log_compatibility_warnings(request_id, warnings)
@@ -2412,22 +1759,6 @@ def handle_responses_anthropic_request(
         warnings = _merge_compatibility_warnings(
             warnings,
             [_compatibility_warning("responses.malformed_json_body", "/response", "error")],
-        )
-        malformed_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=warnings,
-            upstream_response_raw=_upstream_response_bytes(response),
-        )
-        _persist_audit_only_snapshot(
-            replay_context, request_id, malformed_snapshot
-        )
-        warnings = _merge_compatibility_warnings(
-            warnings, replay_context.warnings
         )
         error_body = {
             "type": "error",
@@ -2494,21 +1825,6 @@ def handle_responses_anthropic_request(
                 "message": "Unsupported Responses response shape",
             },
         }
-        drift_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=warnings,
-            upstream_response_raw=_upstream_response_bytes(response),
-        )
-        drift_snapshot["response_compatibility_audit"] = response_audit.to_dict()
-        _persist_audit_only_snapshot(replay_context, request_id, drift_snapshot)
-        warnings = _merge_compatibility_warnings(
-            warnings, replay_context.warnings
-        )
         cache.add_request(request_id, _responses_request_cache_record(
             request_headers=request_headers,
             client_ip=client_ip,
@@ -2537,21 +1853,6 @@ def handle_responses_anthropic_request(
         anthropic_error = anthropic_error_from_responses(
             upstream_response.get("error") or upstream_response, 500
         )
-        failed_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=warnings,
-            upstream_response_raw=_upstream_response_bytes(response),
-        )
-        failed_snapshot["response_compatibility_audit"] = response_audit.to_dict()
-        _persist_audit_only_snapshot(replay_context, request_id, failed_snapshot)
-        warnings = _merge_compatibility_warnings(
-            warnings, replay_context.warnings
-        )
         cache.add_request(request_id, _responses_request_cache_record(
             request_headers=request_headers,
             client_ip=client_ip,
@@ -2579,32 +1880,15 @@ def handle_responses_anthropic_request(
         translated = convert_responses_to_anthropic(
             upstream_response,
             original_model=original_model,
+            reasoning_model=translated_model,
+            wire_profile=wire_profile,
             name_codec=conversion.name_codec,
             call_id_codec=conversion.call_id_codec,
             stop_sequences=conversion.stop_sequences,
             mode=mode,
-            sidecar_available=replay_context.store is not None,
         )
     except AnthropicResponsesConversionError as exc:
         warnings = _merge_compatibility_warnings(warnings, exc.report.warnings)
-        conversion_snapshot = _compatibility_audit_snapshot(
-            original_request_raw=original_request_raw,
-            original_request_body=original_request_body,
-            request_headers=request_headers,
-            responses_payload=responses_payload,
-            conversion=conversion,
-            request_audit=request_audit,
-            warnings=warnings,
-            upstream_response_raw=_upstream_response_bytes(response),
-            response_report=exc.report,
-        )
-        conversion_snapshot["response_compatibility_audit"] = response_audit.to_dict()
-        _persist_audit_only_snapshot(
-            replay_context, request_id, conversion_snapshot
-        )
-        warnings = _merge_compatibility_warnings(
-            warnings, replay_context.warnings
-        )
         _log_compatibility_warnings(request_id, warnings)
         _cache_responses_local_failure(
             request_id=request_id,
@@ -2630,52 +1914,9 @@ def handle_responses_anthropic_request(
             message=str(exc), status_code=502, warnings=warnings
         )
 
-    audit_snapshot = _compatibility_audit_snapshot(
-        original_request_raw=original_request_raw,
-        original_request_body=original_request_body,
-        request_headers=request_headers,
-        responses_payload=responses_payload,
-        conversion=conversion,
-        request_audit=request_audit,
-        warnings=warnings,
-        upstream_response_raw=_upstream_response_bytes(response),
-        response_report=translated.report,
-    )
-    _persist_replay_result(
-        replay_context, conversion, translated, audit_snapshot=audit_snapshot
-    )
     warnings = _merge_compatibility_warnings(
-        warnings,
-        replay_context.warnings,
-        translated.report.warnings,
+        warnings, translated.report.warnings
     )
-    if replay_context.fatal_message:
-        _log_compatibility_warnings(request_id, warnings)
-        _cache_responses_local_failure(
-            request_id=request_id,
-            message=replay_context.fatal_message,
-            status_code=500,
-            request_headers=request_headers,
-            client_ip=client_ip,
-            original_request_body=original_request_body,
-            original_request_raw=original_request_raw,
-            responses_payload=responses_payload,
-            start_time=start_time,
-            original_model=original_model,
-            translated_model=translated_model,
-            user_id=user_id,
-            warnings=warnings,
-            request_report=conversion.report,
-            response_report=translated.report,
-            compatibility_audit=combined_audit,
-            upstream_response_body=upstream_response,
-            response_size=len(getattr(response, "text", "").encode("utf-8")),
-        )
-        return _responses_transport_error(
-            message=replay_context.fatal_message,
-            status_code=500,
-            warnings=warnings,
-        )
 
     anthropic_response = translated.response
     cache.add_request(request_id, _responses_request_cache_record(

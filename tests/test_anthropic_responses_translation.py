@@ -8,11 +8,20 @@ from ghc_api.anthropic_responses import (
     IdentifierCodec,
     StrictJSONError,
     anthropic_error_from_responses,
-    convert_anthropic_to_responses,
-    convert_responses_to_anthropic,
-    prepare_replay_items_for_wire,
+    convert_anthropic_to_responses as _convert_anthropic_to_responses,
+    convert_responses_to_anthropic as _convert_responses_to_anthropic,
     parse_strict_json_bytes,
 )
+
+
+def convert_anthropic_to_responses(payload, **kwargs):
+    return _convert_anthropic_to_responses(payload, **kwargs)
+
+
+def convert_responses_to_anthropic(payload, **kwargs):
+    kwargs.setdefault("reasoning_model", str(payload.get("model") or "gpt-test"))
+    kwargs.setdefault("wire_profile", "copilot_responses_lite")
+    return _convert_responses_to_anthropic(payload, **kwargs)
 
 
 class StrictJsonTests(unittest.TestCase):
@@ -88,8 +97,6 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         result = convert_anthropic_to_responses(
             self.full_payload(),
             wire_profile="copilot_responses_lite",
-            session_id="session-test",
-            tenant_id="tenant-test",
         )
         self.assertEqual(result.report.unaccounted_paths, [])
         self.assertEqual(result.payload["input"][0]["type"], "additional_tools")
@@ -104,7 +111,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         schema = result.payload["input"][0]["tools"][0]["parameters"]
         self.assertIn("$schema", schema)
         self.assertTrue(result.payload["input"][0]["tools"][0]["strict"])
-        self.assertIn("prompt_cache_key", result.payload)
+        self.assertNotIn("prompt_cache_key", result.payload)
 
     def test_billing_system_block_is_omitted_without_other_prompt_rewrites(self):
         payload = {
@@ -127,7 +134,6 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         result = convert_anthropic_to_responses(
             payload,
             wire_profile="public_responses",
-            sidecar_available=True,
         )
         system_item = result.payload["input"][0]
         self.assertEqual(
@@ -176,8 +182,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                 result = convert_anthropic_to_responses(
                     payload,
                     wire_profile=profile,
-                    sidecar_available=True,
-                )
+                        )
                 self.assertEqual(result.payload["tools"], [{
                     "type": "web_search",
                     "filters": {"allowed_domains": ["python.org"]},
@@ -199,8 +204,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                 payload,
                 wire_profile="copilot_responses_lite",
                 mode=MODE_LOSSLESS_REQUIRED,
-                sidecar_available=True,
-            )
+                )
         malformed = copy.deepcopy(payload)
         malformed["tools"][0]["input_schema"] = {"type": "object"}
         with self.assertRaises(AnthropicResponsesConversionError):
@@ -348,7 +352,6 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                 "tool_usage": {"web_search": {"num_requests": 1}},
             },
             original_model="gpt-5.6-sol",
-            sidecar_available=True,
         )
         self.assertEqual(result.response["content"], [{"type": "text", "text": "search answer"}])
         self.assertEqual(result.response["stop_reason"], "end_turn")
@@ -356,8 +359,8 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
             result.response["usage"]["server_tool_use"],
             {"web_search_requests": 1},
         )
-        self.assertEqual(result.replay_items[0]["type"], "web_search_call")
         self.assertEqual(result.report.unaccounted_paths, [])
+        self.assertEqual(result.report.warnings, [])
 
         other_usage = convert_responses_to_anthropic(
             {
@@ -369,7 +372,6 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                 "tool_usage": {"image_gen": {"total_tokens": 1}},
             },
             original_model="gpt-test",
-            sidecar_available=True,
         )
         self.assertEqual(other_usage.report.unaccounted_paths, [])
         self.assertNotIn("server_tool_use", other_usage.response["usage"])
@@ -424,28 +426,6 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertIn("/top_k", paths)
         self.assertIn("/future_field/new", paths)
 
-    def test_replay_resolver_replaces_approximate_assistant_history(self):
-        replay = [
-            {"type": "reasoning", "summary": [], "encrypted_content": "encrypted"},
-            {"type": "message", "role": "assistant", "phase": "commentary", "content": [{"type": "output_text", "text": "working"}]},
-            {"type": "function_call", "call_id": "call_1", "name": "Read", "arguments": "{}"},
-        ]
-        payload = {
-            "model": "gpt-test",
-            "messages": [{"role": "assistant", "content": [
-                {"type": "text", "text": "working"},
-                {"type": "tool_use", "id": "call_1", "name": "Read", "input": {}},
-            ]}],
-        }
-        result = convert_anthropic_to_responses(
-            payload,
-            replay_resolver=lambda index, message: copy.deepcopy(replay),
-            mode=MODE_LOSSLESS_REQUIRED,
-            sidecar_available=True,
-        )
-        self.assertEqual(result.payload["input"], replay)
-        self.assertEqual(result.replay_misses, [])
-
     def test_identifier_codec_is_reversible_and_bounded(self):
         codec = IdentifierCodec(max_length=32)
         original = "tool name with spaces/and/a/very/long/suffix"
@@ -454,43 +434,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertNotEqual(encoded, original)
         self.assertEqual(codec.decode(encoded), original)
 
-    def test_copilot_replay_wire_projection_keeps_reasoning_and_phase(self):
-        terminal_items = [
-            {
-                "id": "rs_1", "type": "reasoning", "content": [],
-                "summary": [], "encrypted_content": "opaque",
-            },
-            {
-                "id": "msg_1", "type": "message", "role": "assistant",
-                "status": "completed", "phase": "commentary",
-                "content": [{
-                    "type": "output_text", "text": "working",
-                    "annotations": [], "logprobs": [],
-                }],
-            },
-            {
-                "id": "fc_1", "type": "function_call",
-                "status": "completed", "call_id": "call_1",
-                "name": "Read", "namespace": "tools", "arguments": "{}",
-            },
-        ]
-        projected = prepare_replay_items_for_wire(
-            terminal_items, "copilot_responses_lite"
-        )
-        self.assertEqual(projected, [
-            {"type": "reasoning", "summary": [], "encrypted_content": "opaque"},
-            {
-                "type": "message", "role": "assistant", "phase": "commentary",
-                "content": [{"type": "output_text", "text": "working"}],
-            },
-            {
-                "type": "function_call", "call_id": "call_1", "name": "Read",
-                "namespace": "tools", "arguments": "{}",
-            },
-        ])
-        self.assertEqual(terminal_items[0]["id"], "rs_1")
-
-    def test_lossless_sidecar_fields_require_a_durable_store_signal(self):
+    def test_lossless_mode_rejects_fields_not_represented_on_client_wire(self):
         payload = {
             "model": "gpt-test",
             "messages": [{
@@ -512,21 +456,16 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                 wire_profile="public_responses",
                 mode=MODE_LOSSLESS_REQUIRED,
             )
-        self.assertIn(
-            "conversion.sidecar_unavailable",
-            {warning["code"] for warning in raised.exception.report.warnings},
-        )
+        self.assertEqual(raised.exception.report.warnings, [])
         self.assertNotIn(
             "PRIVATE-TITLE-SENTINEL",
             json.dumps(raised.exception.report.to_dict()),
         )
-        converted = convert_anthropic_to_responses(
+        compatible = convert_anthropic_to_responses(
             payload,
             wire_profile="public_responses",
-            mode=MODE_LOSSLESS_REQUIRED,
-            sidecar_available=True,
         )
-        self.assertTrue(converted.report.sidecar_available)
+        self.assertEqual(compatible.report.warnings, [])
 
     def test_metadata_json_types_are_accounted_in_sidecar(self):
         base = {
@@ -590,22 +529,21 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
             },
         }
 
-    def test_terminal_response_preserves_replay_items_and_phase(self):
+    def test_terminal_response_preserves_phase_semantics(self):
         result = convert_responses_to_anthropic(
             self.terminal_response(),
             original_model="claude-opus-4.8",
-            mode=MODE_LOSSLESS_REQUIRED,
-            sidecar_available=True,
         )
         self.assertEqual(result.report.unaccounted_paths, [])
-        self.assertEqual(result.replay_items, self.terminal_response()["output"])
-        self.assertEqual(result.replay_items[1]["phase"], "commentary")
         self.assertEqual(result.response["stop_reason"], "tool_use")
         self.assertEqual(result.response["usage"]["input_tokens"], 50)
         self.assertEqual(result.response["usage"]["cache_read_input_tokens"], 40)
         self.assertEqual(result.response["usage"]["cache_creation_input_tokens"], 10)
         self.assertEqual(result.response["usage"]["output_tokens_details"]["thinking_tokens"], 12)
-        self.assertEqual([b["type"] for b in result.response["content"]], ["text", "tool_use"])
+        self.assertEqual(
+            [b["type"] for b in result.response["content"]],
+            ["thinking", "text", "tool_use"],
+        )
         total_record = next(
             record for record in result.report.records
             if record.source_path == "/usage/total_tokens"
@@ -630,13 +568,6 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
                 original_model="claude",
                 mode=MODE_LOSSLESS_REQUIRED,
             )
-        converted = convert_responses_to_anthropic(
-            response,
-            original_model="claude",
-            mode=MODE_LOSSLESS_REQUIRED,
-            sidecar_available=True,
-        )
-        self.assertEqual(converted.response["usage"]["output_tokens"], 2)
 
     def test_nonstream_stop_sequence(self):
         response = self.terminal_response()
@@ -670,21 +601,13 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
             original_model="claude",
             stop_sequences=["<STOP>"],
         )
-        self.assertEqual(result.response["content"][0]["text"], "before")
-        self.assertEqual(len(result.response["content"]), 1)
+        self.assertEqual(result.response["content"][0]["type"], "thinking")
+        self.assertEqual(result.response["content"][1]["text"], "before")
+        self.assertEqual(len(result.response["content"]), 2)
         self.assertEqual(result.response["stop_reason"], "stop_sequence")
         self.assertEqual(result.response["stop_sequence"], "<STOP>")
-        self.assertEqual([item["type"] for item in result.replay_items], [
-            "reasoning", "message",
-        ])
-        self.assertEqual(
-            result.replay_items[1]["content"][0]["text"], "before"
-        )
-        self.assertEqual(
-            result.replay_items[1]["content"][0]["annotations"], []
-        )
-        # Conversion must not mutate the authoritative upstream object retained
-        # by the encrypted audit snapshot.
+        # Conversion must not mutate the original terminal response retained
+        # by the in-memory request cache.
         self.assertEqual(
             response["output"][1]["content"][0]["text"],
             "before<STOP>after",
@@ -839,8 +762,6 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
         result = convert_responses_to_anthropic(
             response,
             original_model="claude",
-            mode=MODE_LOSSLESS_REQUIRED,
-            sidecar_available=True,
         )
         self.assertEqual(
             result.response["content"][0]["input"],

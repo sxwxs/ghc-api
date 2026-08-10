@@ -102,13 +102,12 @@ class SSEStreamHandler:
         # persisted to the cache for later inspection -- no transformation.
         self.raw_events: List[str] = []
         # Logical SSE lines, including event headers, comments, unknown fields
-        # and blank frame separators. Protocol-specific durable audit stores
-        # can use this without changing the bounded dashboard cache contract.
+        # and blank frame separators. Protocol adapters may opt into this view
+        # without changing the bounded dashboard cache contract.
         self.raw_sse_lines: List[str] = []
         self.max_raw_capture_bytes = max(0, int(max_raw_capture_bytes or 0))
         # Combined retained-content budget across raw_events and raw_sse_lines.
-        # A data payload is intentionally charged for both copies because both
-        # views are kept in memory and persisted in the encrypted audit record.
+        # A data payload is charged for both copies when both views are enabled.
         self.raw_capture_bytes = 0
         self.raw_capture_truncated = False
         self.response_wire_bytes = 0

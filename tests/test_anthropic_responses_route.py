@@ -1,8 +1,5 @@
-import base64
 import copy
 import json
-import os
-import tempfile
 import threading
 import time
 import unittest
@@ -13,6 +10,7 @@ from flask import Response
 
 from ghc_api.app import create_app
 from ghc_api.cache import RequestCache
+from ghc_api.reasoning_carrier import build_reasoning_carrier
 from ghc_api.routes import anthropic as anthropic_module
 from ghc_api.sse import base as sse_base_module
 
@@ -152,6 +150,49 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
         patched["responses"].assert_not_called()
         patched["fallback"].assert_not_called()
 
+    def test_native_messages_path_strips_synthetic_responses_reasoning_carriers(self):
+        signature = build_reasoning_carrier(
+            model="gpt-5.6-sol",
+            wire_profile="copilot_responses_lite",
+            encrypted_content="opaque",
+        )
+        payload = {
+            "model": "claude-opus",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "synthetic", "signature": signature},
+                        {"type": "text", "text": "answer"},
+                    ],
+                },
+                {"role": "user", "content": "continue"},
+            ],
+            "max_tokens": 32,
+        }
+        stack, patched = self._selection_patches(
+            direct=True, responses=True, translated_model="claude-opus"
+        )
+        with stack:
+            response = self.client.post("/v1/messages", json=payload)
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = patched["direct"].call_args.args[0]
+        self.assertEqual(
+            forwarded["messages"][1]["content"],
+            [{"type": "text", "text": "answer"}],
+        )
+        cached_original = patched["direct"].call_args.args[5]
+        self.assertEqual(
+            [block["type"] for block in cached_original["messages"][1]["content"]],
+            ["thinking", "text"],
+        )
+        self.assertIn(
+            "Responses reasoning carrier",
+            cached_original["messages"][1]["content"][0]["signature"],
+        )
+
     def test_responses_branch_receives_unfiltered_request_with_only_model_translated(self):
         payload = {
             "model": "client-model-alias",
@@ -287,14 +328,6 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 "anthropic_responses_compat_enabled",
                 "anthropic_responses_compat_mode",
                 "anthropic_responses_wire_profile",
-                "anthropic_responses_replay_trusted_single_user",
-                "anthropic_responses_replay_path",
-                "anthropic_responses_replay_ttl_seconds",
-                "anthropic_responses_replay_max_bytes",
-                "anthropic_responses_replay_max_tenant_bytes",
-                "anthropic_responses_replay_max_record_bytes",
-                "anthropic_responses_replay_encryption_key_env",
-                "anthropic_responses_replay_require_trusted_tenant",
                 "enable_auth",
                 "max_connection_retries",
                 "sse_keepalive_interval",
@@ -304,21 +337,12 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         state.anthropic_responses_compat_enabled = True
         state.anthropic_responses_compat_mode = "compatibility"
         state.anthropic_responses_wire_profile = "copilot_responses_lite"
-        state.anthropic_responses_replay_trusted_single_user = False
-        state.anthropic_responses_replay_encryption_key_env = "GHC_TEST_REPLAY_KEY"
-        state.anthropic_responses_replay_max_bytes = 16 * 1024 * 1024
-        state.anthropic_responses_replay_max_tenant_bytes = 8 * 1024 * 1024
-        state.anthropic_responses_replay_max_record_bytes = 4 * 1024 * 1024
         state.enable_auth = False
         state.max_connection_retries = 0
         state.sse_keepalive_interval = 0
         state.upstream_read_timeout = 123
 
         self._patches = [
-            mock.patch.dict(
-                os.environ,
-                {"GHC_TEST_REPLAY_KEY": base64.urlsafe_b64encode(b"R" * 32).decode("ascii")},
-            ),
             mock.patch.object(anthropic_module, "cache", self.cache),
             mock.patch.object(sse_base_module, "cache", self.cache),
             mock.patch.object(anthropic_module, "ensure_copilot_token"),
@@ -428,6 +452,21 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("request", cached["conversion_report"])
         self.assertIn("response", cached["conversion_report"])
 
+    def test_session_header_restores_prompt_cache_metadata(self):
+        upstream = _FakeResponse(self._terminal_response())
+        with mock.patch.object(anthropic_module.requests, "post", return_value=upstream) as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=self._request_payload(stream=False),
+                headers={"X-Claude-Code-Session-Id": "session-fixture"},
+            )
+        self.assertEqual(response.status_code, 200)
+        forwarded = post.call_args.kwargs["json"]
+        self.assertRegex(forwarded["prompt_cache_key"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            forwarded["client_metadata"], {"session_id": "session-fixture"}
+        )
+
     def test_nonstream_converts_web_search_billing_and_structured_output(self):
         upstream_body = self._terminal_response()
         upstream_body["output"] = [
@@ -508,78 +547,45 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         post.assert_not_called()
         self.assertIn("object schema", response.get_json()["error"]["message"])
 
-    def test_compatibility_never_creates_plaintext_replay_without_key(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            replay_path = os.path.join(temp_dir, "must-not-exist.sqlite3")
-            anthropic_module.state.anthropic_responses_replay_path = replay_path
-            anthropic_module.state.anthropic_responses_replay_trusted_single_user = True
-            anthropic_module.state.anthropic_responses_replay_encryption_key_env = (
-                "GHC_INTENTIONALLY_MISSING_REPLAY_KEY"
-            )
-            anthropic_module._reset_anthropic_responses_replay_store()
-            try:
-                with mock.patch.object(
-                    anthropic_module.requests,
-                    "post",
-                    return_value=_FakeResponse(self._terminal_response()),
-                ):
-                    response = self.client.post(
-                        "/v1/messages",
-                        json=self._request_payload(stream=False),
-                        headers={
-                            "User-Agent": "claude-cli/2.1.207",
-                            "Anthropic-Version": "2023-06-01",
-                            "X-Claude-Code-Session-Id": "encrypted-only-fixture",
-                        },
-                    )
-                self.assertEqual(response.status_code, 200)
-                self.assertIn(
-                    "replay.encryption_required",
-                    response.headers.get("X-GHC-Compatibility-Warnings", ""),
-                )
-                self.assertFalse(os.path.exists(replay_path))
-            finally:
-                anthropic_module._reset_anthropic_responses_replay_store()
-
-    def test_lossless_with_encrypted_sidecar_succeeds(self):
-        session_id = "lossless-encrypted-fixture"
+    def test_lossless_mode_rejects_unrepresented_response_fields(self):
         anthropic_module.state.anthropic_responses_compat_mode = "lossless_required"
-        anthropic_module.state.anthropic_responses_replay_trusted_single_user = True
-        with tempfile.TemporaryDirectory() as temp_dir:
-            anthropic_module.state.anthropic_responses_replay_path = os.path.join(
-                temp_dir, "lossless.sqlite3"
+        upstream_body = self._terminal_response()
+        upstream_body["output"] = [
+            {
+                "type": "web_search_call",
+                "id": "search_1",
+                "status": "completed",
+                "action": {"type": "search", "query": "fixture"},
+            },
+            *upstream_body["output"],
+        ]
+        with mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=_FakeResponse(upstream_body),
+        ) as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=self._request_payload(stream=False),
+                headers={
+                    "User-Agent": "claude-cli/2.1.207 (fixture)",
+                    "Anthropic-Version": "2023-06-01",
+                    "Anthropic-Beta": ",".join(sorted((
+                        "claude-code-20250219",
+                        "context-1m-2025-08-07",
+                        "context-management-2025-06-27",
+                        "effort-2025-11-24",
+                        "interleaved-thinking-2025-05-14",
+                        "mid-conversation-system-2026-04-07",
+                        "prompt-caching-scope-2026-01-05",
+                        "redact-thinking-2026-02-12",
+                        "thinking-token-count-2026-05-13",
+                    ))),
+                },
             )
-            anthropic_module._reset_anthropic_responses_replay_store()
-            try:
-                with mock.patch.object(
-                    anthropic_module.requests,
-                    "post",
-                    return_value=_FakeResponse(self._terminal_response()),
-                ) as post:
-                    response = self.client.post(
-                        "/v1/messages",
-                        json=self._request_payload(stream=False),
-                        headers={
-                            "User-Agent": "claude-cli/2.1.207",
-                            "Anthropic-Version": "2023-06-01",
-                            "X-Claude-Code-Session-Id": session_id,
-                        },
-                    )
-                self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-                post.assert_called_once()
-                store, _ = anthropic_module._get_anthropic_responses_replay_store()
-                lookup = store.get(
-                    tenant_id="trusted-single-user",
-                    session_id=session_id,
-                    model="gpt-5.6-sol",
-                    assistant_visible_blocks=[
-                        {"type": "text", "text": "hello back"}
-                    ],
-                )
-                self.assertEqual(len(lookup.records), 1)
-                self.assertTrue(lookup.records[0].encrypted)
-            finally:
-                anthropic_module._reset_anthropic_responses_replay_store()
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("cannot be represented losslessly", response.get_data(as_text=True))
+        post.assert_called_once()
 
     def test_nonstream_unknown_status_fails_closed(self):
         upstream_body = {**self._terminal_response(), "status": "future-status-private"}
@@ -669,9 +675,13 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertFalse(any("opaque-fixture" in item for item in cached["raw_events"]))
         self.assertTrue(cached["raw_events_redacted"])
         self.assertTrue(any("opaque reasoning state" in item for item in cached["raw_events"]))
-        self.assertEqual(cached["response_body"]["content"], [
-            {"type": "text", "text": "hello back"}
-        ])
+        self.assertEqual(
+            [block["type"] for block in cached["response_body"]["content"]],
+            ["thinking", "text"],
+        )
+        self.assertEqual(cached["response_body"]["content"][1], {
+            "type": "text", "text": "hello back"
+        })
         self.assertIn("stream", cached["conversion_report"])
         self.assertIn("response", cached["conversion_report"])
 
@@ -804,62 +814,6 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(cached["status_code"], 504)
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
 
-    def test_unknown_stream_is_saved_as_non_replayable_full_audit_snapshot(self):
-        secret = "OPAQUE-UNKNOWN-EVENT-FIXTURE"
-        session_id = "audit-session-fixture"
-        event = {
-            "type": "response.future_private_event",
-            "private_value": secret,
-        }
-        raw_event = json.dumps(event, separators=(",", ":"))
-        upstream = _FakeResponse({}, lines=[("data: " + raw_event).encode()])
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            anthropic_module.state.anthropic_responses_replay_path = os.path.join(
-                temp_dir, "audit-replay.sqlite3"
-            )
-            anthropic_module.state.anthropic_responses_replay_trusted_single_user = True
-            anthropic_module._reset_anthropic_responses_replay_store()
-            try:
-                with mock.patch.object(
-                    anthropic_module.requests, "post", return_value=upstream
-                ):
-                    response = self.client.post(
-                        "/v1/messages",
-                        json=self._request_payload(stream=True),
-                        headers={"X-Claude-Code-Session-Id": session_id},
-                    )
-                    response.get_data(as_text=True)
-
-                cached = next(iter(self.cache.cache.values()))
-                store, _ = anthropic_module._get_anthropic_responses_replay_store()
-                lookup = store.get(
-                    tenant_id="trusted-single-user",
-                    session_id=session_id,
-                    model="gpt-5.6-sol",
-                    assistant_visible_blocks=[{
-                        "type": "ghc_compatibility_audit_record",
-                        "request_id": cached["id"],
-                    }],
-                )
-                self.assertEqual(len(lookup.records), 1)
-                record = lookup.records[0]
-                self.assertTrue(record.profile["audit_only"])
-                self.assertEqual(
-                    record.profile["audit_snapshot"]["raw_response_events"],
-                    [raw_event],
-                )
-                self.assertEqual(
-                    record.profile["audit_snapshot"]["raw_response_sse_lines"],
-                    ["data: " + raw_event],
-                )
-                self.assertIn(
-                    secret,
-                    record.profile["audit_snapshot"]["raw_response_events"][0],
-                )
-            finally:
-                anthropic_module._reset_anthropic_responses_replay_store()
-
     def test_upstream_error_is_returned_in_anthropic_error_envelope(self):
         upstream = _FakeResponse(
             {"error": {"message": "fixture rate limit", "type": "rate_limit"}},
@@ -972,18 +926,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
     def test_lossless_mode_rejects_unknown_beta_before_upstream_request(self):
         unknown_beta = "future-private-beta-fixture-value"
         anthropic_module.state.anthropic_responses_compat_mode = "lossless_required"
-        replay_context = anthropic_module._ReplayContext(
-            mode="lossless_required",
-            wire_profile="copilot_responses_lite",
-            model="gpt-5.6-sol",
-            tenant_id=None,
-            session_id=None,
-        )
         with mock.patch.object(
-            anthropic_module,
-            "_create_replay_context",
-            return_value=replay_context,
-        ), mock.patch.object(
             anthropic_module.requests,
             "post",
             return_value=_FakeResponse(self._terminal_response()),
@@ -1011,8 +954,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         )
         post.assert_not_called()
 
-    def test_completed_reasoning_is_written_then_replayed_on_the_next_turn(self):
-        session_id = "session-fixture-not-a-real-identity"
+    def test_completed_reasoning_is_carried_by_client_and_restored_next_turn(self):
         opaque_reasoning = "opaque-encrypted-fixture"
         first_terminal = self._terminal_response()
         first_terminal["output"] = [
@@ -1020,8 +962,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 "id": "rs_fixture_1",
                 "type": "reasoning",
                 "status": "completed",
-                "summary": [],
-                "content": None,
+                "summary": [{"type": "summary_text", "text": "brief reasoning"}],
                 "encrypted_content": opaque_reasoning,
             },
             {
@@ -1030,11 +971,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 "role": "assistant",
                 "status": "completed",
                 "phase": "final_answer",
-                "content": [{
-                    "type": "output_text",
-                    "text": "hello back",
-                    "annotations": [],
-                }],
+                "content": [{"type": "output_text", "text": "hello back"}],
             },
         ]
         second_terminal = {
@@ -1048,78 +985,33 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             }],
         }
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            anthropic_module.state.anthropic_responses_replay_path = os.path.join(
-                temp_dir, "reasoning-replay.sqlite3"
+        with mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            side_effect=[_FakeResponse(first_terminal), _FakeResponse(second_terminal)],
+        ) as post:
+            first_response = self.client.post(
+                "/v1/messages", json=self._request_payload(stream=False)
             )
-            anthropic_module.state.anthropic_responses_replay_trusted_single_user = True
-            reset_store = getattr(
-                anthropic_module, "_reset_anthropic_responses_replay_store"
-            )
-            reset_store()
-            try:
-                with mock.patch.object(
-                    anthropic_module.requests,
-                    "post",
-                    side_effect=[
-                        _FakeResponse(first_terminal),
-                        _FakeResponse(second_terminal),
-                    ],
-                ) as post:
-                    first_response = self.client.post(
-                        "/v1/messages",
-                        json=self._request_payload(stream=False),
-                        headers={"X-Claude-Code-Session-Id": session_id},
-                    )
-                    replay_store, _ = anthropic_module._get_anthropic_responses_replay_store()
-                    stored = replay_store.get(
-                        tenant_id="trusted-single-user",
-                        session_id=session_id,
-                        model="gpt-5.6-sol",
-                        assistant_visible_blocks=[
-                            {"type": "text", "text": "hello back"}
-                        ],
-                    )
-                    self.assertEqual(len(stored.records), 1)
-                    audit_snapshot = stored.records[0].profile["audit_snapshot"]
-                    raw_request = base64.b64decode(
-                        audit_snapshot["request_raw_base64"]
-                    )
-                    self.assertEqual(json.loads(raw_request), self._request_payload(False))
-                    self.assertEqual(
-                        audit_snapshot["parsed_request"], self._request_payload(False)
-                    )
-                    self.assertEqual(
-                        json.loads(base64.b64decode(
-                            audit_snapshot["upstream_response_raw_base64"]
-                        )),
-                        first_terminal,
-                    )
-                    continuation = self._request_payload(stream=False)
-                    continuation["messages"] = [
-                        {"role": "user", "content": "hello"},
-                        {
-                            "role": "assistant",
-                            "content": [{"type": "text", "text": "hello back"}],
-                        },
-                        {"role": "user", "content": "continue"},
-                    ]
-                    second_response = self.client.post(
-                        "/v1/messages",
-                        json=continuation,
-                        headers={"X-Claude-Code-Session-Id": session_id},
-                    )
-            finally:
-                reset_store()
+            first_body = first_response.get_json()
+            continuation = self._request_payload(stream=False)
+            continuation["messages"] = [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": first_body["content"]},
+                {"role": "user", "content": "continue"},
+            ]
+            second_response = self.client.post("/v1/messages", json=continuation)
 
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
-        self.assertNotIn(opaque_reasoning, first_response.get_data(as_text=True))
+        self.assertEqual(first_body["content"][0]["type"], "thinking")
+        self.assertEqual(first_body["content"][0]["thinking"], "brief reasoning")
+        self.assertNotIn(opaque_reasoning, first_body["content"][0]["signature"])
         self.assertEqual(post.call_count, 2)
         replayed_input = post.call_args_list[1].kwargs["json"]["input"]
         self.assertEqual(replayed_input[1], {
             "type": "reasoning",
-            "summary": [],
+            "summary": [{"type": "summary_text", "text": "brief reasoning"}],
             "encrypted_content": opaque_reasoning,
         })
         self.assertEqual(replayed_input[2], {

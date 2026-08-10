@@ -150,6 +150,22 @@ auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns H
                               # Lossy; see "Encrypted Content Recovery" below.
 ```
 
+### Anthropic Messages → Responses Reasoning Continuity
+
+When `/v1/messages` is routed to a Responses-only model, ghc-api carries each
+Responses reasoning item in a namespaced Anthropic `thinking` block. The
+visible reasoning summary is stored in `thinking`, while the opaque
+`encrypted_content` is encoded in `thinking.signature`. Clients such as Claude
+Code echo that assistant block on the next turn, allowing ghc-api to reconstruct
+the original Responses `reasoning` input item without a replay database,
+session identifier, or encryption key.
+
+The carrier includes its source model and wire profile. If either changes, or
+if the carrier is malformed or oversized, ghc-api keeps the visible summary but
+drops the opaque state and reports a compatibility warning. Synthetic carrier
+blocks are removed before forwarding history to a native Anthropic model so a
+forged signature never reaches `/v1/messages` upstream.
+
 ### Encrypted Content Recovery
 
 Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 because encrypted

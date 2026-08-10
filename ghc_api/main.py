@@ -50,44 +50,17 @@ def _config_bool(value, name: str) -> bool:
     return value
 
 
-def _config_positive_int(value, name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f"{name} must be an integer > 0")
-    return value
-
-
 def apply_anthropic_responses_config(config: dict) -> None:
     """Validate and apply the Responses-backed Messages settings."""
-    proposed_total = _config_positive_int(
-        config.get(
-            'anthropic_responses_replay_max_bytes',
-            state.anthropic_responses_replay_max_bytes,
-        ),
-        'anthropic_responses_replay_max_bytes',
+    deprecated = sorted(
+        key for key in config
+        if str(key).startswith('anthropic_responses_replay_')
     )
-    proposed_tenant = _config_positive_int(
-        config.get(
-            'anthropic_responses_replay_max_tenant_bytes',
-            state.anthropic_responses_replay_max_tenant_bytes,
-        ),
-        'anthropic_responses_replay_max_tenant_bytes',
-    )
-    proposed_record = _config_positive_int(
-        config.get(
-            'anthropic_responses_replay_max_record_bytes',
-            state.anthropic_responses_replay_max_record_bytes,
-        ),
-        'anthropic_responses_replay_max_record_bytes',
-    )
-    if proposed_record > proposed_tenant:
-        raise ValueError(
-            "anthropic_responses_replay_max_record_bytes must not exceed "
-            "anthropic_responses_replay_max_tenant_bytes"
-        )
-    if proposed_tenant > proposed_total:
-        raise ValueError(
-            "anthropic_responses_replay_max_tenant_bytes must not exceed "
-            "anthropic_responses_replay_max_bytes"
+    if deprecated:
+        print(
+            "WARNING: anthropic_responses_replay_* settings are deprecated "
+            "and ignored. Reasoning is now carried statelessly in "
+            "thinking.signature. Remove: " + ", ".join(deprecated)
         )
     if 'anthropic_responses_compat_enabled' in config:
         state.anthropic_responses_compat_enabled = _config_bool(
@@ -123,44 +96,6 @@ def apply_anthropic_responses_config(config: dict) -> None:
                     "anthropic_responses_model_profiles contains an invalid model/profile"
                 )
         state.anthropic_responses_model_profiles = dict(profiles)
-    if 'anthropic_responses_replay_path' in config:
-        value = config['anthropic_responses_replay_path']
-        if not isinstance(value, str):
-            raise ValueError("anthropic_responses_replay_path must be a string")
-        state.anthropic_responses_replay_path = value
-    if 'anthropic_responses_replay_ttl_seconds' in config:
-        state.anthropic_responses_replay_ttl_seconds = _config_positive_int(
-            config['anthropic_responses_replay_ttl_seconds'],
-            'anthropic_responses_replay_ttl_seconds',
-        )
-    if 'anthropic_responses_replay_max_bytes' in config:
-        state.anthropic_responses_replay_max_bytes = _config_positive_int(
-            config['anthropic_responses_replay_max_bytes'],
-            'anthropic_responses_replay_max_bytes',
-        )
-    if 'anthropic_responses_replay_max_tenant_bytes' in config:
-        state.anthropic_responses_replay_max_tenant_bytes = _config_positive_int(
-            config['anthropic_responses_replay_max_tenant_bytes'],
-            'anthropic_responses_replay_max_tenant_bytes',
-        )
-    if 'anthropic_responses_replay_max_record_bytes' in config:
-        state.anthropic_responses_replay_max_record_bytes = _config_positive_int(
-            config['anthropic_responses_replay_max_record_bytes'],
-            'anthropic_responses_replay_max_record_bytes',
-        )
-    if 'anthropic_responses_replay_encryption_key_env' in config:
-        value = config['anthropic_responses_replay_encryption_key_env']
-        if not isinstance(value, str):
-            raise ValueError(
-                "anthropic_responses_replay_encryption_key_env must be a string"
-            )
-        state.anthropic_responses_replay_encryption_key_env = value
-    for key in (
-        'anthropic_responses_replay_require_trusted_tenant',
-        'anthropic_responses_replay_trusted_single_user',
-    ):
-        if key in config:
-            setattr(state, key, _config_bool(config[key], key))
 
 
 def apply_upstream_config(config: dict) -> None:

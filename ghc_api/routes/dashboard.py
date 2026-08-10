@@ -73,14 +73,6 @@ def _runtime_config() -> Dict[str, Any]:
         "anthropic_responses_compat_mode": state.anthropic_responses_compat_mode,
         "anthropic_responses_wire_profile": state.anthropic_responses_wire_profile,
         "anthropic_responses_model_profiles": state.anthropic_responses_model_profiles,
-        "anthropic_responses_replay_path": state.anthropic_responses_replay_path,
-        "anthropic_responses_replay_ttl_seconds": state.anthropic_responses_replay_ttl_seconds,
-        "anthropic_responses_replay_max_bytes": state.anthropic_responses_replay_max_bytes,
-        "anthropic_responses_replay_max_tenant_bytes": state.anthropic_responses_replay_max_tenant_bytes,
-        "anthropic_responses_replay_max_record_bytes": state.anthropic_responses_replay_max_record_bytes,
-        "anthropic_responses_replay_encryption_key_env": state.anthropic_responses_replay_encryption_key_env,
-        "anthropic_responses_replay_require_trusted_tenant": state.anthropic_responses_replay_require_trusted_tenant,
-        "anthropic_responses_replay_trusted_single_user": state.anthropic_responses_replay_trusted_single_user,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
@@ -138,11 +130,6 @@ def _validate_string(value: Any, field_name: str, *, allow_empty: bool = True) -
         raise ValueError(f"'{field_name}' must not be empty")
     return value
 
-
-def _validate_positive_integer(value: Any, field_name: str) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-        raise ValueError(f"'{field_name}' must be an integer > 0")
-    return value
 
 
 def _validate_wire_profile(value: Any, field_name: str) -> str:
@@ -240,14 +227,6 @@ def api_runtime_config_update():
         "anthropic_responses_compat_mode",
         "anthropic_responses_wire_profile",
         "anthropic_responses_model_profiles",
-        "anthropic_responses_replay_path",
-        "anthropic_responses_replay_ttl_seconds",
-        "anthropic_responses_replay_max_bytes",
-        "anthropic_responses_replay_max_tenant_bytes",
-        "anthropic_responses_replay_max_record_bytes",
-        "anthropic_responses_replay_encryption_key_env",
-        "anthropic_responses_replay_require_trusted_tenant",
-        "anthropic_responses_replay_trusted_single_user",
         "model_mappings",
         "chat_completions_model_support",
     }
@@ -256,38 +235,6 @@ def api_runtime_config_update():
         return jsonify({"error": f"Unknown config key(s): {', '.join(unknown_keys)}"}), 400
 
     try:
-        proposed_total = _validate_positive_integer(
-            payload.get(
-                "anthropic_responses_replay_max_bytes",
-                state.anthropic_responses_replay_max_bytes,
-            ),
-            "anthropic_responses_replay_max_bytes",
-        )
-        proposed_tenant = _validate_positive_integer(
-            payload.get(
-                "anthropic_responses_replay_max_tenant_bytes",
-                state.anthropic_responses_replay_max_tenant_bytes,
-            ),
-            "anthropic_responses_replay_max_tenant_bytes",
-        )
-        proposed_record = _validate_positive_integer(
-            payload.get(
-                "anthropic_responses_replay_max_record_bytes",
-                state.anthropic_responses_replay_max_record_bytes,
-            ),
-            "anthropic_responses_replay_max_record_bytes",
-        )
-        if proposed_record > proposed_tenant:
-            raise ValueError(
-                "'anthropic_responses_replay_max_record_bytes' must not exceed "
-                "'anthropic_responses_replay_max_tenant_bytes'"
-            )
-        if proposed_tenant > proposed_total:
-            raise ValueError(
-                "'anthropic_responses_replay_max_tenant_bytes' must not exceed "
-                "'anthropic_responses_replay_max_bytes'"
-            )
-
         if "account_type" in payload:
             account_type = payload["account_type"]
             if not isinstance(account_type, str) or account_type not in ALLOWED_ACCOUNT_TYPES:
@@ -380,54 +327,6 @@ def api_runtime_config_update():
         if "anthropic_responses_model_profiles" in payload:
             state.anthropic_responses_model_profiles = _validate_model_profiles(
                 payload["anthropic_responses_model_profiles"]
-            )
-
-        if "anthropic_responses_replay_path" in payload:
-            state.anthropic_responses_replay_path = _validate_string(
-                payload["anthropic_responses_replay_path"],
-                "anthropic_responses_replay_path",
-            )
-
-        if "anthropic_responses_replay_ttl_seconds" in payload:
-            state.anthropic_responses_replay_ttl_seconds = _validate_positive_integer(
-                payload["anthropic_responses_replay_ttl_seconds"],
-                "anthropic_responses_replay_ttl_seconds",
-            )
-
-        if "anthropic_responses_replay_max_bytes" in payload:
-            state.anthropic_responses_replay_max_bytes = _validate_positive_integer(
-                payload["anthropic_responses_replay_max_bytes"],
-                "anthropic_responses_replay_max_bytes",
-            )
-
-        if "anthropic_responses_replay_max_tenant_bytes" in payload:
-            state.anthropic_responses_replay_max_tenant_bytes = _validate_positive_integer(
-                payload["anthropic_responses_replay_max_tenant_bytes"],
-                "anthropic_responses_replay_max_tenant_bytes",
-            )
-
-        if "anthropic_responses_replay_max_record_bytes" in payload:
-            state.anthropic_responses_replay_max_record_bytes = _validate_positive_integer(
-                payload["anthropic_responses_replay_max_record_bytes"],
-                "anthropic_responses_replay_max_record_bytes",
-            )
-
-        if "anthropic_responses_replay_encryption_key_env" in payload:
-            state.anthropic_responses_replay_encryption_key_env = _validate_string(
-                payload["anthropic_responses_replay_encryption_key_env"],
-                "anthropic_responses_replay_encryption_key_env",
-            )
-
-        if "anthropic_responses_replay_require_trusted_tenant" in payload:
-            state.anthropic_responses_replay_require_trusted_tenant = _validate_bool(
-                payload["anthropic_responses_replay_require_trusted_tenant"],
-                "anthropic_responses_replay_require_trusted_tenant",
-            )
-
-        if "anthropic_responses_replay_trusted_single_user" in payload:
-            state.anthropic_responses_replay_trusted_single_user = _validate_bool(
-                payload["anthropic_responses_replay_trusted_single_user"],
-                "anthropic_responses_replay_trusted_single_user",
             )
 
         if "model_mappings" in payload:

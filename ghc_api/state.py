@@ -59,19 +59,6 @@ class State:
             "gpt-5.6-sol": "copilot_responses_lite",
         }
 
-        # Stateful encrypted-reasoning replay. Empty path resolves to a SQLite
-        # file in the ghc-api config directory. Compatibility mode may operate
-        # with warnings when identity/encryption is unavailable; lossless mode
-        # fails closed.
-        self.anthropic_responses_replay_path: str = ""
-        self.anthropic_responses_replay_ttl_seconds: int = 86400
-        self.anthropic_responses_replay_max_bytes: int = 1024 * 1024 * 1024
-        self.anthropic_responses_replay_max_tenant_bytes: int = 256 * 1024 * 1024
-        self.anthropic_responses_replay_max_record_bytes: int = 64 * 1024 * 1024
-        self.anthropic_responses_replay_encryption_key_env: str = "GHC_REPLAY_ENCRYPTION_KEY"
-        self.anthropic_responses_replay_require_trusted_tenant: bool = True
-        self.anthropic_responses_replay_trusted_single_user: bool = False
-
         # Copilot intermittently answers /v1/responses with HTTP 200 whose SSE body is
         # just response.created followed by response.failed, before any model output.
         # When enabled, such a stream is transparently retried (up to

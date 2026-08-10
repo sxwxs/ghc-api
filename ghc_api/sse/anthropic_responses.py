@@ -11,14 +11,15 @@ import copy
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..anthropic_responses import (
     MODE_COMPATIBILITY,
-    MODE_LOSSLESS_REQUIRED,
     AnthropicToResponsesResult,
     ConversionReport,
     IdentifierCodec,
+    PRESERVATION_APPROXIMATION,
+    PRESERVATION_SEMANTIC,
     PRESERVATION_SIDECAR,
     ResponsesToAnthropicResult,
     anthropic_error_from_responses,
@@ -26,6 +27,10 @@ from ..anthropic_responses import (
     parse_strict_json_bytes,
 )
 from ..compat_profiles import audit_responses_event
+from ..reasoning_carrier import (
+    build_reasoning_carrier,
+    redact_reasoning_carriers_for_cache,
+)
 from ..compat_redaction import (
     redact_responses_event_for_cache,
     redacted_value,
@@ -129,25 +134,21 @@ class ResponsesAnthropicEventTranslator:
         self,
         *,
         original_model: str,
+        reasoning_model: str,
+        wire_profile: str,
         name_codec: Optional[IdentifierCodec] = None,
         call_id_codec: Optional[IdentifierCodec] = None,
         stop_sequences: Optional[Sequence[str]] = None,
         mode: str = MODE_COMPATIBILITY,
-        sidecar_available: bool = False,
-        wire_profile: str = "public_responses",
-        on_completed: Optional[
-            Callable[[ResponsesToAnthropicResult], Optional[str]]
-        ] = None,
     ) -> None:
         self.original_model = original_model
+        self.reasoning_model = reasoning_model
         self.name_codec = name_codec or IdentifierCodec()
         self.call_id_codec = call_id_codec or IdentifierCodec()
         self.stop_sequences = list(stop_sequences or [])
         self.mode = mode
-        self.sidecar_available = bool(sidecar_available)
         self.wire_profile = wire_profile
         self.stable_item_ids = wire_profile != "copilot_responses_lite"
-        self.on_completed = on_completed
 
         self.message_started = False
         self.message_stopped = False
@@ -158,10 +159,8 @@ class ResponsesAnthropicEventTranslator:
         self.states: Dict[int, _OutputState] = {}
         self.open_output_index: Optional[int] = None
         self.local_stop_sequence: Optional[str] = None
-        self.report = ConversionReport(
-            "responses_sse_to_anthropic",
-            sidecar_available=self.sidecar_available,
-        )
+        self.non_reasoning_output_committed = False
+        self.report = ConversionReport("responses_sse_to_anthropic")
         self.compatibility_warnings: List[Dict[str, Any]] = []
         self.terminal_result: Optional[ResponsesToAnthropicResult] = None
         self.terminal_response: Optional[Dict[str, Any]] = None
@@ -341,6 +340,8 @@ class ResponsesAnthropicEventTranslator:
         self.open_output_index = state.output_index
         if state.item_type == "message":
             block = {"type": "text", "text": ""}
+        elif state.item_type == "reasoning":
+            block = {"type": "thinking", "thinking": "", "signature": ""}
         else:
             block = {
                 "type": "tool_use",
@@ -405,20 +406,99 @@ class ResponsesAnthropicEventTranslator:
             state = self.states[self.next_output_index]
             if not self._state_ready(state):
                 break
-            if state.item_type in ("reasoning", "web_search_call"):
+            if state.item_type == "web_search_call":
                 if not state.done:
                     break
-                detail = (
-                    "Reasoning item buffered for replay"
-                    if state.item_type == "reasoning"
-                    else "Native web search execution buffered for replay/audit"
+                self.non_reasoning_output_committed = True
+                self.report.mark(
+                    f"/output/{state.output_index}",
+                    PRESERVATION_SIDECAR,
+                    detail="Native web search execution retained for diagnostics",
+                    subtree=True,
                 )
-                self.report.mark(f"/output/{state.output_index}", PRESERVATION_SIDECAR, detail=detail, subtree=True)
                 state.closed = True
+                self.next_output_index += 1
+                continue
+            if state.item_type == "reasoning":
+                if not state.done:
+                    break
+                if self.non_reasoning_output_committed:
+                    return events + self._protocol_error(
+                        "responses.late_reasoning_item",
+                        f"/output/{state.output_index}",
+                    )
+                if not self.message_started:
+                    self._warn(
+                        "responses.missing_created_event",
+                        f"/output/{state.output_index}",
+                        "approximation",
+                    )
+                    events.extend(self._start_message())
+                events.extend(self._start_block(state))
+                summary = state.item.get("summary")
+                summary_text = ""
+                if isinstance(summary, list):
+                    summary_text = "".join(
+                        str(part.get("text") or "")
+                        for part in summary
+                        if isinstance(part, dict)
+                        and part.get("type") in ("summary_text", "reasoning_text")
+                    )
+                if summary_text:
+                    events.append(("content_block_delta", {
+                        "type": "content_block_delta",
+                        "index": state.block_index,
+                        "delta": {"type": "thinking_delta", "thinking": summary_text},
+                    }))
+                encrypted_content = state.item.get("encrypted_content")
+                if not isinstance(encrypted_content, str):
+                    encrypted_content = None
+                item_id = (
+                    state.item.get("id")
+                    if self.wire_profile == "public_responses"
+                    else None
+                )
+                if not isinstance(item_id, str):
+                    item_id = None
+                try:
+                    signature = build_reasoning_carrier(
+                        model=self.reasoning_model,
+                        wire_profile=self.wire_profile,
+                        item_id=item_id,
+                        encrypted_content=encrypted_content,
+                    )
+                except ValueError:
+                    signature = build_reasoning_carrier(
+                        model=self.reasoning_model,
+                        wire_profile=self.wire_profile,
+                        item_id=item_id,
+                        encrypted_content=None,
+                    )
+                    self.report.mark(
+                        f"/output/{state.output_index}/encrypted_content",
+                        PRESERVATION_APPROXIMATION,
+                        detail="Encrypted reasoning exceeded the carrier size limit and was dropped",
+                    )
+                events.append(("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": state.block_index,
+                    "delta": {
+                        "type": "signature_delta",
+                        "signature": signature,
+                    },
+                }))
+                self.report.mark(
+                    f"/output/{state.output_index}",
+                    PRESERVATION_SEMANTIC,
+                    detail="Responses reasoning carried in an Anthropic thinking block",
+                    subtree=True,
+                )
+                events.extend(self._close_block(state))
                 self.next_output_index += 1
                 continue
             if state.item_type not in ("message", "function_call", "custom_tool_call"):
                 return events + self._protocol_error("responses.unknown_output_item", f"/output/{state.output_index}")
+            self.non_reasoning_output_committed = True
             if self.local_stop_sequence is not None:
                 # The proxy has already committed an Anthropic stop boundary.
                 # Balance a block that began before the matching delta, but do
@@ -537,11 +617,12 @@ class ResponsesAnthropicEventTranslator:
             self.terminal_result = convert_responses_to_anthropic(
                 response,
                 original_model=self.original_model,
+                reasoning_model=self.reasoning_model,
+                wire_profile=self.wire_profile,
                 name_codec=self.name_codec,
                 call_id_codec=self.call_id_codec,
                 stop_sequences=self.stop_sequences,
                 mode=self.mode,
-                sidecar_available=self.sidecar_available,
             )
         except Exception as exc:
             events.extend(self._protocol_error("responses.terminal_conversion_failed", "/response"))
@@ -553,21 +634,6 @@ class ResponsesAnthropicEventTranslator:
         else:
             stop_reason = self.terminal_result.response.get("stop_reason")
             stop_sequence = self.terminal_result.response.get("stop_sequence")
-        persistence_error: Optional[str] = None
-        if self.on_completed:
-            try:
-                persistence_error = self.on_completed(self.terminal_result)
-            except Exception as exc:
-                self._warn(type(exc).__name__, "/response")
-                if self.mode == MODE_LOSSLESS_REQUIRED:
-                    persistence_error = "Reasoning replay state could not be persisted"
-        if persistence_error:
-            self.terminal_result = None
-            events.extend(self._protocol_error(
-                "responses.replay_persistence_failed", "/response"
-            ))
-            return events
-
         events.append(("message_delta", {
             "type": "message_delta",
             "delta": {"stop_reason": stop_reason, "stop_sequence": stop_sequence},
@@ -872,7 +938,7 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
     log_prefix = "[Stream Anthropic/Responses]"
     emit_event_header = True
     emit_done_sentinel = False
-    capture_raw_sse_lines = True
+    capture_raw_sse_lines = False
 
     def __init__(
         self,
@@ -880,33 +946,23 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         conversion: AnthropicToResponsesResult,
         compatibility_warnings: Optional[List[Dict[str, Any]]] = None,
         compatibility_audit: Optional[Dict[str, Any]] = None,
-        on_completed: Optional[
-            Callable[[ResponsesToAnthropicResult], Optional[str]]
-        ] = None,
-        on_audit_finalized: Optional[
-            Callable[[List[str], List[str], Optional[ResponsesToAnthropicResult]], None]
-        ] = None,
         mode: str = MODE_COMPATIBILITY,
-        sidecar_available: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.conversion = conversion
         self.translator = ResponsesAnthropicEventTranslator(
             original_model=self.original_model,
+            reasoning_model=self.translated_model,
+            wire_profile=conversion.wire_profile,
             name_codec=conversion.name_codec,
             call_id_codec=conversion.call_id_codec,
             stop_sequences=conversion.stop_sequences,
             mode=mode,
-            sidecar_available=sidecar_available,
-            wire_profile=conversion.wire_profile,
-            on_completed=on_completed,
         )
         self._compatibility_warnings = list(compatibility_warnings or [])
         self._compatibility_audit = copy.deepcopy(compatibility_audit)
         self._mode = mode
-        self._on_audit_finalized = on_audit_finalized
-        self._audit_finalized = False
 
     def keepalive_event(self) -> str:
         return 'event: ping\ndata: {"type":"ping"}\n\n'
@@ -1016,13 +1072,6 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         return f"event: error\ndata: {_json(event)}\n\n"
 
     def extra_cache_fields(self) -> Dict[str, Any]:
-        if not self._audit_finalized and self._on_audit_finalized is not None:
-            self._audit_finalized = True
-            self._on_audit_finalized(
-                list(self.raw_events),
-                list(self.raw_sse_lines),
-                self.translator.terminal_result,
-            )
         warnings = self._compatibility_warnings + self.conversion.report.warnings + self.translator.compatibility_warnings
         result: Dict[str, Any] = {
             "compatibility_profile": self.conversion.wire_profile,
@@ -1038,5 +1087,7 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
             result["compatibility_audit"] = copy.deepcopy(self._compatibility_audit)
         if self.translator.terminal_result is not None:
             result["conversion_report"]["response"] = self.translator.terminal_result.report.to_dict()
-            result["response_body"] = self.translator.terminal_result.response
+            result["response_body"] = redact_reasoning_carriers_for_cache(
+                self.translator.terminal_result.response
+            )
         return result

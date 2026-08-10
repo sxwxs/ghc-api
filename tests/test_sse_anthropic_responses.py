@@ -5,7 +5,7 @@ from ghc_api.sse.anthropic_responses import (
     ResponsesAnthropicEventTranslator,
     StopSequenceScanner,
 )
-from ghc_api.anthropic_responses import MODE_LOSSLESS_REQUIRED
+from ghc_api.reasoning_carrier import parse_reasoning_carrier
 
 
 def event_types(events):
@@ -23,13 +23,14 @@ class StopSequenceScannerTests(unittest.TestCase):
 class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
     def translator(self, **kwargs):
         kwargs.setdefault("wire_profile", "copilot_responses_lite")
+        kwargs.setdefault("reasoning_model", "gpt-5.6-sol")
         return ResponsesAnthropicEventTranslator(original_model="claude-opus-4.8", **kwargs)
 
     def test_reasoning_text_usage_and_lifecycle(self):
         translator = self.translator()
         sequence = [
             ("response.created", {"response": {"id": "resp_1", "model": "gpt"}}),
-            ("response.output_item.added", {"output_index": 0, "item": {"type": "reasoning", "encrypted_content": "x"}}),
+            ("response.output_item.added", {"output_index": 0, "item": {"type": "reasoning", "encrypted_content": "mid-state"}}),
             ("response.output_item.done", {"output_index": 0, "item": {"type": "reasoning", "summary": [], "encrypted_content": "x"}}),
             ("response.output_item.added", {"output_index": 1, "item": {"type": "message", "role": "assistant", "phase": "final_answer", "content": []}}),
             ("response.output_text.delta", {"output_index": 1, "content_index": 0, "delta": "hello"}),
@@ -47,15 +48,22 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         for name, event in sequence:
             output.extend(translator.process(name, event))
         self.assertEqual(event_types(output), [
-            "message_start", "content_block_start", "content_block_delta",
-            "content_block_stop", "message_delta", "message_stop",
+            "message_start",
+            "content_block_start", "content_block_delta", "content_block_stop",
+            "content_block_start", "content_block_delta", "content_block_stop",
+            "message_delta", "message_stop",
         ])
-        self.assertFalse(any("encrypted" in str(event) for _, event in output))
+        signature_event = next(
+            event for event_type, event in output
+            if event_type == "content_block_delta"
+            and event.get("delta", {}).get("type") == "signature_delta"
+        )
+        carrier = parse_reasoning_carrier(signature_event["delta"]["signature"])
+        self.assertEqual(carrier.encrypted_content, "x")
         self.assertEqual(output[-2][1]["usage"]["input_tokens"], 8)
-        self.assertEqual(translator.terminal_result.replay_items[0]["encrypted_content"], "x")
 
     def test_web_search_lifecycle_is_sidecar_only_and_final_text_streams(self):
-        translator = self.translator(sidecar_available=True)
+        translator = self.translator()
         search_added = {
             "type": "web_search_call",
             "id": "opaque-search-added",
@@ -133,7 +141,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertEqual(translator.terminal_result.report.unaccounted_paths, [])
 
     def test_web_search_lifecycle_uses_output_index_identity_and_rejects_unclosed_item(self):
-        translator = self.translator(sidecar_available=True)
+        translator = self.translator()
         translator.process("response.output_item.added", {
             "output_index": 0,
             "item": {"type": "web_search_call", "id": "opaque-added", "status": "in_progress"},
@@ -151,7 +159,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             {"output_index": 0, "item_id": "opaque-completed"},
         ), [])
 
-        translator = self.translator(sidecar_available=True)
+        translator = self.translator()
         translator.process("response.output_item.added", {
             "output_index": 0,
             "item": {"type": "web_search_call", "id": "search_1", "status": "in_progress"},
@@ -169,8 +177,8 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
     def test_public_profile_rejects_web_search_id_mismatch(self):
         translator = ResponsesAnthropicEventTranslator(
             original_model="claude-opus-4.8",
+            reasoning_model="gpt-5.6-sol",
             wire_profile="public_responses",
-            sidecar_available=True,
         )
         translator.process("response.output_item.added", {
             "output_index": 0,
@@ -187,7 +195,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         )
 
     def test_web_search_and_annotation_lifecycle_order_is_validated(self):
-        translator = self.translator(sidecar_available=True)
+        translator = self.translator()
         translator.process("response.output_item.added", {
             "output_index": 0,
             "item": {"type": "web_search_call", "id": "search_1", "status": "in_progress"},
@@ -206,7 +214,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             "responses.web_search_status_regression",
         )
 
-        translator = self.translator(sidecar_available=True)
+        translator = self.translator()
         translator.process("response.output_item.added", {
             "output_index": 0,
             "item": {
@@ -229,7 +237,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             "responses.annotation_without_message",
         )
 
-        translator = self.translator(sidecar_available=True)
+        translator = self.translator()
         translator.process("response.output_item.added", {
             "output_index": 0,
             "item": {
@@ -290,10 +298,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
 
     def test_function_arguments_fail_closed_unless_strict_json_object(self):
         for arguments in ("[]", "1", "null", "not-json", '{"x":1,"x":2}'):
-            completed = []
-            translator = self.translator(
-                on_completed=lambda result: completed.append(result)
-            )
+            translator = self.translator()
             output = translator.process(
                 "response.created", {"response": {"id": "resp"}}
             )
@@ -308,7 +313,6 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
                 self.assertIn("error", event_types(output))
                 self.assertNotIn("content_block_start", event_types(output))
                 self.assertNotIn("message_stop", event_types(output))
-                self.assertEqual(completed, [])
                 self.assertEqual(
                     translator.compatibility_warnings[-1]["code"],
                     "responses.invalid_function_arguments",
@@ -409,10 +413,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             ),
         )
         for streamed_item, terminal_item, expected_code in cases:
-            completed = []
-            translator = self.translator(
-                on_completed=lambda result: completed.append(result)
-            )
+            translator = self.translator()
             output = translator.process(
                 "response.created", {"response": {"id": "resp"}}
             )
@@ -426,7 +427,6 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             with self.subTest(code=expected_code):
                 self.assertIn("error", event_types(output))
                 self.assertNotIn("message_stop", event_types(output))
-                self.assertEqual(completed, [])
                 self.assertEqual(
                     translator.compatibility_warnings[-1]["code"],
                     expected_code,
@@ -464,11 +464,44 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
                     expected_code,
                 )
 
-    def test_event_after_closed_output_index_is_fatal(self):
-        completed = []
-        translator = self.translator(
-            on_completed=lambda result: completed.append(result)
+    def test_reasoning_after_committed_text_is_fatal(self):
+        translator = self.translator()
+        output = translator.process(
+            "response.created", {"response": {"id": "resp"}}
         )
+        output += translator.process(
+            "response.output_item.added",
+            {"output_index": 0, "item": {"type": "message", "role": "assistant", "content": []}},
+        )
+        output += translator.process(
+            "response.output_text.delta",
+            {"output_index": 0, "delta": "hello"},
+        )
+        output += translator.process(
+            "response.output_item.done",
+            {"output_index": 0, "item": {
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }},
+        )
+        output += translator.process(
+            "response.output_item.added",
+            {"output_index": 1, "item": {"type": "reasoning", "summary": []}},
+        )
+        output += translator.process(
+            "response.output_item.done",
+            {"output_index": 1, "item": {
+                "type": "reasoning", "summary": [], "encrypted_content": "enc",
+            }},
+        )
+        self.assertEqual(event_types(output)[-1], "error")
+        self.assertEqual(
+            translator.compatibility_warnings[-1]["code"],
+            "responses.late_reasoning_item",
+        )
+
+    def test_event_after_closed_output_index_is_fatal(self):
+        translator = self.translator()
         output = translator.process(
             "response.created", {"response": {"id": "resp"}}
         )
@@ -484,17 +517,13 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         })
         self.assertEqual(event_types(output)[-1], "error")
         self.assertNotIn("message_stop", event_types(output))
-        self.assertEqual(completed, [])
         self.assertEqual(
             translator.compatibility_warnings[-1]["code"],
             "responses.event_after_closed_output_item",
         )
 
-    def test_unknown_incomplete_reason_is_fatal_without_replay(self):
-        completed = []
-        translator = self.translator(
-            on_completed=lambda result: completed.append(result)
-        )
+    def test_unknown_incomplete_reason_is_fatal_without_output_state(self):
+        translator = self.translator()
         output = translator.process("response.incomplete", {"response": {
             "id": "resp", "model": "gpt", "status": "incomplete",
             "incomplete_details": {"reason": "future-private-reason"},
@@ -502,7 +531,6 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         }})
         self.assertIn("error", event_types(output))
         self.assertNotIn("message_stop", event_types(output))
-        self.assertEqual(completed, [])
 
     def test_stop_sequence_across_text_deltas(self):
         translator = self.translator(stop_sequences=["<STOP>"])
@@ -516,7 +544,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertEqual(visible, "before")
         self.assertEqual(translator.local_stop_sequence, "<STOP>")
 
-    def test_stop_sequence_suppresses_later_tool_and_truncates_replay(self):
+    def test_stop_sequence_suppresses_later_tool(self):
         translator = self.translator(stop_sequences=["<STOP>"])
         output = translator.process(
             "response.created", {"response": {"id": "resp"}}
@@ -573,42 +601,6 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             ["text"],
         )
         self.assertEqual(event_types(output)[-2:], ["message_delta", "message_stop"])
-        self.assertEqual(len(translator.terminal_result.replay_items), 1)
-        self.assertEqual(
-            translator.terminal_result.replay_items[0]["content"][0]["text"],
-            "before",
-        )
-
-    def test_lossless_persistence_failure_emits_error_without_message_stop(self):
-        persisted = []
-
-        def fail_persistence(result):
-            persisted.append(result)
-            return "fixture persistence failure"
-
-        translator = self.translator(
-            mode=MODE_LOSSLESS_REQUIRED,
-            sidecar_available=True,
-            on_completed=fail_persistence,
-        )
-        output = translator.process("response.completed", {"response": {
-            "id": "resp", "model": "gpt", "status": "completed",
-            "output": [{
-                "type": "message", "role": "assistant", "phase": "final_answer",
-                "content": [{"type": "output_text", "text": "terminal"}],
-            }],
-            "usage": {},
-        }})
-
-        self.assertEqual(len(persisted), 1)
-        self.assertIn("error", event_types(output))
-        self.assertNotIn("message_delta", event_types(output))
-        self.assertNotIn("message_stop", event_types(output))
-        self.assertEqual(
-            translator.compatibility_warnings[-1]["code"],
-            "responses.replay_persistence_failed",
-        )
-        self.assertIsNone(translator.terminal_result)
 
     def test_terminal_output_repairs_missing_delta(self):
         translator = self.translator()

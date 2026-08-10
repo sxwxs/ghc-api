@@ -15,7 +15,13 @@ import json
 import math
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+from .reasoning_carrier import (
+    build_reasoning_carrier,
+    is_reasoning_carrier,
+    parse_reasoning_carrier,
+)
 
 
 PRESERVATION_EXACT = "exact"
@@ -146,10 +152,14 @@ class PreservationRecord:
 
 @dataclass
 class ConversionReport:
-    """Audit trail for one direction of a protocol conversion."""
+    """Audit trail for one direction of a protocol conversion.
+
+    ``sidecar`` is a historical disposition name meaning that a source field
+    is not represented on the client wire. Compatibility mode records it
+    silently; ``lossless_required`` rejects it.
+    """
 
     direction: str
-    sidecar_available: bool = False
     records: List[PreservationRecord] = field(default_factory=list)
     warnings: List[Dict[str, Any]] = field(default_factory=list)
     unaccounted_paths: List[str] = field(default_factory=list)
@@ -196,14 +206,6 @@ class ConversionReport:
                 warning["detail"] = detail
             if warning not in self.warnings:
                 self.warnings.append(warning)
-        elif disposition == PRESERVATION_SIDECAR and not self.sidecar_available:
-            warning = {
-                "code": "conversion.sidecar_unavailable",
-                "path": source_path,
-                "action": "not_stored",
-            }
-            if warning not in self.warnings:
-                self.warnings.append(warning)
 
     def _is_accounted(self, path: str) -> bool:
         if path in self._marked_paths:
@@ -228,15 +230,10 @@ class ConversionReport:
             return
         lossy = [
             record for record in self.records
-            if (
-                record.disposition in (
-                    PRESERVATION_APPROXIMATION,
-                    PRESERVATION_UNSUPPORTED,
-                )
-                or (
-                    record.disposition == PRESERVATION_SIDECAR
-                    and not self.sidecar_available
-                )
+            if record.disposition in (
+                PRESERVATION_APPROXIMATION,
+                PRESERVATION_UNSUPPORTED,
+                PRESERVATION_SIDECAR,
             )
         ]
         if lossy:
@@ -254,7 +251,6 @@ class ConversionReport:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "direction": self.direction,
-            "sidecar_available": self.sidecar_available,
             "records": [record.to_dict() for record in self.records],
             "warnings": copy.deepcopy(self.warnings),
             "unaccounted_paths": list(self.unaccounted_paths),
@@ -343,86 +339,6 @@ class IdentifierCodec:
     def decode(self, value: str) -> str:
         return self._encoded_to_original.get(value, value)
 
-    def mapping(self) -> Dict[str, str]:
-        return dict(self._encoded_to_original)
-
-    def restore_mapping(self, encoded_to_original: Dict[str, str]) -> None:
-        """Merge a trusted replay-sidecar mapping into this request codec."""
-        if not isinstance(encoded_to_original, dict):
-            raise TypeError("identifier mapping must be an object")
-        for encoded, original in encoded_to_original.items():
-            if not isinstance(encoded, str) or not isinstance(original, str):
-                raise TypeError("identifier mapping entries must be strings")
-            existing_original = self._encoded_to_original.get(encoded)
-            existing_encoded = self._original_to_encoded.get(original)
-            if existing_original not in (None, original) or existing_encoded not in (None, encoded):
-                raise ValueError("identifier replay mapping conflicts with request mapping")
-            self._encoded_to_original[encoded] = original
-            self._original_to_encoded[original] = encoded
-
-
-ReplayResolver = Callable[[int, Dict[str, Any]], Optional[List[Dict[str, Any]]]]
-
-
-def prepare_replay_items_for_wire(
-    items: Sequence[Dict[str, Any]],
-    wire_profile: str,
-) -> List[Dict[str, Any]]:
-    """Encode stored terminal output items for a subsequent Responses input.
-
-    The replay store deliberately retains the complete terminal objects.  The
-    Copilot Responses Lite dialect observed in the supplied dump accepts a
-    smaller input projection, however: terminal-only ``id``/``status`` fields
-    are removed, while encrypted reasoning, assistant ``phase`` and tool
-    identity remain byte-for-byte JSON values.  Public Responses accepts the
-    normal output-item representation and therefore receives a deep copy.
-    """
-    profile = get_wire_profile(wire_profile)
-    copied = copy.deepcopy(list(items))
-    if profile.name != "copilot_responses_lite":
-        return copied
-
-    allowed_by_type = {
-        "reasoning": {"type", "summary", "encrypted_content"},
-        "message": {"type", "role", "content", "phase"},
-        "function_call": {
-            "type", "call_id", "name", "arguments", "namespace",
-        },
-        # The dump demonstrates that Lite requires status on replayed custom
-        # calls even though it rejects terminal ids.
-        "custom_tool_call": {
-            "type", "call_id", "name", "input", "status", "namespace",
-        },
-        "web_search_call": {"type", "id", "status", "action"},
-    }
-    projected: List[Dict[str, Any]] = []
-    for item in copied:
-        if not isinstance(item, dict):
-            raise ValueError("Replay output item must be an object")
-        item_type = item.get("type")
-        allowed = allowed_by_type.get(item_type)
-        if allowed is None:
-            raise ValueError(f"Unsupported replay output item type: {item_type}")
-        encoded = {key: value for key, value in item.items() if key in allowed}
-        if item_type == "message" and isinstance(encoded.get("content"), list):
-            parts: List[Any] = []
-            for part in encoded["content"]:
-                if isinstance(part, dict) and part.get("type") in ("output_text", "input_text"):
-                    parts.append({
-                        key: copy.deepcopy(part[key])
-                        for key in ("type", "text")
-                        if key in part
-                    })
-                else:
-                    # Unknown content is rejected earlier by response profile
-                    # auditing.  Keeping it here avoids a second, silent loss
-                    # if a caller uses this helper independently.
-                    parts.append(copy.deepcopy(part))
-            encoded["content"] = parts
-        projected.append(encoded)
-    return projected
-
-
 @dataclass
 class AnthropicToResponsesResult:
     payload: Dict[str, Any]
@@ -430,7 +346,6 @@ class AnthropicToResponsesResult:
     name_codec: IdentifierCodec
     call_id_codec: IdentifierCodec
     stop_sequences: List[str]
-    replay_misses: List[int]
     wire_profile: str
 
 
@@ -438,8 +353,6 @@ class AnthropicToResponsesResult:
 class ResponsesToAnthropicResult:
     response: Dict[str, Any]
     report: ConversionReport
-    replay_items: List[Dict[str, Any]]
-    visible_assistant_message: Dict[str, Any]
     matched_stop_sequence: Optional[str] = None
 
 
@@ -611,6 +524,7 @@ def _append_message_items(
     profile: ResponsesWireProfile,
     name_codec: IdentifierCodec,
     call_id_codec: IdentifierCodec,
+    target_model: str,
 ) -> None:
     base = f"/messages/{message_index}"
     role = message.get("role")
@@ -637,7 +551,7 @@ def _append_message_items(
         item: Dict[str, Any] = {"type": "message", "role": role, "content": current_parts}
         if role == "assistant":
             item["phase"] = "commentary" if has_tool_use else "final_answer"
-            report.mark(base, PRESERVATION_APPROXIMATION, detail="Assistant phase inferred because replay state was unavailable")
+            report.mark(base, PRESERVATION_SEMANTIC, detail="Assistant phase inferred from visible Anthropic content")
         input_items.append(item)
         segment_number += 1
         current_parts = []
@@ -705,9 +619,66 @@ def _append_message_items(
                     report.mark(_join_pointer(path, "is_error"), PRESERVATION_APPROXIMATION, detail="Responses function output has no equivalent error flag")
             if "cache_control" in block:
                 report.mark(_join_pointer(path, "cache_control"), PRESERVATION_SIDECAR, detail="outer tool_result cache marker is preserved in the report", subtree=True)
-        elif block_type in ("thinking", "redacted_thinking"):
-            # Foreign provider signatures are not valid OpenAI encrypted reasoning.
-            report.mark(path, PRESERVATION_SIDECAR, detail="Provider-specific thinking block retained only in audit sidecar", subtree=True)
+        elif block_type == "thinking" and role == "assistant":
+            flush_message()
+            signature = block.get("signature")
+            if is_reasoning_carrier(signature):
+                summary_text = str(block.get("thinking") or "")
+                try:
+                    carrier = parse_reasoning_carrier(signature)
+                except ValueError:
+                    carrier = None
+                    report.mark(
+                        path,
+                        PRESERVATION_APPROXIMATION,
+                        detail="Malformed Responses reasoning carrier was dropped; visible summary retained",
+                        subtree=True,
+                    )
+                encrypted_content: Optional[str] = None
+                carrier_item_id: Optional[str] = None
+                if carrier is not None:
+                    if carrier.model != target_model or carrier.wire_profile != profile.name:
+                        report.mark(
+                            path,
+                            PRESERVATION_APPROXIMATION,
+                            detail="Responses reasoning carrier belongs to a different model or wire profile; visible summary retained",
+                            subtree=True,
+                        )
+                    else:
+                        encrypted_content = carrier.encrypted_content
+                        carrier_item_id = carrier.item_id
+                        report.mark(
+                            path,
+                            PRESERVATION_SEMANTIC,
+                            detail="Synthetic thinking block restored as a Responses reasoning item",
+                            subtree=True,
+                        )
+                reasoning_item: Dict[str, Any] = {
+                    "type": "reasoning",
+                    "summary": (
+                        [{"type": "summary_text", "text": summary_text}]
+                        if summary_text else []
+                    ),
+                }
+                if profile.name == "public_responses" and carrier_item_id:
+                    reasoning_item["id"] = carrier_item_id
+                if encrypted_content is not None:
+                    reasoning_item["encrypted_content"] = encrypted_content
+                input_items.append(reasoning_item)
+            else:
+                report.mark(
+                    path,
+                    PRESERVATION_APPROXIMATION,
+                    detail="Provider-signed thinking is not portable to a Responses model",
+                    subtree=True,
+                )
+        elif block_type == "redacted_thinking":
+            report.mark(
+                path,
+                PRESERVATION_APPROXIMATION,
+                detail="Provider-specific redacted thinking is not portable to a Responses model",
+                subtree=True,
+            )
         else:
             report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"Unsupported content block type: {block_type}", subtree=True)
     flush_message()
@@ -1058,9 +1029,6 @@ def convert_anthropic_to_responses(
     wire_profile: str = "copilot_responses_lite",
     mode: str = MODE_COMPATIBILITY,
     session_id: Optional[str] = None,
-    tenant_id: Optional[str] = None,
-    replay_resolver: Optional[ReplayResolver] = None,
-    sidecar_available: bool = False,
 ) -> AnthropicToResponsesResult:
     """Convert one Anthropic Messages request to a Responses request."""
     if not isinstance(payload, dict):
@@ -1068,9 +1036,7 @@ def convert_anthropic_to_responses(
         report.mark("/", PRESERVATION_UNSUPPORTED, detail="Request body must be an object", subtree=True)
         raise AnthropicResponsesConversionError("Anthropic request body must be an object", report)
     profile = get_wire_profile(wire_profile)
-    report = ConversionReport(
-        "anthropic_to_responses", sidecar_available=bool(sidecar_available)
-    )
+    report = ConversionReport("anthropic_to_responses")
     name_codec = IdentifierCodec()
     call_id_codec = IdentifierCodec()
     input_items: List[Dict[str, Any]] = []
@@ -1108,7 +1074,6 @@ def convert_anthropic_to_responses(
             responses.setdefault("tools", []).extend(server_tools)
     tools = function_tools + server_tools
 
-    replay_misses: List[int] = []
     messages = payload.get("messages")
     messages_error: Optional[str] = None
     if isinstance(messages, list):
@@ -1117,15 +1082,16 @@ def convert_anthropic_to_responses(
             if not isinstance(message, dict):
                 report.mark(path, PRESERVATION_UNSUPPORTED, detail="message must be an object", subtree=True)
                 continue
-            replay_items = replay_resolver(message_index, message) if replay_resolver and message.get("role") == "assistant" else None
-            if replay_items:
-                input_items.extend(copy.deepcopy(replay_items))
-                report.mark(path + "/role", PRESERVATION_SIDECAR, detail="Assistant turn restored from replay store")
-                report.mark(path + "/content", PRESERVATION_SIDECAR, detail="Visible projection matched replay state", subtree=True)
-                continue
-            if message.get("role") == "assistant" and replay_resolver is not None:
-                replay_misses.append(message_index)
-            _append_message_items(input_items, message, message_index, report, profile, name_codec, call_id_codec)
+            _append_message_items(
+                input_items,
+                message,
+                message_index,
+                report,
+                profile,
+                name_codec,
+                call_id_codec,
+                model,
+            )
     elif "messages" in payload:
         messages_error = "Anthropic request field 'messages' must be an array"
         report.mark(
@@ -1251,7 +1217,7 @@ def convert_anthropic_to_responses(
                         source_path,
                         PRESERVATION_SIDECAR,
                         target_path,
-                        "Metadata JSON type retained in the full request sidecar; wire value is canonical JSON text",
+                        "Metadata JSON type represented canonically on the wire and recorded in conversion diagnostics; wire value is canonical JSON text",
                         subtree=True,
                     )
             responses["metadata"] = normalized
@@ -1259,8 +1225,10 @@ def convert_anthropic_to_responses(
             report.mark("/metadata", PRESERVATION_UNSUPPORTED, detail="metadata must be an object", subtree=True)
 
     if session_id:
-        cache_scope = f"{tenant_id or 'anonymous'}\x00{session_id}\x00{model}"
-        responses["prompt_cache_key"] = hashlib.sha256(cache_scope.encode("utf-8")).hexdigest()
+        cache_scope = f"{session_id}\x00{model}"
+        responses["prompt_cache_key"] = hashlib.sha256(
+            cache_scope.encode("utf-8")
+        ).hexdigest()
         if profile.name == "copilot_responses_lite":
             responses["client_metadata"] = {"session_id": session_id}
 
@@ -1289,7 +1257,6 @@ def convert_anthropic_to_responses(
         name_codec=name_codec,
         call_id_codec=call_id_codec,
         stop_sequences=stop_sequences,
-        replay_misses=replay_misses,
         wire_profile=profile.name,
     )
 
@@ -1356,65 +1323,6 @@ def _truncate_blocks_at_stop(
             # it is post-stop output (including tool calls).
             return result, matched
     return blocks, None
-
-
-def _truncate_replay_items_at_stop(
-    items: List[Dict[str, Any]],
-    stop_sequences: Sequence[str],
-) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """Apply the client-visible stop boundary to reusable Responses items.
-
-    The unmodified terminal response remains available in the audit snapshot;
-    replay state must contain only what the Anthropic client actually observed.
-    Otherwise a later turn can feed post-stop text or hidden tool calls back to
-    the model even though they were never part of the visible conversation.
-    """
-    if not stop_sequences:
-        return copy.deepcopy(items), None
-
-    for item_index, item in enumerate(items):
-        if not isinstance(item, dict) or item.get("type") != "message":
-            continue
-        parts = item.get("content")
-        if not isinstance(parts, list):
-            continue
-        carried = ""
-        text_positions: List[Tuple[int, str, int, int]] = []
-        for part_index, part in enumerate(parts):
-            if not isinstance(part, dict):
-                continue
-            part_type = part.get("type")
-            if part_type == "output_text":
-                text_key = "text"
-            elif part_type == "refusal":
-                text_key = "refusal"
-            else:
-                continue
-            text_value = str(part.get(text_key) or "")
-            start = len(carried)
-            carried += text_value
-            text_positions.append(
-                (part_index, text_key, start, len(carried))
-            )
-        stop_index, matched = _find_first_stop(carried, stop_sequences)
-        if stop_index is None:
-            continue
-        for part_index, text_key, start, end in text_positions:
-            if stop_index >= end:
-                continue
-            projected = copy.deepcopy(items[: item_index + 1])
-            message = projected[-1]
-            original_parts = message.get("content")
-            if not isinstance(original_parts, list):
-                return projected, matched
-            message["content"] = copy.deepcopy(original_parts[: part_index + 1])
-            matching_part = message["content"][-1]
-            matching_part[text_key] = str(matching_part.get(text_key) or "")[
-                : stop_index - start
-            ]
-            return projected, matched
-
-    return copy.deepcopy(items), None
 
 
 _KNOWN_RESPONSE_SIDECAR_FIELDS = {
@@ -1501,7 +1409,7 @@ def _mark_usage_preservation(usage: Any, report: ConversionReport) -> None:
                 report.mark(
                     path,
                     PRESERVATION_SIDECAR,
-                    detail="Empty input token details retained in encrypted audit",
+                    detail="Empty input token details retained in the conversion diagnostics",
                     subtree=True,
                 )
             for detail_key in value:
@@ -1522,7 +1430,7 @@ def _mark_usage_preservation(usage: Any, report: ConversionReport) -> None:
                     report.mark(
                         detail_path,
                         PRESERVATION_SIDECAR,
-                        detail="Unprojected input token detail retained in encrypted audit",
+                        detail="Unprojected input token detail retained in the conversion diagnostics",
                         subtree=True,
                     )
         elif key == "output_tokens_details" and isinstance(value, dict):
@@ -1530,7 +1438,7 @@ def _mark_usage_preservation(usage: Any, report: ConversionReport) -> None:
                 report.mark(
                     path,
                     PRESERVATION_SIDECAR,
-                    detail="Empty output token details retained in encrypted audit",
+                    detail="Empty output token details retained in the conversion diagnostics",
                     subtree=True,
                 )
             for detail_key in value:
@@ -1546,14 +1454,14 @@ def _mark_usage_preservation(usage: Any, report: ConversionReport) -> None:
                     report.mark(
                         detail_path,
                         PRESERVATION_SIDECAR,
-                        detail="Unprojected output token detail retained in encrypted audit",
+                        detail="Unprojected output token detail retained in the conversion diagnostics",
                         subtree=True,
                     )
         else:
             report.mark(
                 path,
                 PRESERVATION_SIDECAR,
-                detail="Responses usage extension retained in encrypted audit",
+                detail="Responses usage extension retained in the conversion diagnostics",
                 subtree=True,
             )
 
@@ -1601,11 +1509,12 @@ def convert_responses_to_anthropic(
     response_value: Dict[str, Any],
     *,
     original_model: str,
+    reasoning_model: str,
+    wire_profile: str,
     name_codec: Optional[IdentifierCodec] = None,
     call_id_codec: Optional[IdentifierCodec] = None,
     stop_sequences: Optional[Sequence[str]] = None,
     mode: str = MODE_COMPATIBILITY,
-    sidecar_available: bool = False,
 ) -> ResponsesToAnthropicResult:
     """Convert a terminal Responses object/event into an Anthropic message."""
     if not isinstance(response_value, dict):
@@ -1614,9 +1523,7 @@ def convert_responses_to_anthropic(
         raise AnthropicResponsesConversionError("Responses body must be an object", report)
     terminal_event_type = response_value.get("type")
     response = _response_object(response_value)
-    report = ConversionReport(
-        "responses_to_anthropic", sidecar_available=bool(sidecar_available)
-    )
+    report = ConversionReport("responses_to_anthropic")
     response_id_value = response.get("id")
     if not isinstance(response_id_value, str) or not response_id_value:
         report.mark("/id", PRESERVATION_UNSUPPORTED, detail="Responses body requires a non-empty string id")
@@ -1628,7 +1535,7 @@ def convert_responses_to_anthropic(
     call_id_codec = call_id_codec or IdentifierCodec()
     content: List[Dict[str, Any]] = []
     content_group_ids: List[Any] = []
-    replay_items: List[Dict[str, Any]] = []
+    seen_non_reasoning_output = False
     has_tool_use = False
     has_refusal = False
 
@@ -1639,16 +1546,72 @@ def convert_responses_to_anthropic(
             if not isinstance(item, dict):
                 report.mark(path, PRESERVATION_UNSUPPORTED, detail="output item must be an object", subtree=True)
                 continue
-            replay_items.append(copy.deepcopy(item))
             item_type = item.get("type")
             if item_type == "reasoning":
-                report.mark(path, PRESERVATION_SIDECAR, detail="Encrypted reasoning is retained for replay and not exposed as Claude thinking", subtree=True)
+                if seen_non_reasoning_output:
+                    report.mark(
+                        path,
+                        PRESERVATION_UNSUPPORTED,
+                        detail="Reasoning appeared after non-reasoning output",
+                        subtree=True,
+                    )
+                    raise AnthropicResponsesConversionError(
+                        "Responses returned reasoning after visible output",
+                        report,
+                    )
+                summary = item.get("summary")
+                summary_text = ""
+                if isinstance(summary, list):
+                    summary_text = "".join(
+                        str(part.get("text") or "")
+                        for part in summary
+                        if isinstance(part, dict)
+                        and part.get("type") in ("summary_text", "reasoning_text")
+                    )
+                encrypted_content = item.get("encrypted_content")
+                if not isinstance(encrypted_content, str):
+                    encrypted_content = None
+                item_id = item.get("id") if wire_profile == "public_responses" else None
+                if not isinstance(item_id, str):
+                    item_id = None
+                try:
+                    carrier = build_reasoning_carrier(
+                        model=reasoning_model,
+                        wire_profile=wire_profile,
+                        item_id=item_id,
+                        encrypted_content=encrypted_content,
+                    )
+                except ValueError:
+                    carrier = build_reasoning_carrier(
+                        model=reasoning_model,
+                        wire_profile=wire_profile,
+                        item_id=item_id,
+                        encrypted_content=None,
+                    )
+                    report.mark(
+                        path + "/encrypted_content",
+                        PRESERVATION_APPROXIMATION,
+                        detail="Encrypted reasoning exceeded the carrier size limit and was dropped",
+                    )
+                content.append({
+                    "type": "thinking",
+                    "thinking": summary_text,
+                    "signature": carrier,
+                })
+                content_group_ids.append(index)
+                report.mark(
+                    path,
+                    PRESERVATION_SEMANTIC,
+                    detail="Responses reasoning carried in an Anthropic thinking block",
+                    subtree=True,
+                )
             elif item_type == "message":
+                seen_non_reasoning_output = True
                 report.mark(path + "/type", PRESERVATION_SEMANTIC)
                 if "role" in item:
                     report.mark(path + "/role", PRESERVATION_EXACT)
                 if "phase" in item:
-                    report.mark(path + "/phase", PRESERVATION_SIDECAR, detail="Assistant phase retained for replay")
+                    report.mark(path + "/phase", PRESERVATION_SIDECAR, detail="Assistant phase retained for diagnostics")
                 parts = item.get("content")
                 if not isinstance(parts, list):
                     report.mark(path + "/content", PRESERVATION_UNSUPPORTED, detail="message output content must be an array", subtree=True)
@@ -1675,10 +1638,12 @@ def convert_responses_to_anthropic(
                         report.mark(part_path, PRESERVATION_UNSUPPORTED, detail=f"Unknown message content type: {part.get('type')}", subtree=True)
                 for key in item:
                     if key not in {"type", "role", "phase", "content"}:
-                        report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Output message metadata retained for replay", subtree=True)
+                        report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Output message metadata retained for diagnostics", subtree=True)
             elif item_type == "web_search_call":
-                report.mark(path, PRESERVATION_SIDECAR, detail="Native web search execution retained for replay/audit and omitted from visible Anthropic content", subtree=True)
+                seen_non_reasoning_output = True
+                report.mark(path, PRESERVATION_SIDECAR, detail="Native web search execution retained for diagnostics and omitted from visible Anthropic content", subtree=True)
             elif item_type in ("function_call", "custom_tool_call"):
+                seen_non_reasoning_output = True
                 has_tool_use = True
                 encoded_id = str(item.get("call_id") or item.get("id") or "")
                 encoded_name = str(item.get("name") or "")
@@ -1726,12 +1691,12 @@ def convert_responses_to_anthropic(
                 if "call_id" in item:
                     report.mark(path + "/call_id", PRESERVATION_EXACT if original_id == encoded_id else PRESERVATION_SEMANTIC)
                 if "id" in item:
-                    report.mark(path + "/id", PRESERVATION_SIDECAR, detail="Responses item id retained for replay")
+                    report.mark(path + "/id", PRESERVATION_SIDECAR, detail="Responses item id retained for diagnostics")
                 if "name" in item:
                     report.mark(path + "/name", PRESERVATION_EXACT if original_name == encoded_name else PRESERVATION_SEMANTIC)
                 for key in item:
                     if key not in {"type", "call_id", "id", "name", "arguments", "input"}:
-                        report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Tool-call metadata retained for replay", subtree=True)
+                        report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Tool-call metadata retained for diagnostics", subtree=True)
             else:
                 report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"Unknown Responses output item type: {item_type}", subtree=True)
                 raise AnthropicResponsesConversionError(
@@ -1743,17 +1708,6 @@ def convert_responses_to_anthropic(
     content, matched_stop = _truncate_blocks_at_stop(
         content, active_stop_sequences, content_group_ids
     )
-    if matched_stop:
-        replay_items, replay_stop = _truncate_replay_items_at_stop(
-            replay_items, active_stop_sequences
-        )
-        if replay_stop != matched_stop:
-            report.mark(
-                "/output",
-                PRESERVATION_UNSUPPORTED,
-                detail="Visible stop boundary could not be applied to replay items",
-                subtree=True,
-            )
     incomplete_value = response.get("incomplete_details")
     incomplete = incomplete_value if isinstance(incomplete_value, dict) else {}
     is_incomplete = (
@@ -1809,8 +1763,6 @@ def convert_responses_to_anthropic(
             response.get("tool_usage"),
         ),
     }
-    visible = {"role": "assistant", "content": copy.deepcopy(content)}
-
     if "usage" in response:
         _mark_usage_preservation(response.get("usage"), report)
     if "tool_usage" in response:
@@ -1837,7 +1789,7 @@ def convert_responses_to_anthropic(
                             report.mark(
                                 "/tool_usage/web_search/" + _pointer_escape(str(key)),
                                 PRESERVATION_SIDECAR,
-                                detail="Unprojected web search usage retained in audit sidecar",
+                                detail="Unprojected web search usage retained in conversion diagnostics",
                                 subtree=True,
                             )
                 else:
@@ -1852,7 +1804,7 @@ def convert_responses_to_anthropic(
                     report.mark(
                         "/tool_usage/" + _pointer_escape(str(key)),
                         PRESERVATION_SIDECAR,
-                        detail="Unprojected Responses tool usage retained in audit sidecar",
+                        detail="Unprojected Responses tool usage retained in conversion diagnostics",
                         subtree=True,
                     )
     for key in ("id", "model", "output"):
@@ -1868,13 +1820,11 @@ def convert_responses_to_anthropic(
             )
     for key in _KNOWN_RESPONSE_SIDECAR_FIELDS:
         if key in response:
-            report.mark("/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Responses metadata retained in audit/replay sidecar", subtree=True)
+            report.mark("/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Responses metadata retained in conversion diagnostics", subtree=True)
     report.finalize(response, mode)
     return ResponsesToAnthropicResult(
         response=anthropic,
         report=report,
-        replay_items=replay_items,
-        visible_assistant_message=visible,
         matched_stop_sequence=matched_stop,
     )
 

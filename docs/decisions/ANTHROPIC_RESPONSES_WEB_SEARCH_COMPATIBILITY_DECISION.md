@@ -4,6 +4,14 @@
 - **Decision date:** July 15, 2026
 - **Scope:** Claude Code requests served through the OpenAI `/responses` compatibility path
 
+> **Implementation update — August 9, 2026:** reasoning continuity is now
+> stateless and client-carried in namespaced Anthropic `thinking.signature`
+> envelopes. The SQLite replay/audit store described below has been removed.
+> The web-search decision itself remains deferred: `web_search_call` stays out
+> of Anthropic-visible content and is retained only in bounded, redacted
+> in-memory diagnostics. References below to replay storage document the
+> architecture that existed when this decision was made.
+
 ## Summary
 
 When Claude Code uses a model exposed through the OpenAI `/responses` API, web searches are executed successfully, but Claude Code may display an incorrect summary such as:

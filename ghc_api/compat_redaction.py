@@ -1,8 +1,8 @@
 """Content-safe projections for the in-memory dashboard cache.
 
-The encrypted replay store is the authoritative full-fidelity audit trail.
-Dashboard records intentionally retain protocol shape and digests, but never
-opaque reasoning state or fields from an unknown Responses discriminator.
+Dashboard records retain protocol shape and digests, but never opaque reasoning
+state or fields from an unknown Responses discriminator. Full-fidelity
+reasoning state travels with the client-visible synthetic thinking carrier.
 """
 
 from __future__ import annotations

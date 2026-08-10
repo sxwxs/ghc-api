@@ -234,8 +234,6 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
                     converted = convert_anthropic_to_responses(
                         sample["value"],
                         wire_profile="copilot_responses_lite",
-                        session_id="fixture-session",
-                        tenant_id="fixture-tenant",
                     )
                     self.assertEqual(converted.report.unaccounted_paths, [])
                     self.assertTrue(converted.payload["input"])
@@ -249,7 +247,9 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
             event = sample["value"]
             with self.subTest(sample=sample_index, event=event.get("type")):
                 translator = ResponsesAnthropicEventTranslator(
-                    original_model="fixture-model"
+                    original_model="fixture-model",
+                    reasoning_model="gpt-fixture",
+                    wire_profile="copilot_responses_lite",
                 )
                 # Samples are field-covering minimal events rather than one
                 # coherent stream. Processing each from a clean state proves
@@ -270,7 +270,8 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
 
         translator = ResponsesAnthropicEventTranslator(
             original_model="claude-fixture",
-            sidecar_available=True,
+            reasoning_model="gpt-fixture",
+            wire_profile="public_responses",
         )
         output = []
         for event in document["events"]:
@@ -292,14 +293,10 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
             expected["content_block_types"],
         )
         terminal = translator.terminal_result
-        self.assertEqual(terminal.response["content"][0]["text"], expected["text"])
-        self.assertEqual(terminal.response["content"][1]["name"], expected["tool_name"])
-        self.assertEqual(terminal.response["content"][1]["input"], expected["tool_input"])
+        self.assertEqual(terminal.response["content"][1]["text"], expected["text"])
+        self.assertEqual(terminal.response["content"][2]["name"], expected["tool_name"])
+        self.assertEqual(terminal.response["content"][2]["input"], expected["tool_input"])
         self.assertEqual(terminal.response["stop_reason"], expected["stop_reason"])
-        self.assertEqual(
-            [item["type"] for item in terminal.replay_items],
-            expected["replay_item_types"],
-        )
         for key, value in expected["usage"].items():
             self.assertEqual(terminal.response["usage"][key], value)
 
