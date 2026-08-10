@@ -720,6 +720,9 @@
             if (typeof json !== 'string') {
                 json = JSON.stringify(json, null, 2);
             }
+            // Escape before highlighting: bodies carry arbitrary third-party
+            // text (Web IQ results, model output) and are written via innerHTML.
+            json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
             return json.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
                 let cls = 'json-number';
                 if (/^"/.test(match)) {
