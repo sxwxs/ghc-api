@@ -8,6 +8,7 @@ serving as a proxy server for GitHub Copilot API with caching and monitoring cap
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -402,7 +403,7 @@ def serve_app(app, host: str, port: int, debug: bool = False) -> None:
         return
 
     try:
-        from waitress import serve
+        from waitress import create_server
     except ImportError:
         print(
             "WARNING: waitress is not installed; falling back to the Werkzeug\n"
@@ -420,16 +421,17 @@ def serve_app(app, host: str, port: int, debug: bool = False) -> None:
     # normally keep it busy, but they can be disabled (sse_keepalive_interval=0).
     channel_timeout = max(300, int(state.upstream_read_timeout))
     print(f"Serving with waitress ({threads} threads, channel_timeout={channel_timeout}s)")
-    serve(
+    # create_server().run() rather than waitress.serve(): it is the public API
+    # without serve()'s startup banner, which would print its own host/port
+    # line right after the one above.
+    logging.basicConfig()
+    create_server(
         app,
         host=host,
         port=port,
         threads=threads,
         channel_timeout=channel_timeout,
-        # The banner would advertise waitress' own host/port formatting; ours
-        # is already printed above.
-        _quiet=True,
-    )
+    ).run()
 
 
 if __name__ == "__main__":

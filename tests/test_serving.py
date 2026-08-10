@@ -96,21 +96,31 @@ class ServeAppTest(unittest.TestCase):
 
     def test_uses_waitress_by_default(self):
         with mock.patch.dict("sys.modules", {"waitress": mock.Mock()}) as modules:
-            serve = modules["waitress"].serve
+            create_server = modules["waitress"].create_server
             main_module.serve_app(self.app, host="127.0.0.1", port=1234, debug=False)
 
-        serve.assert_called_once()
-        kwargs = serve.call_args.kwargs
+        create_server.assert_called_once()
+        create_server.return_value.run.assert_called_once()
+        kwargs = create_server.call_args.kwargs
         self.assertEqual(kwargs["host"], "127.0.0.1")
         self.assertEqual(kwargs["port"], 1234)
         self.assertGreaterEqual(kwargs["threads"], 4)
         self.app.run.assert_not_called()
 
+    def test_only_public_waitress_arguments_are_used(self):
+        """No private test shims (_quiet et al): waitress rejects unknown kwargs."""
+        with mock.patch.dict("sys.modules", {"waitress": mock.Mock()}) as modules:
+            main_module.serve_app(self.app, host="127.0.0.1", port=1234, debug=False)
+            kwargs = modules["waitress"].create_server.call_args.kwargs
+
+        private = [name for name in kwargs if name.startswith("_")]
+        self.assertEqual(private, [])
+
     def test_channel_timeout_outlives_a_quiet_stream(self):
         with mock.patch.dict("sys.modules", {"waitress": mock.Mock()}) as modules, \
                 mock.patch.object(main_module.state, "upstream_read_timeout", 1800):
             main_module.serve_app(self.app, host="127.0.0.1", port=1234, debug=False)
-            kwargs = modules["waitress"].serve.call_args.kwargs
+            kwargs = modules["waitress"].create_server.call_args.kwargs
 
         self.assertGreaterEqual(kwargs["channel_timeout"], 1800)
 
