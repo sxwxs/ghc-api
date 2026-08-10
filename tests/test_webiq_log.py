@@ -269,3 +269,81 @@ class WebIQDashboardApiTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WebIQRequestListTest(unittest.TestCase):
+    """A search must also appear in the shared request list, not only in the
+    dedicated Web IQ panel."""
+
+    def setUp(self):
+        from ghc_api.cache import RequestCache
+        from ghc_api.routes import webiq as webiq_routes
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        patcher = mock.patch.dict(os.environ, {"GHC_API_CONFIG_DIR": self.tmpdir.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        webiq_log.clear()
+        self.addCleanup(webiq_log.clear)
+        # Isolate the global request cache so the assertions below see only
+        # what this test produced.
+        self.cache = RequestCache()
+        for target in ("ghc_api.routes.webiq.cache", "ghc_api.routes.dashboard.cache"):
+            p = mock.patch(target, self.cache)
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = create_app().test_client()
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_search_shows_up_in_the_request_list(self, search_mock):
+        def fake_search(query, settings, max_results=None, trace=None):
+            trace.update({"endpoint": "https://api.microsoftol.com/v3/search/web",
+                          "request": {"query": query}, "status_code": 200})
+            return [{"title": "t", "url": "u", "content": "c"}]
+
+        search_mock.side_effect = fake_search
+
+        self.client.post("/v1/webiq/search", json={"query": "python"})
+
+        listing = self.client.get("/api/requests").get_json()
+        self.assertEqual(listing["total"], 1)
+        item = listing["items"][0]
+        self.assertEqual(item["endpoint"], "/v1/webiq/search")
+        self.assertEqual(item["model"], "webiq_search")
+        self.assertEqual(item["status_code"], 200)
+        self.assertEqual(item["state"], "completed")
+        self.assertGreater(item["response_size"], 0)
+        # A search spends Web IQ quota, not model tokens.
+        self.assertEqual(item["input_tokens"], 0)
+        self.assertEqual(item["output_tokens"], 0)
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_detail_view_carries_request_and_response_bodies(self, search_mock):
+        search_mock.return_value = [{"title": "t", "url": "u", "content": "c"}]
+
+        self.client.post("/v1/webiq/search", json={"query": "python", "max_results": 3})
+
+        entry_id = self.client.get("/api/requests").get_json()["items"][0]["id"]
+        detail = self.client.get(f"/api/request/{entry_id}").get_json()
+        self.assertEqual(detail["request_body"], {"query": "python", "max_results": 3})
+        self.assertEqual(detail["response_body"]["results"], [{"title": "t", "url": "u", "content": "c"}])
+        # Both logs must describe the same search.
+        self.assertEqual(webiq_log.recent()[0]["id"], entry_id)
+
+    def test_failed_search_is_listed_as_an_error(self):
+        self.client.post("/v1/webiq/search", json={"query": "  "})
+
+        item = self.client.get("/api/requests").get_json()["items"][0]
+        self.assertEqual(item["state"], "error")
+        self.assertEqual(item["status_code"], 400)
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_search_is_findable_by_full_text(self, search_mock):
+        search_mock.return_value = []
+
+        self.client.post("/v1/webiq/search", json={"query": "quantum computing"})
+
+        found = self.client.get("/api/requests/search?q=quantum").get_json()
+        self.assertEqual(found["total"], 1)
+        self.assertEqual(found["items"][0]["endpoint"], "/v1/webiq/search")
