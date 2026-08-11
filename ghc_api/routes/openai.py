@@ -668,6 +668,7 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
     if payload.get("stream"):
         responses_payload["stream"] = True
 
+    _normalize_responses_tool_descriptions(responses_payload)
     _filter_responses_web_search_tools(responses_payload, translated_model, request_id)
 
     connection_retries = state.max_connection_retries
@@ -802,6 +803,49 @@ def _filter_responses_web_search_tools(payload: Dict, model_id: str, request_id:
         payload["tools"] = filtered_tools
         removed_tools = ", ".join(f"{count} '{tool_type}'" for tool_type, count in sorted(removed_counts.items()))
         print(f"Removed unsupported tool(s) {removed_tools} from payload for request {request_id}")
+
+
+def _normalize_responses_tool_descriptions(payload: Dict) -> int:
+    """Replace blank descriptions in Responses API tool declarations.
+
+    Codex can include incremental ``additional_tools`` input items whose
+    namespace description is an empty string.  The Copilot Responses endpoint
+    rejects an explicitly empty description, including in historical input
+    items, so give only those blank fields a small, deterministic fallback.
+    Descriptions that are absent or already contain text are left untouched.
+    """
+    normalized_count = 0
+
+    def normalize_tools(tools) -> None:
+        nonlocal normalized_count
+        if not isinstance(tools, list):
+            return
+
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+
+            description = tool.get("description")
+            if isinstance(description, str) and not description.strip():
+                name = tool.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    name = "unnamed"
+                if tool.get("type") == "namespace":
+                    tool["description"] = f"Tools in the {name} namespace."
+                else:
+                    tool["description"] = f"Tool: {name}."
+                normalized_count += 1
+
+            normalize_tools(tool.get("tools"))
+
+    normalize_tools(payload.get("tools"))
+    input_items = payload.get("input")
+    if isinstance(input_items, list):
+        for item in input_items:
+            if isinstance(item, dict):
+                normalize_tools(item.get("tools"))
+
+    return normalized_count
 
 
 @openai_bp.route("/v1/models", methods=["GET"])
@@ -1350,6 +1394,7 @@ def responses():
 
         headers = get_copilot_headers(enable_vision)
 
+        _normalize_responses_tool_descriptions(payload)
         _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
