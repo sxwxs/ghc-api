@@ -23,7 +23,7 @@ HIGHLIGHTERS = {
 class TemplateJsonEscapingTest(unittest.TestCase):
     def test_highlighters_escape_before_building_html(self):
         for template, name in HIGHLIGHTERS.items():
-            source = (ROOT / template).read_text()
+            source = (ROOT / template).read_text(encoding="utf-8")
             match = re.search(
                 rf"function {name}\(json\)[\s\S]*?\n        \}}", source
             )

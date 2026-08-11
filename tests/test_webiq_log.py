@@ -267,10 +267,6 @@ class WebIQDashboardApiTest(unittest.TestCase):
         self.assertEqual(bad.status_code, 400)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WebIQRequestListTest(unittest.TestCase):
     """A search must also appear in the shared request list, not only in the
     dedicated Web IQ panel."""
@@ -347,3 +343,7 @@ class WebIQRequestListTest(unittest.TestCase):
         found = self.client.get("/api/requests/search?q=quantum").get_json()
         self.assertEqual(found["total"], 1)
         self.assertEqual(found["items"][0]["endpoint"], "/v1/webiq/search")
+
+
+if __name__ == "__main__":
+    unittest.main()
