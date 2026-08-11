@@ -8,6 +8,7 @@ serving as a proxy server for GitHub Copilot API with caching and monitoring cap
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -250,6 +251,8 @@ def main():
         host = config.get('address', 'localhost')
         port = config.get('port', 8313)
         debug = config.get('debug', DEBUG)
+        if 'server_threads' in config:
+            state.server_threads = max(4, int(config['server_threads']))
 
         # Set account type and optional upstream URL overrides. The overrides
         # are useful for GHE data residency, private gateways, and offline E2E benchmarks.
@@ -318,23 +321,14 @@ def main():
         if 'webiq_api_key' in config:
             state.webiq_api_key = str(config['webiq_api_key'] or '')
         if 'webiq_endpoint' in config:
-            state.webiq_endpoint = str(config['webiq_endpoint'] or state.webiq_endpoint)
-        if 'webiq_max_results' in config:
-            # Clamp to the same limit the webiq_search tool contract advertises,
-            # so a larger config value cannot look accepted but be capped later.
-            state.webiq_max_results = max(1, min(webiq.MAX_RESULTS_LIMIT, int(config['webiq_max_results'])))
-        if 'webiq_max_length' in config:
-            state.webiq_max_length = max(1, min(500000, int(config['webiq_max_length'])))
-        if 'webiq_content_format' in config:
-            state.webiq_content_format = str(config['webiq_content_format'])
-        if 'webiq_language' in config:
-            state.webiq_language = str(config['webiq_language'])
-        if 'webiq_region' in config:
-            state.webiq_region = str(config['webiq_region'])
-        if 'webiq_safe_search' in config:
-            state.webiq_safe_search = str(config['webiq_safe_search'])
+            state.webiq_endpoint = str(config['webiq_endpoint'] or '')
+        # There are no search-parameter settings on purpose: /v3/search/web
+        # forwards the client's body as received, so every default is
+        # Microsoft's.
         if 'webiq_timeout' in config:
             state.webiq_timeout = max(1, int(config['webiq_timeout']))
+        if 'log_webiq_requests' in config:
+            state.log_webiq_requests = bool(config['log_webiq_requests'])
 
         # Load user-token auth setting
         if 'enable_auth' in config:
@@ -421,8 +415,65 @@ def main():
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
+    if webiq.is_configured(state):
+        print(f"Web Search v3 API: http://{host}:{port}/v3/search/web")
 
-    app.run(host=host, port=port, debug=debug, threaded=True)
+    serve_app(app, host=host, port=port, debug=debug)
+
+
+def serve_app(app, host: str, port: int, debug: bool = False) -> None:
+    """Serve the app with a WSGI server that supports HTTP/1.1 keep-alive.
+
+    The Werkzeug development server is deliberately not used for normal runs.
+    It speaks HTTP/1.0, so every response carries ``Connection: close`` and the
+    connection is torn down after each request. A request that a client writes
+    onto a connection the server is concurrently closing is silently dropped:
+    no response, no reset, the client just waits. Browsers hit that race
+    constantly on the chat page, where an SSE round ends and the next request
+    (for example a webiq_search tool call) goes out immediately, and the
+    request then hangs for minutes.
+
+    waitress speaks HTTP/1.1 with real keep-alive and chunked transfer
+    encoding, which removes the race and still streams SSE incrementally.
+
+    Note that SSE responses must not set hop-by-hop headers such as
+    ``Connection``; PEP 3333 forbids them and waitress rejects them with a 500.
+    """
+    if debug:
+        print("Debug mode: using the Werkzeug development server (auto-reload).")
+        app.run(host=host, port=port, debug=True, threaded=True)
+        return
+
+    try:
+        from waitress import create_server
+    except ImportError:
+        print(
+            "WARNING: waitress is not installed; falling back to the Werkzeug\n"
+            "         development server. It has no HTTP keep-alive, so browser\n"
+            "         requests can hang. Install it with: pip install waitress",
+            file=sys.stderr,
+        )
+        app.run(host=host, port=port, threaded=True)
+        return
+
+    # A streaming request occupies a thread for its whole lifetime, so the pool
+    # must be comfortably larger than the number of concurrent chat streams.
+    threads = max(4, int(state.server_threads))
+    # Do not let waitress time out a long, quiet SSE stream. Keepalive pings
+    # normally keep it busy, but they can be disabled (sse_keepalive_interval=0).
+    channel_timeout = max(300, int(state.upstream_read_timeout))
+    print(f"Serving with waitress ({threads} threads, channel_timeout={channel_timeout}s)")
+    # create_server().run() rather than waitress.serve(): it is the public API
+    # without serve()'s startup banner, which would print its own host/port
+    # line right after the one above.
+    logging.basicConfig()
+    create_server(
+        app,
+        host=host,
+        port=port,
+        threads=threads,
+        channel_timeout=channel_timeout,
+    ).run()
 
 
 if __name__ == "__main__":

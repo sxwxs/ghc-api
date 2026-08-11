@@ -314,6 +314,26 @@ def extract_token(request) -> Optional[str]:
     return None
 
 
+# Header names (lower-case) whose value is a credential and must never reach
+# the request cache, the dashboard, an export or requests/*.jl.
+# 'x-apikey' is the spelling the Microsoft Web Search v3 API uses: a client
+# that points at /v3/search/web by "only changing the base URL" still sends
+# its own key in that header, and this proxy must not write it down.
+REDACTED_HEADERS = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "x-apikey",
+    "api-key",
+    "ocp-apim-subscription-key",
+    "cookie",
+    "set-cookie",
+    "x-auth-token",
+    "x-access-token",
+    "x-github-token",
+})
+
+
 def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of `headers` with auth values replaced by '***REDACTED***'.
     Used before persisting request headers to the cache, so the dashboard
@@ -321,21 +341,10 @@ def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(headers, dict):
         return headers
     redacted = dict(headers)
-    sensitive_names = {
-        "authorization",
-        "proxy-authorization",
-        "x-api-key",
-        "api-key",
-        "cookie",
-        "set-cookie",
-        "x-auth-token",
-        "x-access-token",
-        "x-github-token",
-    }
     for key in list(redacted.keys()):
         lower = key.lower().strip()
         if (
-            lower in sensitive_names
+            lower in REDACTED_HEADERS
             or lower.endswith("-access-token")
             or lower.endswith("-auth-token")
             or lower.endswith("-api-key")

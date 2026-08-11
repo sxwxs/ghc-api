@@ -67,6 +67,7 @@ def _runtime_config() -> Dict[str, Any]:
         "sse_keepalive_interval": state.sse_keepalive_interval,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
         "save_request_to_file": state.save_request_to_file,
+        "log_webiq_requests": state.log_webiq_requests,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
         "anthropic_responses_compat_enabled": state.anthropic_responses_compat_enabled,
@@ -222,6 +223,7 @@ def api_runtime_config_update():
         "sse_keepalive_interval",
         "auto_remove_encrypted_content_on_parse_error",
         "save_request_to_file",
+        "log_webiq_requests",
         "disable_onedrive_access",
         "anthropic_responses_compat_enabled",
         "anthropic_responses_compat_mode",
@@ -294,6 +296,12 @@ def api_runtime_config_update():
             if not isinstance(save_req, bool):
                 raise ValueError("'save_request_to_file' must be a boolean")
             state.save_request_to_file = save_req
+
+        if "log_webiq_requests" in payload:
+            log_webiq = payload["log_webiq_requests"]
+            if not isinstance(log_webiq, bool):
+                raise ValueError("'log_webiq_requests' must be a boolean")
+            state.log_webiq_requests = log_webiq
 
         if "disable_onedrive_access" in payload:
             disable_onedrive = payload["disable_onedrive_access"]

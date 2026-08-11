@@ -20,7 +20,13 @@ def generate_config_file():
 
 address: localhost
 port: 8313
+# debug: true switches to the Werkzeug development server (auto-reload). That
+# server has no HTTP keep-alive, so browser requests can hang for minutes;
+# keep it false for normal use, where waitress serves the app instead.
 debug: false
+# WSGI thread pool. Each streaming request holds one thread for its lifetime,
+# so this is roughly the number of concurrent chat streams you can serve.
+server_threads: 16
 
 # GitHub Copilot Account Type
 # Options:
@@ -248,25 +254,32 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
 # Microsoft Web IQ Search
 # -----------------------
-# Exposes POST /v1/webiq/search, which runs a web search with the key below.
+# Exposes POST /v3/search/web, a transparent proxy for the official Microsoft
+# Web Search v3 API backed by the key below:
+#   https://webiq.microsoft.ai/documentation/api-reference/web/
+# The client's request body is forwarded as received and the upstream status,
+# headers and body are returned verbatim, so any client written against
+# api.microsoft.ai works here by changing only the base URL, and every search
+# parameter and default is Microsoft's. There are deliberately no server-side
+# search settings: a client that wants passage format asks for it.
+# A client's own x-apikey header is ignored (this server's key is always the
+# one used) and redacted before the request is logged.
+# webiq_endpoint overrides the upstream URL; leave it empty to use the endpoint
+# the specification defines.
 # The proxy never searches on a model's behalf: clients declare the
 # 'webiq_search' function tool, the model decides whether and what to search,
 # and the client executes the tool call against that endpoint. The built-in
 # chat UI (/chat) does this automatically when the Web IQ toggle is on.
 # The key stays on this server and is never sent to the UI or to Copilot.
-# passage format is recommended because full HTML can consume many model tokens.
-# webiq_max_results is the default when a tool call does not specify one (1-10).
-# webiq_max_length caps each result's content locally, bounding tool-result size.
 enable_webiq_search: false
 webiq_api_key: ""
-webiq_endpoint: "https://api.microsoftol.com/v3/search/web"
-webiq_max_results: 5
-webiq_max_length: 3000
-webiq_content_format: "passage"
-webiq_language: "en"
-webiq_region: "US"
-webiq_safe_search: "strict"
+webiq_endpoint: ""
 webiq_timeout: 30
+# Every /v3/search/web call (request body, upstream status, response or error)
+# is appended to <config_dir>/webiq/YYYY-MM-DD.jl. That file is the only
+# untruncated record of a search, so logging is on by default. The API key is
+# never written to it.
+log_webiq_requests: true
 
 # User Authentication
 # -------------------
