@@ -1,7 +1,7 @@
 """
 Recording of Web IQ searches.
 
-Every call that reaches ``POST /v1/webiq/search`` is recorded twice:
+Every call that reaches ``POST /v3/search/web`` is recorded twice:
 
 * appended as one JSON Lines record to ``<config_dir>/webiq/YYYY-MM-DD.jl``
   (on by default, controlled by ``state.log_webiq_requests``), and

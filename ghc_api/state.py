@@ -83,15 +83,25 @@ class State:
         # from config.yaml; it is never exposed to browser clients.
         self.enable_webiq_search: bool = False
         self.webiq_api_key: str = ""
-        self.webiq_endpoint: str = "https://api.microsoftol.com/v3/search/web"
+        # Empty means the spec endpoint (webiq.ENDPOINT). Override for a mock, a
+        # recording proxy or a regional deployment. The URL is deliberately not
+        # duplicated here: two copies of it is how a wrong host survived before.
+        self.webiq_endpoint: str = ""
+        # Defaults for requests that omit a parameter. A client may override
+        # any of them; the *_cap values below are the hard ceilings it cannot.
         self.webiq_max_results: int = 5
         self.webiq_max_length: int = 3000
         self.webiq_content_format: str = "passage"
         self.webiq_language: str = "en"
         self.webiq_region: str = "US"
         self.webiq_safe_search: str = "strict"
+        # Local ceilings on a request, protecting the shared paid key. They
+        # default to the official maxima, so out of the box this endpoint
+        # accepts everything the real API accepts.
+        self.webiq_max_results_cap: int = 50
+        self.webiq_max_length_cap: int = 500000
         self.webiq_timeout: int = 30
-        # Record every /v1/webiq/search request and response. Entries go to a
+        # Record every /v3/search/web request and response. Entries go to a
         # daily .jl file under <config_dir>/webiq/ (on by default, unlike the
         # much larger LLM request dumps) and to an in-memory ring buffer of the
         # most recent webiq_log_max_entries searches for the dashboard.

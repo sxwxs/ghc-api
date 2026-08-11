@@ -24,6 +24,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
 - **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
+- **Microsoft Web IQ Search**: `/v3/search/web` speaking the official Web Search v3 contract verbatim, backed by a server-held API key
 
 ## Maintenance Guides
 
@@ -313,7 +314,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, `/v3/search/web`, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -394,6 +395,47 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 ### Anthropic Compatible
 
 - `POST /v1/messages` - Messages API (Anthropic format)
+
+### Microsoft Web IQ Search
+
+- `POST /v3/search/web` - Web Search v3, backed by the server-held Web IQ API key
+
+The path, request body and response body are the official Microsoft Web Search v3
+contract, verbatim. A client written against `api.microsoft.ai`
+works here by changing only the base URL — the same deal the OpenAI- and
+Anthropic-shaped endpoints offer.
+
+```bash
+curl -X POST http://localhost:8313/v3/search/web \
+  -H "content-type: application/json" \
+  -d '{"query": "latest trends in LLM RAG", "maxResults": 10, "contentFormat": "passage"}'
+```
+
+What the proxy adds is key custody (`webiq_api_key` never leaves the server),
+the optional user-token auth gate, logging, and per-request caps. All of that is
+applied to the **outgoing** request; the upstream response is returned
+untouched, so `traceId`, `contentTier`, `clickUrl`, `crawledAt` and every other
+field survive.
+
+- `webiq_language`, `webiq_region`, `webiq_content_format`, `webiq_max_results`,
+  `webiq_max_length`, `webiq_safe_search` are **defaults** for parameters a
+  request omits; any request may override any of them.
+- `webiq_max_results_cap` and `webiq_max_length_cap` are hard ceilings that a
+  request cannot exceed. They default to the official maxima (50 / 500000), so
+  out of the box this endpoint accepts everything the real API accepts.
+- A value outside the official range is rejected with 400; a value inside it but
+  above a local cap is clamped, and the clamped body is what the log shows.
+- Upstream status codes keep their meaning, except 401/403 — those mean *this
+  server's* key was rejected, so they surface as 503 with an explicit message
+  rather than being confused with this proxy rejecting the caller's token.
+
+The proxy never searches on a model's behalf. Clients declare the `webiq_search`
+function tool, the model decides whether and what to search, and the client
+executes the tool call against this endpoint; `/chat` does that automatically
+when the Web IQ toggle is on. That tool schema stays narrow (`query`,
+`max_results`) on purpose — it is a prompt surface, not the API — so clients
+translate `max_results` to the official `maxResults`. See
+`scripts/webiq_search_demo.py`.
 
 ### Configured Upstream Proxy
 
@@ -544,7 +586,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v3/search/web`, configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |

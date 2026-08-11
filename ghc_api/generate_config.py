@@ -230,18 +230,23 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
 # Microsoft Web IQ Search
 # -----------------------
-# Exposes POST /v1/webiq/search, which runs a web search with the key below.
+# Exposes POST /v3/search/web -- the official Microsoft Web Search v3 contract,
+# request and response verbatim -- backed by the key below. Any client written
+# against api.microsoft.ai works here by changing only the base URL.
+# webiq_endpoint overrides the upstream the proxy calls; leave it empty to use
+# the endpoint the specification defines.
 # The proxy never searches on a model's behalf: clients declare the
 # 'webiq_search' function tool, the model decides whether and what to search,
 # and the client executes the tool call against that endpoint. The built-in
 # chat UI (/chat) does this automatically when the Web IQ toggle is on.
 # The key stays on this server and is never sent to the UI or to Copilot.
-# passage format is recommended because full HTML can consume many model tokens.
-# webiq_max_results is the default when a tool call does not specify one (1-10).
-# webiq_max_length caps each result's content locally, bounding tool-result size.
+#
+# The settings below are DEFAULTS for parameters a request omits; a request may
+# override any of them. passage format is recommended for LLM tool use because
+# full HTML can consume many model tokens.
 enable_webiq_search: false
 webiq_api_key: ""
-webiq_endpoint: "https://api.microsoftol.com/v3/search/web"
+webiq_endpoint: ""
 webiq_max_results: 5
 webiq_max_length: 3000
 webiq_content_format: "passage"
@@ -249,7 +254,12 @@ webiq_language: "en"
 webiq_region: "US"
 webiq_safe_search: "strict"
 webiq_timeout: 30
-# Every /v1/webiq/search call (query, upstream payload, results or error) is
+# Hard ceilings a request cannot exceed, protecting the shared paid key.
+# They default to the official maxima, so out of the box this endpoint accepts
+# everything the real API accepts. Lower them to bound cost per search.
+webiq_max_results_cap: 50
+webiq_max_length_cap: 500000
+# Every /v3/search/web call (query, upstream payload, results or error) is
 # appended to <config_dir>/webiq/YYYY-MM-DD.jl and the newest
 # webiq_log_max_entries are kept in memory for the dashboard's Web IQ Searches
 # panel. Unlike save_request_to_file these records are small, so logging is on

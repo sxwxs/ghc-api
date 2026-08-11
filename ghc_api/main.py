@@ -267,21 +267,33 @@ def main():
         if 'webiq_api_key' in config:
             state.webiq_api_key = str(config['webiq_api_key'] or '')
         if 'webiq_endpoint' in config:
-            state.webiq_endpoint = str(config['webiq_endpoint'] or state.webiq_endpoint)
+            state.webiq_endpoint = str(config['webiq_endpoint'] or '')
         if 'webiq_max_results' in config:
-            # Clamp to the same limit the webiq_search tool contract advertises,
-            # so a larger config value cannot look accepted but be capped later.
-            state.webiq_max_results = max(1, min(webiq.MAX_RESULTS_LIMIT, int(config['webiq_max_results'])))
+            state.webiq_max_results = max(1, min(webiq.RESULTS_MAX, int(config['webiq_max_results'])))
         if 'webiq_max_length' in config:
-            state.webiq_max_length = max(1, min(500000, int(config['webiq_max_length'])))
+            state.webiq_max_length = max(1, min(webiq.LENGTH_MAX, int(config['webiq_max_length'])))
+        if 'webiq_max_results_cap' in config:
+            state.webiq_max_results_cap = max(1, min(webiq.RESULTS_MAX, int(config['webiq_max_results_cap'])))
+        if 'webiq_max_length_cap' in config:
+            state.webiq_max_length_cap = max(1, min(webiq.LENGTH_MAX, int(config['webiq_max_length_cap'])))
+        # Enumerated parameters are validated at load time, so a typo fails the
+        # start instead of turning every single search into an upstream 400.
         if 'webiq_content_format' in config:
-            state.webiq_content_format = str(config['webiq_content_format'])
+            content_format = str(config['webiq_content_format'])
+            if content_format not in webiq.CONTENT_FORMATS:
+                raise ValueError(
+                    f"webiq_content_format must be one of: {', '.join(webiq.CONTENT_FORMATS)}")
+            state.webiq_content_format = content_format
         if 'webiq_language' in config:
             state.webiq_language = str(config['webiq_language'])
         if 'webiq_region' in config:
             state.webiq_region = str(config['webiq_region'])
         if 'webiq_safe_search' in config:
-            state.webiq_safe_search = str(config['webiq_safe_search'])
+            safe_search = str(config['webiq_safe_search'])
+            if safe_search not in webiq.SAFE_SEARCH_VALUES:
+                raise ValueError(
+                    f"webiq_safe_search must be one of: {', '.join(webiq.SAFE_SEARCH_VALUES)}")
+            state.webiq_safe_search = safe_search
         if 'webiq_timeout' in config:
             state.webiq_timeout = max(1, int(config['webiq_timeout']))
         if 'log_webiq_requests' in config:
@@ -375,6 +387,8 @@ def main():
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
+    if webiq.is_configured(state):
+        print(f"Web Search v3 API: http://{host}:{port}/v3/search/web")
 
     serve_app(app, host=host, port=port, debug=debug)
 

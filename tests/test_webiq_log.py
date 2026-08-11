@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 from ghc_api.app import create_app
+from ghc_api.routes.webiq import SEARCH_PATH
 from ghc_api.state import state
 from ghc_api.webiq_log import MAX_MEMORY_ENTRIES_LIMIT, WebIQLog, webiq_log
 
@@ -108,27 +109,31 @@ class WebIQRouteLoggingTest(unittest.TestCase):
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_successful_search_is_recorded(self, search_mock):
-        def fake_search(query, settings, max_results=None, trace=None):
+        def fake_search(payload, settings, trace=None):
             trace.update({
-                "endpoint": "https://api.microsoftol.com/v3/search/web",
-                "request": {"query": query, "maxResults": 5},
+                "endpoint": "https://api.microsoft.ai/v3/search/web",
+                "request": {"query": payload["query"], "maxResults": 5},
                 "status_code": 200,
             })
-            return [{"title": "t", "url": "u", "content": "c"}]
+            return {"webResults": [{"title": "t", "url": "u", "content": "c"}],
+                    "traceId": "trace-1"}
 
         search_mock.side_effect = fake_search
 
-        res = self.client.post("/v1/webiq/search", json={"query": "python"})
+        res = self.client.post(SEARCH_PATH, json={"query": "python"})
 
         self.assertEqual(res.status_code, 200)
         entries = webiq_log.recent()
         self.assertEqual(len(entries), 1)
         entry = entries[0]
+        # The logged query is the one that actually went upstream.
         self.assertEqual(entry["query"], "python")
         self.assertEqual(entry["state"], "completed")
         self.assertEqual(entry["status_code"], 200)
         self.assertEqual(entry["result_count"], 1)
         self.assertEqual(entry["results"], [{"title": "t", "url": "u", "content": "c"}])
+        # A trace id is the first thing upstream support asks for.
+        self.assertEqual(entry["trace_id"], "trace-1")
         self.assertEqual(entry["request_body"], {"query": "python"})
         self.assertEqual(entry["upstream"]["status_code"], 200)
         self.assertEqual(entry["upstream"]["request"], {"query": "python", "maxResults": 5})
@@ -139,14 +144,15 @@ class WebIQRouteLoggingTest(unittest.TestCase):
     def test_upstream_failure_is_recorded(self, search_mock):
         from ghc_api.webiq import WebIQError
 
-        def failing_search(query, settings, max_results=None, trace=None):
-            trace["endpoint"] = "https://api.microsoftol.com/v3/search/web"
+        def failing_search(payload, settings, trace=None):
+            trace["endpoint"] = "https://api.microsoft.ai/v3/search/web"
+            trace["request"] = {"query": payload["query"]}
             trace["status_code"] = 429
             raise WebIQError("Web IQ returned HTTP 429.", 429)
 
         search_mock.side_effect = failing_search
 
-        res = self.client.post("/v1/webiq/search", json={"query": "python"})
+        res = self.client.post(SEARCH_PATH, json={"query": "python"})
 
         self.assertEqual(res.status_code, 429)
         entry = webiq_log.recent()[0]
@@ -157,7 +163,7 @@ class WebIQRouteLoggingTest(unittest.TestCase):
         self.assertEqual(entry["result_count"], 0)
 
     def test_rejected_request_is_recorded(self):
-        res = self.client.post("/v1/webiq/search", json={"query": "  "})
+        res = self.client.post(SEARCH_PATH, json={"query": "  "})
 
         self.assertEqual(res.status_code, 400)
         entry = webiq_log.recent()[0]
@@ -173,7 +179,7 @@ class WebIQRouteLoggingTest(unittest.TestCase):
                 "json.return_value": {"webResults": [{"title": "t", "url": "u", "content": "c"}]}
             })
 
-            res = self.client.post("/v1/webiq/search", json={"query": "python"})
+            res = self.client.post(SEARCH_PATH, json={"query": "python"})
 
         self.assertEqual(res.status_code, 200)
         recorded = json.dumps(webiq_log.recent()[0])
@@ -273,7 +279,6 @@ class WebIQRequestListTest(unittest.TestCase):
 
     def setUp(self):
         from ghc_api.cache import RequestCache
-        from ghc_api.routes import webiq as webiq_routes
 
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
@@ -293,19 +298,19 @@ class WebIQRequestListTest(unittest.TestCase):
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_search_shows_up_in_the_request_list(self, search_mock):
-        def fake_search(query, settings, max_results=None, trace=None):
-            trace.update({"endpoint": "https://api.microsoftol.com/v3/search/web",
-                          "request": {"query": query}, "status_code": 200})
-            return [{"title": "t", "url": "u", "content": "c"}]
+        def fake_search(payload, settings, trace=None):
+            trace.update({"endpoint": "https://api.microsoft.ai/v3/search/web",
+                          "request": {"query": payload["query"]}, "status_code": 200})
+            return {"webResults": [{"title": "t", "url": "u", "content": "c"}]}
 
         search_mock.side_effect = fake_search
 
-        self.client.post("/v1/webiq/search", json={"query": "python"})
+        self.client.post(SEARCH_PATH, json={"query": "python"})
 
         listing = self.client.get("/api/requests").get_json()
         self.assertEqual(listing["total"], 1)
         item = listing["items"][0]
-        self.assertEqual(item["endpoint"], "/v1/webiq/search")
+        self.assertEqual(item["endpoint"], SEARCH_PATH)
         self.assertEqual(item["model"], "webiq_search")
         self.assertEqual(item["status_code"], 200)
         self.assertEqual(item["state"], "completed")
@@ -316,19 +321,22 @@ class WebIQRequestListTest(unittest.TestCase):
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_detail_view_carries_request_and_response_bodies(self, search_mock):
-        search_mock.return_value = [{"title": "t", "url": "u", "content": "c"}]
+        upstream = {"webResults": [{"title": "t", "url": "u", "content": "c"}],
+                    "traceId": "trace-2"}
+        search_mock.return_value = upstream
 
-        self.client.post("/v1/webiq/search", json={"query": "python", "max_results": 3})
+        self.client.post(SEARCH_PATH, json={"query": "python", "maxResults": 3})
 
         entry_id = self.client.get("/api/requests").get_json()["items"][0]["id"]
         detail = self.client.get(f"/api/request/{entry_id}").get_json()
-        self.assertEqual(detail["request_body"], {"query": "python", "max_results": 3})
-        self.assertEqual(detail["response_body"]["results"], [{"title": "t", "url": "u", "content": "c"}])
+        self.assertEqual(detail["request_body"], {"query": "python", "maxResults": 3})
+        # What is recorded is the upstream body, unedited.
+        self.assertEqual(detail["response_body"], upstream)
         # Both logs must describe the same search.
         self.assertEqual(webiq_log.recent()[0]["id"], entry_id)
 
     def test_failed_search_is_listed_as_an_error(self):
-        self.client.post("/v1/webiq/search", json={"query": "  "})
+        self.client.post(SEARCH_PATH, json={"query": "  "})
 
         item = self.client.get("/api/requests").get_json()["items"][0]
         self.assertEqual(item["state"], "error")
@@ -336,13 +344,13 @@ class WebIQRequestListTest(unittest.TestCase):
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_search_is_findable_by_full_text(self, search_mock):
-        search_mock.return_value = []
+        search_mock.return_value = {"webResults": []}
 
-        self.client.post("/v1/webiq/search", json={"query": "quantum computing"})
+        self.client.post(SEARCH_PATH, json={"query": "quantum computing"})
 
         found = self.client.get("/api/requests/search?q=quantum").get_json()
         self.assertEqual(found["total"], 1)
-        self.assertEqual(found["items"][0]["endpoint"], "/v1/webiq/search")
+        self.assertEqual(found["items"][0]["endpoint"], SEARCH_PATH)
 
 
 if __name__ == "__main__":
