@@ -44,7 +44,7 @@ class HopByHopHeaderTest(unittest.TestCase):
 
         root = pathlib.Path(__file__).resolve().parent.parent
         for rel in SSE_MODULES:
-            source = (root / rel).read_text()
+            source = (root / rel).read_text(encoding="utf-8")
             for header in HOP_BY_HOP:
                 self.assertNotIn(
                     f'"{header.title()}": ',
