@@ -83,14 +83,19 @@ class State:
         # from config.yaml; it is never exposed to browser clients.
         self.enable_webiq_search: bool = False
         self.webiq_api_key: str = ""
-        self.webiq_endpoint: str = "https://api.microsoftol.com/v3/search/web"
-        self.webiq_max_results: int = 5
-        self.webiq_max_length: int = 3000
-        self.webiq_content_format: str = "passage"
-        self.webiq_language: str = "en"
-        self.webiq_region: str = "US"
-        self.webiq_safe_search: str = "strict"
+        # Empty means the spec endpoint (webiq.ENDPOINT). Override for a mock, a
+        # recording proxy or a regional deployment. The URL is deliberately not
+        # duplicated here: two copies of it is how a wrong host survived before.
+        self.webiq_endpoint: str = ""
+        # There are deliberately no search-parameter settings. /v3/search/web is
+        # a transparent proxy: the client's body is forwarded as received, so
+        # every default is Microsoft's. Server-side defaults would silently make
+        # this endpoint disagree with the API it claims to be.
         self.webiq_timeout: int = 30
+        # Append every /v3/search/web request and response to a daily .jl file
+        # under <config_dir>/webiq/. On by default: unlike the LLM request
+        # dumps, this is the only untruncated record of a search.
+        self.log_webiq_requests: bool = True
 
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses,
@@ -108,6 +113,10 @@ class State:
 
         # Background worker guards
         self.token_usage_reporter_started: bool = False
+
+        # WSGI server thread pool. Every streaming request holds a thread for
+        # its whole lifetime, so this bounds concurrent chat streams.
+        self.server_threads: int = 16
 
     @property
     def editor_plugin_version(self) -> str:

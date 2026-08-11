@@ -24,10 +24,12 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
 - **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
+- **Microsoft Web IQ Search**: `/v3/search/web`, a transparent proxy for the official Web Search v3 API, backed by a server-held API key
 
 ## Maintenance Guides
 
 - [Anthropic Messages to Responses compatibility warning runbook](ANTHROPIC_RESPONSES_WARNING_RUNBOOK.md)
+- [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 
 ## Installation
 
@@ -276,6 +278,8 @@ When `save_request_to_file: true`, ghc-api appends each completed request to:
 
 The saved `.jl` line format is the same as dashboard export (`/api/requests/export`) and can be imported by dashboard import (`/api/requests/import`).
 
+Web IQ searches are recorded as requests too (model name `webiq_search`, zero tokens), so they appear in these files, in `/api/stats` and in the request statistics alongside LLM traffic. That copy obeys `cache_max_request_size` like any other; the untruncated record of a search lives in `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`.
+
 Open `/request-stats` to select one or more daily files and generate request-size, request-duration, and billing-token distributions overall, by model, or by exact HTTP response code. Scans run asynchronously and write one lightweight JSONL sidecar plus metadata per request file under `requests/.request-stats-index/`. Each sidecar row stores scalar metrics and the source byte offset/length/hash, never request/response bodies or headers. If a source file is unchanged its sidecar is reused without reopening the source; append-only growth is indexed incrementally, while truncated, replaced, corrupt, or incompatible files are rebuilt safely.
 
 Histogram bars are interactive: selecting a bucket shows the exact indexed requests that contributed to it. Each result opens a stable `/request-file-detail` link which seeks directly to the original `.jl` line and verifies its SHA-256 before returning the complete persisted record. These links remain valid while the source file is unchanged; a changed source reports that the index must be rebuilt. Detail rendering is capped at 4 MiB per JSONL line.
@@ -311,7 +315,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, `/v3/search/web`, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -392,6 +396,56 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 ### Anthropic Compatible
 
 - `POST /v1/messages` - Messages API (Anthropic format)
+
+### Microsoft Web IQ Search
+
+- `POST /v3/search/web` - Web Search v3, backed by the server-held Web IQ API key
+
+A transparent proxy for the [official Microsoft Web Search v3
+API](https://webiq.microsoft.ai/documentation/api-reference/web/). The request
+body is forwarded as the bytes the client sent, and the upstream status, headers
+and body come back verbatim. A client written against `api.microsoft.ai` works
+here by changing only the base URL — the same deal the OpenAI- and
+Anthropic-shaped endpoints offer.
+
+```bash
+curl -X POST http://localhost:8313/v3/search/web \
+  -H "content-type: application/json" \
+  -d '{"query": "latest trends in LLM RAG", "maxResults": 10, "contentFormat": "passage"}'
+```
+
+What the proxy adds is key custody (`webiq_api_key` never leaves the server), the
+optional user-token auth gate, and logging. It adds nothing to the search itself:
+
+- **There are no server-side search settings.** Every parameter and every default
+  is Microsoft's, including the defaults for what a request omits (`maxResults`
+  10, `contentFormat` html, `maxLength` 10000). A server-side default would
+  silently make this endpoint disagree with the API it claims to be. If you want
+  passage format, ask for it in the request — that is what `/chat` and
+  `scripts/webiq_search_demo.py` do.
+- **There is no parameter whitelist and no local validation.** A parameter
+  Microsoft adds tomorrow works here today, and an invalid request gets the
+  authoritative upstream error instead of an imitation of it.
+- **Errors and error headers are passed through too**, so `Retry-After` on a 429
+  reaches the client that has to back off. The single exception is upstream
+  401/403: those mean *this server's* key was rejected, so they surface as 503
+  with an explicit message rather than being confused with this proxy rejecting
+  the caller's token.
+- **A client's own `x-apikey` is ignored**, never forwarded, and redacted before
+  the request is logged. Searches always spend this server's key and quota.
+
+The proxy never searches on a model's behalf. Clients declare the `webiq_search`
+function tool, the model decides whether and what to search, and the client
+executes the tool call against this endpoint; `/chat` does that automatically
+when the Web IQ toggle is on. That tool schema stays narrow (`query`,
+`max_results`) on purpose — it is a prompt surface, not the API — so the client
+is what turns those arguments into a full official request. See
+`scripts/webiq_search_demo.py`.
+
+Every call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
+(`log_webiq_requests`, on by default), which is the only untruncated record of a
+search, and added to the shared request cache so it appears in the request list,
+full-text search, detail view and export under the model name `webiq_search`.
 
 ### Configured Upstream Proxy
 
@@ -542,7 +596,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v3/search/web`, configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |

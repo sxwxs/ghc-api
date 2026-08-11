@@ -314,6 +314,21 @@ def extract_token(request) -> Optional[str]:
     return None
 
 
+# Header names (lower-case) whose value is a credential and must never reach
+# the request cache, the dashboard, an export or requests/*.jl.
+# 'x-apikey' is the spelling the Microsoft Web Search v3 API uses: a client
+# that points at /v3/search/web by "only changing the base URL" still sends
+# its own key in that header, and this proxy must not write it down.
+REDACTED_HEADERS = frozenset({
+    "authorization",
+    "proxy-authorization",
+    "x-api-key",
+    "x-apikey",
+    "api-key",
+    "ocp-apim-subscription-key",
+})
+
+
 def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of `headers` with auth values replaced by '***REDACTED***'.
     Used before persisting request headers to the cache, so the dashboard
@@ -322,8 +337,7 @@ def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
         return headers
     redacted = dict(headers)
     for key in list(redacted.keys()):
-        lower = key.lower()
-        if lower in ("authorization", "x-api-key", "proxy-authorization"):
+        if key.lower() in REDACTED_HEADERS:
             redacted[key] = "***REDACTED***"
     return redacted
 

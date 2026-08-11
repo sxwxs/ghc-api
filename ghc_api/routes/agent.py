@@ -175,7 +175,6 @@ def api_send_prompt(session_id: str):
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )

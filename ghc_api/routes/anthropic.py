@@ -567,7 +567,6 @@ def _stream_pending_direct_anthropic_request(
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
@@ -1354,7 +1353,6 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )

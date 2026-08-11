@@ -651,7 +651,6 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
@@ -1280,7 +1279,6 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         mimetype="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
     )
