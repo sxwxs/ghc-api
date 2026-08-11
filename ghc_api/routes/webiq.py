@@ -4,33 +4,43 @@ Web IQ search endpoint.
 Exposes the server-held Web IQ key as a callable search API so that clients
 can execute a ``webiq_search`` tool call without ever seeing the key.
 
-The path, the request body and the response body are the official Microsoft
-Web Search v3 contract (``POST /v3/search/web``), verbatim. Point any client
-written against ``api.microsoft.ai`` at this proxy by changing the base URL --
-the same deal the OpenAI- and Anthropic-shaped endpoints in this project
-offer. Server configuration supplies defaults and hard caps for the outgoing
-request; the upstream response is returned untouched.
+``POST /v3/search/web`` is the official Microsoft Web Search v3 contract:
+https://webiq.microsoft.ai/documentation/api-reference/web/
 
-Every call is recorded twice: in the dedicated Web IQ log (a daily ``.jl``
-file plus the ring buffer behind the dashboard's Web IQ panel) and in the
-shared request cache, so searches appear in the request list alongside the
-LLM requests.
+It is a transparent proxy. The request body is forwarded as the raw bytes the
+client sent, and the upstream status, headers and body are returned verbatim,
+including error responses and ``Retry-After``. Point any client written
+against ``api.microsoft.ai`` at this proxy by changing the base URL -- the
+same deal the OpenAI- and Anthropic-shaped endpoints in this project offer.
+
+What the proxy adds is key custody (the client's own ``x-apikey`` is ignored
+and redacted, never forwarded), the optional user-token auth gate, and
+logging. Each call is written to the shared request cache -- so it appears in
+the request list, full-text search, detail view and export next to the LLM
+requests, under the model name ``webiq_search`` -- and appended in full to
+``<config_dir>/webiq/YYYY-MM-DD.jl``, which is the only untruncated copy.
 """
 
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional, Tuple
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, Response, g, jsonify, request
 
 from ..auth import ANONYMOUS_USER_ID, redact_auth_headers
 from ..cache import cache
 from ..counters import counters
 from ..state import state
 from ..utils import get_client_ip
-from ..webiq import WebIQError, search, web_results
-from ..webiq_log import STATE_COMPLETED, STATE_ERROR, webiq_log
+from ..webiq import (
+    WebIQError,
+    endpoint_for,
+    passthrough_headers,
+    result_count,
+    search,
+)
+from ..webiq_log import STATE_COMPLETED, STATE_ERROR, record_search_to_file
 
 webiq_bp = Blueprint("webiq", __name__)
 
@@ -41,69 +51,75 @@ SEARCH_PATH = "/v3/search/web"
 REQUEST_LIST_MODEL = "webiq_search"
 
 
+def _decode(raw: bytes) -> Any:
+    """Best-effort view of a body for logging only.
+
+    Parsed JSON when it is JSON, the decoded text otherwise. Logging must
+    never depend on the body being well-formed -- the whole point of the
+    transparent proxy is that upstream, not this server, decides that.
+    """
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return raw.decode("utf-8", errors="replace")
+
+
 def _record_search(
     *,
     request_id: str,
     started: float,
-    request_body: Any,
-    trace: Dict[str, Any],
-    response_body: Optional[Dict[str, Any]] = None,
-    status_code: int = 200,
+    request_bytes: bytes,
+    status_code: int,
+    response_bytes: bytes = b"",
+    response_body: Any = None,
+    upstream_status: Optional[int] = None,
     error: Optional[str] = None,
 ) -> None:
-    """Record one search in both logs. Never raises into the request path.
+    """Record one search in both places. Never raises into the request path.
 
     Two destinations on purpose:
-      * webiq_log - the dedicated Web IQ log (daily .jl file plus the ring
-        buffer behind the dashboard's Web IQ panel), which keeps the search
-        specifics: query, upstream payload, upstream status.
-      * cache - the shared request cache, so a search also shows up in the
-        request list, full-text search, detail view and export next to the
-        LLM requests.
-
-    The query recorded is the one that actually went upstream (from ``trace``),
-    which is also the one the client sent: normalization only collapses
-    whitespace, and anything it would have to alter is rejected instead.
+      * the daily .jl file - full fidelity, nothing truncated;
+      * the shared request cache - so a search shows up in the request list,
+        full-text search, detail view and export next to the LLM requests.
+        That copy is subject to cache_max_request_size like any other entry.
     """
     client_ip = get_client_ip(request)
     user_id = getattr(g, "user_id", ANONYMOUS_USER_ID) or ANONYMOUS_USER_ID
     duration = time.time() - started
-    upstream_request = trace.get("request") or {}
-    query = upstream_request.get("query") if isinstance(upstream_request, dict) else None
-    logged_body: Dict[str, Any] = (
-        {"error": {"message": error, "type": "webiq_search_error"}}
-        if error is not None
-        else (response_body or {})
-    )
-    results: List[Any] = [] if error is not None else web_results(response_body or {})
+    request_body = _decode(request_bytes)
+    query = request_body.get("query") if isinstance(request_body, dict) else None
+    state_label = STATE_COMPLETED if status_code < 400 else STATE_ERROR
+
+    entry = {
+        "id": request_id,
+        "timestamp": int(started),
+        "type": "webiq_search",
+        "endpoint": SEARCH_PATH,
+        "client_ip": client_ip,
+        "user_id": user_id,
+        "query": query,
+        "request_body": request_body,
+        "upstream": {
+            "endpoint": endpoint_for(state),
+            # None when the request never reached upstream (unconfigured
+            # server, connection failure), which is itself worth seeing.
+            "status_code": upstream_status,
+        },
+        "response_body": response_body,
+        "result_count": result_count(response_body),
+        # Kept as its own field because a trace id is what upstream support
+        # asks for first, and it should be greppable in the .jl file.
+        "trace_id": response_body.get("traceId") if isinstance(response_body, dict) else None,
+        "status_code": status_code,
+        "error": error,
+        "duration_ms": int(duration * 1000),
+        "state": state_label,
+    }
 
     try:
-        webiq_log.record({
-            "id": request_id,
-            "timestamp": int(started),
-            "endpoint": SEARCH_PATH,
-            "client_ip": client_ip,
-            "user_id": user_id,
-            "query": query,
-            # What the client asked for, and what actually went upstream. The
-            # two differ whenever a default or a cap kicked in.
-            "request_body": request_body,
-            "upstream": {
-                "endpoint": trace.get("endpoint"),
-                "request": trace.get("request"),
-                "status_code": trace.get("status_code"),
-            },
-            "results": results,
-            "result_count": len(results),
-            # Kept out of "results" so the dashboard keeps rendering a plain
-            # list, but preserved because a trace id is what upstream support
-            # asks for first.
-            "trace_id": (response_body or {}).get("traceId") if response_body else None,
-            "status_code": status_code,
-            "error": error,
-            "duration_ms": int(duration * 1000),
-            "state": STATE_COMPLETED if error is None else STATE_ERROR,
-        })
+        record_search_to_file(entry)
     except Exception as exc:  # pragma: no cover - logging must never break search
         print(f"[WebIQ] failed to record search: {exc}")
 
@@ -112,12 +128,12 @@ def _record_search(
             "client_ip": client_ip,
             "request_headers": redact_auth_headers(dict(request.headers)),
             "request_body": request_body,
-            "response_body": logged_body,
+            "response_body": response_body,
             "model": REQUEST_LIST_MODEL,
             "endpoint": SEARCH_PATH,
             "status_code": status_code,
-            "request_size": len(json.dumps(request_body)) if request_body is not None else 0,
-            "response_size": len(json.dumps(logged_body, default=str)),
+            "request_size": len(request_bytes),
+            "response_size": len(response_bytes),
             "duration": round(duration, 3),
             "user_id": user_id,
             # A search spends Web IQ quota, not model tokens; leaving these at
@@ -129,47 +145,74 @@ def _record_search(
         print(f"[WebIQ] failed to add the search to the request cache: {exc}")
 
 
+def _error_response(message: str, status_code: int) -> Tuple[Response, int]:
+    return jsonify({"error": {
+        "message": message,
+        "type": "webiq_search_error",
+    }}), status_code
+
+
 @webiq_bp.route(SEARCH_PATH, methods=["POST"])
 def webiq_search():
-    """Run one Web Search v3 request with the server-held key.
+    """Proxy one Web Search v3 request using the server-held key.
 
-    Request and response are the official contract; see webiq_web.md. All
-    validation, defaulting and capping happens on the way out, so the body
-    returned here is exactly what upstream produced.
+    The body goes upstream as received and the upstream response comes back
+    verbatim, so the contract is Microsoft's, not this project's:
+    https://webiq.microsoft.ai/documentation/api-reference/web/
     """
     started = time.time()
     request_id = str(uuid.uuid4())
-    payload = request.get_json(silent=True)
+    request_bytes = request.get_data()
 
-    trace: Dict[str, Any] = {}
     try:
-        body = search(payload, state, trace=trace)
+        upstream = search(
+            request_bytes,
+            state,
+            content_type=request.headers.get("content-type", "application/json"),
+        )
     except WebIQError as exc:
+        # Only reached when there is no upstream response to pass through.
         counters.incr("webiq.search_error")
         print(f"[WebIQ] search failed: {exc}")
+        response, status = _error_response(str(exc), exc.status_code)
         _record_search(
             request_id=request_id,
             started=started,
-            request_body=payload,
-            trace=trace,
-            status_code=exc.status_code,
+            request_bytes=request_bytes,
+            status_code=status,
+            response_bytes=response.get_data(),
+            response_body=response.get_json(),
             error=str(exc),
         )
-        return jsonify({"error": {
-            "message": str(exc),
-            "type": "webiq_search_error",
-        }}), exc.status_code
+        return response, status
 
-    counters.incr("webiq.search")
-    elapsed = time.time() - started
+    response_bytes = upstream.content
+    body = _decode(response_bytes)
+
+    if upstream.ok:
+        counters.incr("webiq.search")
+    else:
+        counters.incr("webiq.search_error")
+
     _record_search(
         request_id=request_id,
         started=started,
-        request_body=payload,
-        trace=trace,
+        request_bytes=request_bytes,
+        status_code=upstream.status_code,
+        response_bytes=response_bytes,
         response_body=body,
+        upstream_status=upstream.status_code,
     )
-    results = web_results(body)
-    query = (trace.get("request") or {}).get("query")
-    print(f"[WebIQ] query={query!r} results={len(results)} in {elapsed:.2f}s")
-    return jsonify(body)
+
+    count = result_count(body)
+    query = request.get_json(silent=True)
+    query = query.get("query") if isinstance(query, dict) else None
+    print(f"[WebIQ] query={query!r} status={upstream.status_code} "
+          f"results={count if count is not None else '-'} "
+          f"in {time.time() - started:.2f}s")
+
+    return Response(
+        response_bytes,
+        status=upstream.status_code,
+        headers=passthrough_headers(upstream.headers),
+    )

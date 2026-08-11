@@ -6,11 +6,13 @@ The proxy never searches on your behalf. This script shows the contract:
   2. when the model emits a tool call, POST the query to /v3/search/web
   3. feed the result back as ``function_call_output`` and continue
 
-/v3/search/web is the official Microsoft Web Search v3 API, request and
-response verbatim; the proxy only supplies the key, caps and logging. Note the
-translation in run_search: the model-facing tool takes ``max_results`` because
-a narrow tool schema is easier for a model to fill in correctly, while the
-HTTP call uses the official ``maxResults``.
+/v3/search/web is a transparent proxy for the official Microsoft Web Search v3
+API (https://webiq.microsoft.ai/documentation/api-reference/web/): the request
+body is forwarded as sent and the response comes back verbatim. The proxy
+supplies only the API key and the logging, and applies no defaults of its own,
+so this client sends the full official request -- note the translation in
+run_search, where the narrow model-facing ``max_results`` becomes the official
+``maxResults`` alongside the passage settings that keep a tool result small.
 
 The Web IQ API key lives in the server's config.yaml and is never seen here.
 """
@@ -52,9 +54,14 @@ def run_search(base_url: str, arguments: str) -> str:
     except ValueError:
         return json.dumps({"error": "Tool arguments were not valid JSON."})
 
-    body = {"query": args.get("query")}
-    if args.get("max_results"):
-        body["maxResults"] = args["max_results"]
+    # The proxy applies no defaults, so anything omitted here gets Microsoft's
+    # default (10 results, full HTML, 10000 chars) -- expensive in model tokens.
+    body = {
+        "query": args.get("query"),
+        "maxResults": args.get("max_results") or 5,
+        "contentFormat": "passage",
+        "maxLength": 3000,
+    }
 
     response = requests.post(
         f"{base_url}/v3/search/web",
@@ -64,7 +71,10 @@ def run_search(base_url: str, arguments: str) -> str:
     payload = response.json()
     if not response.ok:
         # A failed search is data for the model, not a failed conversation.
-        message = payload.get("error", {}).get("message", f"HTTP {response.status_code}")
+        # The body is whatever upstream sent, so do not assume a shape.
+        message = f"HTTP {response.status_code}"
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            message = payload["error"].get("message", message)
         return json.dumps({"error": f"Web search failed: {message}"})
 
     results = payload.get("webResults") or []

@@ -600,30 +600,6 @@
                 </tbody>
             </table>
         </div>
-
-        <div class="section">
-            <div class="header-row">
-                <h2>Recent Web IQ Searches</h2>
-                <button class="refresh-btn" onclick="loadWebIQRequests()">Refresh</button>
-            </div>
-            <p style="color:#888; font-size:12px; margin:0 0 8px;" id="webiq-log-summary"></p>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Timestamp</th>
-                        <th>Query</th>
-                        <th>User</th>
-                        <th>Client IP</th>
-                        <th>State</th>
-                        <th>Status</th>
-                        <th>Results</th>
-                        <th>Duration</th>
-                    </tr>
-                </thead>
-                <tbody id="webiq-requests-body">
-                </tbody>
-            </table>
-        </div>
     </div>
 
     <!-- Modal for request details -->
@@ -908,146 +884,6 @@
             }
         }
 
-        function escapeHtml(text) {
-            return String(text === null || text === undefined ? '' : text)
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;');
-        }
-
-        async function loadWebIQRequests() {
-            const tbody = document.getElementById('webiq-requests-body');
-            const summary = document.getElementById('webiq-log-summary');
-            try {
-                const userId = document.getElementById('user-filter').value;
-                const url = userId
-                    ? `/api/webiq/requests?user=${encodeURIComponent(userId)}`
-                    : '/api/webiq/requests';
-                const response = await fetch(url);
-                const data = await response.json();
-                const stats = data.stats || {};
-
-                summary.textContent = [
-                    `${formatNumber(stats.total_searches || 0)} searches since start`,
-                    `${formatNumber(stats.failed_searches || 0)} failed`,
-                    `newest ${formatNumber(stats.max_entries || 0)} kept in memory`,
-                    data.logging_enabled ? `logged to ${data.log_dir}` : 'file logging disabled',
-                    data.configured ? '' : 'Web IQ not configured'
-                ].filter(Boolean).join(' · ');
-
-                tbody.innerHTML = '';
-                const items = data.items || [];
-                if (items.length === 0) {
-                    const row = document.createElement('tr');
-                    row.innerHTML = '<td colspan="8" style="color:#888;">No Web IQ searches recorded yet.</td>';
-                    tbody.appendChild(row);
-                    return;
-                }
-
-                for (const item of items) {
-                    const row = document.createElement('tr');
-                    row.onclick = () => showWebIQDetails(item.id);
-                    const state = item.state || 'completed';
-                    const duration = item.duration_ms !== undefined && item.duration_ms !== null
-                        ? `${(item.duration_ms / 1000).toFixed(2)}s`
-                        : '-';
-                    const query = item.query || (item.error ? '(rejected)' : '-');
-                    row.innerHTML = `
-                        <td>${formatRequestDate(item.timestamp).toLocaleString()}</td>
-                        <td title="${escapeHtml(item.error || query)}">${escapeHtml(query)}</td>
-                        <td>${escapeHtml(item.user_id || '-')}</td>
-                        <td>${escapeHtml(item.client_ip || '-')}</td>
-                        <td><span class="state-badge ${state}">${getStateLabel(state)}</span></td>
-                        <td>${item.status_code !== undefined && item.status_code !== null ? item.status_code : '-'}</td>
-                        <td>${formatNumber(item.result_count || 0)}</td>
-                        <td>${duration}</td>
-                    `;
-                    tbody.appendChild(row);
-                }
-            } catch (error) {
-                console.error('Failed to load Web IQ searches:', error);
-            }
-        }
-
-        async function showWebIQDetails(entryId) {
-            try {
-                const response = await fetch(`/api/webiq/request/${entryId}`);
-                const data = await response.json();
-                if (!response.ok) {
-                    throw new Error(data.error || `HTTP ${response.status}`);
-                }
-
-                const state = data.state || 'completed';
-                const upstream = data.upstream || {};
-                document.getElementById('overview-content').innerHTML = `
-                    <div class="overview-item">
-                        <label>Search ID</label>
-                        <div class="value">${escapeHtml(data.id)}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Timestamp</label>
-                        <div class="value">${formatRequestDate(data.timestamp).toLocaleString()}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Query</label>
-                        <div class="value">${escapeHtml(data.query || '-')}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Endpoint</label>
-                        <div class="value">${escapeHtml(data.endpoint || '-')}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Upstream</label>
-                        <div class="value">${escapeHtml(upstream.endpoint || '-')}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Upstream Status</label>
-                        <div class="value">${upstream.status_code !== undefined && upstream.status_code !== null ? upstream.status_code : '-'}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>User</label>
-                        <div class="value">${escapeHtml(data.user_id || '-')}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Client IP</label>
-                        <div class="value">${escapeHtml(data.client_ip || '-')}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>State</label>
-                        <div class="value"><span class="state-badge ${state}">${getStateLabel(state)}</span></div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Status Code</label>
-                        <div class="value">${data.status_code !== undefined && data.status_code !== null ? data.status_code : '-'}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Results</label>
-                        <div class="value">${formatNumber(data.result_count || 0)}</div>
-                    </div>
-                    <div class="overview-item">
-                        <label>Duration</label>
-                        <div class="value">${data.duration_ms !== undefined && data.duration_ms !== null ? (data.duration_ms / 1000).toFixed(2) + 's' : '-'}</div>
-                    </div>
-                    ${data.error ? `<div class="overview-item">
-                        <label>Error</label>
-                        <div class="value">${escapeHtml(data.error)}</div>
-                    </div>` : ''}
-                `;
-
-                document.getElementById('request-json').innerHTML = syntaxHighlight({
-                    client_request: data.request_body || {},
-                    upstream_request: upstream.request || {}
-                });
-                document.getElementById('response-json').innerHTML = syntaxHighlight(
-                    data.error ? { error: data.error, results: data.results || [] } : (data.results || [])
-                );
-                document.getElementById('request-modal').classList.add('active');
-            } catch (error) {
-                console.error('Failed to load Web IQ search details:', error);
-            }
-        }
-
         async function showRequestDetails(requestId) {
             try {
                 const response = await fetch(`/api/request/${requestId}`);
@@ -1261,21 +1097,16 @@
         loadUserFilterOptions();
         loadStats();
         loadRecentRequests();
-        loadWebIQRequests();
         refreshConfigManagerStatus();
 
         // Reload stats whenever the user filter changes.
-        document.getElementById('user-filter').addEventListener('change', () => {
-            loadStats();
-            loadWebIQRequests();
-        });
+        document.getElementById('user-filter').addEventListener('change', loadStats);
 
         // Auto-refresh every 30 seconds
         setInterval(() => {
             loadUserFilterOptions();
             loadStats();
             loadRecentRequests();
-            loadWebIQRequests();
             refreshConfigManagerStatus();
         }, 30000);
     </script>

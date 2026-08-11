@@ -1,3 +1,22 @@
+"""Web IQ search logging.
+
+Two destinations, on purpose:
+
+* ``<config_dir>/webiq/YYYY-MM-DD.jl`` - the full-fidelity record. It is the
+  only place a search survives untruncated, so nothing here is abbreviated.
+* the shared request cache - so a search shows up in the request list,
+  full-text search, detail view and export next to the LLM requests. That copy
+  obeys ``cache_max_request_size`` like any other entry.
+
+There is deliberately no third copy in an in-memory Web IQ buffer.
+
+The API key must never reach either destination: the server's key travels in a
+header that is never logged, and a client's own ``x-apikey`` (which a client
+that "only changed the base URL" still sends) is redacted before its headers
+are cached.
+"""
+
+import glob
 import json
 import os
 import tempfile
@@ -5,97 +24,33 @@ import unittest
 from unittest import mock
 
 from ghc_api.app import create_app
-from ghc_api.routes.webiq import SEARCH_PATH
+from ghc_api.auth import REDACTED_HEADERS, redact_auth_headers
+from ghc_api.cache import cache
+from ghc_api.routes.webiq import REQUEST_LIST_MODEL, SEARCH_PATH
 from ghc_api.state import state
-from ghc_api.webiq_log import MAX_MEMORY_ENTRIES_LIMIT, WebIQLog, webiq_log
+from ghc_api.webiq_log import log_dir, record_search_to_file
 
 
-class WebIQLogBufferTest(unittest.TestCase):
-    """The in-memory ring buffer keeps only the newest N searches."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = mock.patch.dict(os.environ, {"GHC_API_CONFIG_DIR": self.tmpdir.name})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_defaults_to_twenty_entries(self):
-        self.assertEqual(WebIQLog().max_entries, 20)
-
-    def test_oldest_entries_are_evicted(self):
-        log = WebIQLog(max_entries=3)
-        for i in range(5):
-            log.record({"query": f"q{i}"})
-
-        queries = [entry["query"] for entry in log.recent()]
-        self.assertEqual(queries, ["q4", "q3", "q2"])
-        self.assertEqual(log.stats()["total_searches"], 5)
-        self.assertEqual(log.stats()["buffered"], 3)
-
-    def test_resize_keeps_newest(self):
-        log = WebIQLog(max_entries=5)
-        for i in range(5):
-            log.record({"query": f"q{i}"})
-
-        log.set_max_entries(2)
-
-        self.assertEqual([e["query"] for e in log.recent()], ["q4", "q3"])
-        self.assertEqual(log.max_entries, 2)
-
-    def test_resize_is_clamped(self):
-        log = WebIQLog()
-        log.set_max_entries(10 ** 6)
-        self.assertEqual(log.max_entries, MAX_MEMORY_ENTRIES_LIMIT)
-        log.set_max_entries(0)
-        self.assertEqual(log.max_entries, 1)
-
-    def test_entries_get_id_timestamp_and_state(self):
-        log = WebIQLog()
-
-        ok = log.record({"query": "q"})
-        failed = log.record({"query": "q", "error": "nope"})
-
-        self.assertTrue(ok["id"])
-        self.assertIsInstance(ok["timestamp"], int)
-        self.assertEqual(ok["state"], "completed")
-        self.assertEqual(failed["state"], "error")
-        self.assertEqual(log.stats()["failed_searches"], 1)
-        self.assertEqual(log.get(ok["id"])["query"], "q")
-
-    def test_records_are_appended_to_daily_jl_file(self):
-        log = WebIQLog()
-        with mock.patch.object(state, "log_webiq_requests", True):
-            log.record({"query": "python", "results": [{"title": "t"}]})
-            log.record({"query": "rust"})
-
-        files = os.listdir(os.path.join(self.tmpdir.name, "webiq"))
-        self.assertEqual(len(files), 1)
-        self.assertTrue(files[0].endswith(".jl"))
-        with open(os.path.join(self.tmpdir.name, "webiq", files[0]), encoding="utf-8") as f:
-            lines = [json.loads(line) for line in f if line.strip()]
-        self.assertEqual([line["query"] for line in lines], ["python", "rust"])
-
-    def test_file_logging_can_be_disabled_without_losing_memory_buffer(self):
-        log = WebIQLog()
-        with mock.patch.object(state, "log_webiq_requests", False):
-            log.record({"query": "python"})
-
-        self.assertFalse(os.path.exists(os.path.join(self.tmpdir.name, "webiq")))
-        self.assertEqual(len(log.recent()), 1)
-
-    def test_disk_failure_does_not_break_the_search(self):
-        log = WebIQLog()
-        with mock.patch.object(state, "log_webiq_requests", True), \
-                mock.patch("ghc_api.webiq_log.open", side_effect=OSError("disk full")):
-            entry = log.record({"query": "python"})
-
-        self.assertEqual(entry["query"], "python")
-        self.assertEqual(len(log.recent()), 1)
+def upstream_response(status=200, body=b'{"webResults": []}', headers=None):
+    return mock.Mock(
+        status_code=status,
+        ok=200 <= status < 300,
+        content=body,
+        text=body.decode("utf-8", "replace"),
+        headers=headers or {"content-type": "application/json"},
+    )
 
 
-class WebIQRouteLoggingTest(unittest.TestCase):
-    """Every call to the search endpoint is recorded, success or failure."""
+def read_log_lines():
+    lines = []
+    for path in sorted(glob.glob(os.path.join(log_dir(), "*.jl"))):
+        with open(path, encoding="utf-8") as f:
+            lines.extend(json.loads(line) for line in f if line.strip())
+    return lines
+
+
+class IsolatedConfigDirTest(unittest.TestCase):
+    """Base class: every test writes into its own throwaway config dir."""
 
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -103,254 +58,218 @@ class WebIQRouteLoggingTest(unittest.TestCase):
         patcher = mock.patch.dict(os.environ, {"GHC_API_CONFIG_DIR": self.tmpdir.name})
         patcher.start()
         self.addCleanup(patcher.stop)
-        webiq_log.clear()
-        self.addCleanup(webiq_log.clear)
+        cache.cache.clear()
+        self.addCleanup(cache.cache.clear)
         self.client = create_app().test_client()
 
-    @mock.patch("ghc_api.routes.webiq.search")
-    def test_successful_search_is_recorded(self, search_mock):
-        def fake_search(payload, settings, trace=None):
-            trace.update({
-                "endpoint": "https://api.microsoft.ai/v3/search/web",
-                "request": {"query": payload["query"], "maxResults": 5},
-                "status_code": 200,
-            })
-            return {"webResults": [{"title": "t", "url": "u", "content": "c"}],
-                    "traceId": "trace-1"}
 
-        search_mock.side_effect = fake_search
+class FileLoggingTest(IsolatedConfigDirTest):
+    def test_records_are_appended_to_a_daily_file(self):
+        record_search_to_file({"id": "a", "query": "one"})
+        record_search_to_file({"id": "b", "query": "two"})
+
+        entries = read_log_lines()
+        self.assertEqual([e["query"] for e in entries], ["one", "two"])
+
+    def test_file_logging_can_be_disabled(self):
+        with mock.patch.object(state, "log_webiq_requests", False):
+            record_search_to_file({"id": "a", "query": "one"})
+
+        self.assertEqual(read_log_lines(), [])
+
+    def test_disk_failure_does_not_break_the_search(self):
+        with mock.patch("ghc_api.webiq_log.open", side_effect=OSError("disk full")):
+            record_search_to_file({"id": "a", "query": "one"})  # must not raise
+
+    def test_non_serializable_values_do_not_lose_the_record(self):
+        record_search_to_file({"id": "a", "query": "one", "odd": object()})
+
+        self.assertEqual(len(read_log_lines()), 1)
+
+
+class RouteLoggingTest(IsolatedConfigDirTest):
+    """Every call to the search endpoint is recorded, success or failure."""
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_successful_search_is_recorded_in_full(self, search_mock):
+        body = (b'{"webResults":[{"title":"t","url":"u","content":"c"}],'
+                b'"traceId":"trace-1"}')
+        search_mock.return_value = upstream_response(200, body)
 
         res = self.client.post(SEARCH_PATH, json={"query": "python"})
 
         self.assertEqual(res.status_code, 200)
-        entries = webiq_log.recent()
-        self.assertEqual(len(entries), 1)
-        entry = entries[0]
-        # The logged query is the one that actually went upstream.
+        entry = read_log_lines()[0]
         self.assertEqual(entry["query"], "python")
         self.assertEqual(entry["state"], "completed")
         self.assertEqual(entry["status_code"], 200)
         self.assertEqual(entry["result_count"], 1)
-        self.assertEqual(entry["results"], [{"title": "t", "url": "u", "content": "c"}])
+        # Full fidelity: the response body is stored as upstream sent it.
+        self.assertEqual(entry["response_body"]["webResults"],
+                         [{"title": "t", "url": "u", "content": "c"}])
         # A trace id is the first thing upstream support asks for.
         self.assertEqual(entry["trace_id"], "trace-1")
         self.assertEqual(entry["request_body"], {"query": "python"})
         self.assertEqual(entry["upstream"]["status_code"], 200)
-        self.assertEqual(entry["upstream"]["request"], {"query": "python", "maxResults": 5})
         self.assertEqual(entry["user_id"], "anonymous")
         self.assertIsInstance(entry["duration_ms"], int)
 
     @mock.patch("ghc_api.routes.webiq.search")
-    def test_upstream_failure_is_recorded(self, search_mock):
-        from ghc_api.webiq import WebIQError
-
-        def failing_search(payload, settings, trace=None):
-            trace["endpoint"] = "https://api.microsoft.ai/v3/search/web"
-            trace["request"] = {"query": payload["query"]}
-            trace["status_code"] = 429
-            raise WebIQError("Web IQ returned HTTP 429.", 429)
-
-        search_mock.side_effect = failing_search
+    def test_upstream_failure_is_recorded_with_its_body(self, search_mock):
+        search_mock.return_value = upstream_response(
+            429, b'{"error":{"code":"TooManyRequests"}}')
 
         res = self.client.post(SEARCH_PATH, json={"query": "python"})
 
         self.assertEqual(res.status_code, 429)
-        entry = webiq_log.recent()[0]
+        entry = read_log_lines()[0]
         self.assertEqual(entry["state"], "error")
         self.assertEqual(entry["status_code"], 429)
-        self.assertEqual(entry["error"], "Web IQ returned HTTP 429.")
         self.assertEqual(entry["upstream"]["status_code"], 429)
-        self.assertEqual(entry["result_count"], 0)
+        self.assertEqual(entry["response_body"], {"error": {"code": "TooManyRequests"}})
+        self.assertIsNone(entry["result_count"])
 
-    def test_rejected_request_is_recorded(self):
-        res = self.client.post(SEARCH_PATH, json={"query": "  "})
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_local_failure_is_recorded_without_an_upstream_status(self, search_mock):
+        from ghc_api.webiq import WebIQError
+        search_mock.side_effect = WebIQError("not configured", 503)
+
+        res = self.client.post(SEARCH_PATH, json={"query": "python"})
+
+        self.assertEqual(res.status_code, 503)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["state"], "error")
+        self.assertEqual(entry["error"], "not configured")
+        # None, not 0: the request never reached upstream at all.
+        self.assertIsNone(entry["upstream"]["status_code"])
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_a_malformed_body_is_still_logged(self, search_mock):
+        """Nothing validates the body locally, so logging cannot assume JSON."""
+        search_mock.return_value = upstream_response(400, b"query is required")
+
+        res = self.client.post(SEARCH_PATH, data=b"not json",
+                               content_type="application/json")
 
         self.assertEqual(res.status_code, 400)
-        entry = webiq_log.recent()[0]
-        self.assertEqual(entry["state"], "error")
-        self.assertEqual(entry["status_code"], 400)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["request_body"], "not json")
+        self.assertEqual(entry["response_body"], "query is required")
         self.assertIsNone(entry["query"])
 
-    def test_api_key_is_never_recorded(self):
+    def test_the_servers_api_key_is_never_recorded(self):
         with mock.patch.object(state, "enable_webiq_search", True), \
                 mock.patch.object(state, "webiq_api_key", "super-secret"), \
                 mock.patch("ghc_api.webiq.requests.post") as post:
-            post.return_value = mock.Mock(ok=True, status_code=200, **{
-                "json.return_value": {"webResults": [{"title": "t", "url": "u", "content": "c"}]}
-            })
+            post.return_value = upstream_response()
 
             res = self.client.post(SEARCH_PATH, json={"query": "python"})
 
         self.assertEqual(res.status_code, 200)
-        recorded = json.dumps(webiq_log.recent()[0])
-        self.assertNotIn("super-secret", recorded)
-        self.assertIn("x-apikey", post.call_args.kwargs["headers"])
+        self.assertNotIn("super-secret", json.dumps(read_log_lines()))
+        self.assertNotIn("super-secret", json.dumps(cache.get_recent_requests(5)))
+        self.assertEqual(post.call_args.kwargs["headers"]["x-apikey"], "super-secret")
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_a_clients_own_api_key_is_redacted(self, search_mock):
+        """A client that "only changed the base URL" still sends x-apikey.
+
+        Its key must not end up in the request detail view, an export, or
+        requests/YYYY-MM-DD.jl.
+        """
+        search_mock.return_value = upstream_response()
+
+        self.client.post(SEARCH_PATH, json={"query": "python"},
+                         headers={"x-apikey": "CLIENT-KEY",
+                                  "Authorization": "Bearer CLIENT-TOKEN"})
+
+        recorded = json.dumps(cache.get_recent_requests(5))
+        self.assertNotIn("CLIENT-KEY", recorded)
+        self.assertNotIn("CLIENT-TOKEN", recorded)
+
+    def test_the_redaction_list_covers_the_web_iq_header(self):
+        self.assertIn("x-apikey", REDACTED_HEADERS)
+        redacted = redact_auth_headers({"X-Apikey": "k", "X-Api-Key": "k", "Api-Key": "k"})
+        self.assertEqual(set(redacted.values()), {"***REDACTED***"})
 
 
-class WebIQDashboardApiTest(unittest.TestCase):
-    """The dashboard lists Web IQ searches and can open one in full."""
-
-    def setUp(self):
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = mock.patch.dict(os.environ, {"GHC_API_CONFIG_DIR": self.tmpdir.name})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        webiq_log.clear()
-        self.addCleanup(webiq_log.clear)
-        self.client = create_app().test_client()
-
-    def test_list_omits_bodies_and_reports_stats(self):
-        webiq_log.record({
-            "query": "python",
-            "user_id": "anonymous",
-            "results": [{"title": "t", "url": "u", "content": "c"}],
-            "result_count": 1,
-            "status_code": 200,
-            "request_body": {"query": "python"},
-            "upstream": {"request": {"query": "python"}},
-        })
-
-        data = self.client.get("/api/webiq/requests").get_json()
-
-        self.assertEqual(len(data["items"]), 1)
-        item = data["items"][0]
-        self.assertEqual(item["query"], "python")
-        self.assertEqual(item["result_count"], 1)
-        self.assertNotIn("results", item)
-        self.assertNotIn("request_body", item)
-        self.assertNotIn("upstream", item)
-        self.assertEqual(data["stats"]["total_searches"], 1)
-        self.assertTrue(data["log_dir"].endswith("webiq"))
-
-    def test_detail_returns_full_entry(self):
-        entry = webiq_log.record({"query": "python", "results": [{"title": "t"}]})
-
-        data = self.client.get(f"/api/webiq/request/{entry['id']}").get_json()
-
-        self.assertEqual(data["results"], [{"title": "t"}])
-
-    def test_missing_detail_is_404(self):
-        res = self.client.get("/api/webiq/request/does-not-exist")
-        self.assertEqual(res.status_code, 404)
-
-    def test_user_filter(self):
-        webiq_log.record({"query": "a", "user_id": "alice"})
-        webiq_log.record({"query": "b", "user_id": "bob"})
-
-        data = self.client.get("/api/webiq/requests?user=alice").get_json()
-
-        self.assertEqual([i["query"] for i in data["items"]], ["a"])
-
-    def test_limit_is_validated(self):
-        self.assertEqual(self.client.get("/api/webiq/requests?limit=0").status_code, 400)
-        self.assertEqual(
-            self.client.get(f"/api/webiq/requests?limit={MAX_MEMORY_ENTRIES_LIMIT + 1}").status_code,
-            400,
-        )
-
-    def test_runtime_config_exposes_and_updates_log_settings(self):
-        original_enabled = state.log_webiq_requests
-        original_entries = state.webiq_log_max_entries
-        self.addCleanup(setattr, state, "log_webiq_requests", original_enabled)
-        self.addCleanup(setattr, state, "webiq_log_max_entries", original_entries)
-        self.addCleanup(webiq_log.set_max_entries, original_entries)
-
-        config = self.client.get("/api/runtime-config").get_json()
-        self.assertIn("log_webiq_requests", config)
-        self.assertIn("webiq_log_max_entries", config)
-
-        res = self.client.post("/api/runtime-config", json={
-            "log_webiq_requests": False,
-            "webiq_log_max_entries": 5,
-        })
-
-        self.assertEqual(res.status_code, 200)
-        self.assertFalse(state.log_webiq_requests)
-        self.assertEqual(webiq_log.max_entries, 5)
-
-        bad = self.client.post("/api/runtime-config", json={"webiq_log_max_entries": 0})
-        self.assertEqual(bad.status_code, 400)
-
-
-class WebIQRequestListTest(unittest.TestCase):
-    """A search must also appear in the shared request list, not only in the
-    dedicated Web IQ panel."""
-
-    def setUp(self):
-        from ghc_api.cache import RequestCache
-
-        self.tmpdir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmpdir.cleanup)
-        patcher = mock.patch.dict(os.environ, {"GHC_API_CONFIG_DIR": self.tmpdir.name})
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        webiq_log.clear()
-        self.addCleanup(webiq_log.clear)
-        # Isolate the global request cache so the assertions below see only
-        # what this test produced.
-        self.cache = RequestCache()
-        for target in ("ghc_api.routes.webiq.cache", "ghc_api.routes.dashboard.cache"):
-            p = mock.patch(target, self.cache)
-            p.start()
-            self.addCleanup(p.stop)
-        self.client = create_app().test_client()
+class RequestListTest(IsolatedConfigDirTest):
+    """A search is a request like any other, and shows up in the shared views."""
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_search_shows_up_in_the_request_list(self, search_mock):
-        def fake_search(payload, settings, trace=None):
-            trace.update({"endpoint": "https://api.microsoft.ai/v3/search/web",
-                          "request": {"query": payload["query"]}, "status_code": 200})
-            return {"webResults": [{"title": "t", "url": "u", "content": "c"}]}
-
-        search_mock.side_effect = fake_search
+        search_mock.return_value = upstream_response(
+            200, b'{"webResults":[{"title":"t","url":"u","content":"c"}]}')
 
         self.client.post(SEARCH_PATH, json={"query": "python"})
 
-        listing = self.client.get("/api/requests").get_json()
-        self.assertEqual(listing["total"], 1)
-        item = listing["items"][0]
-        self.assertEqual(item["endpoint"], SEARCH_PATH)
-        self.assertEqual(item["model"], "webiq_search")
-        self.assertEqual(item["status_code"], 200)
-        self.assertEqual(item["state"], "completed")
-        self.assertGreater(item["response_size"], 0)
+        items = self.client.get("/api/requests").get_json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["model"], REQUEST_LIST_MODEL)
+        self.assertEqual(items[0]["endpoint"], SEARCH_PATH)
+        self.assertEqual(items[0]["state"], "completed")
         # A search spends Web IQ quota, not model tokens.
-        self.assertEqual(item["input_tokens"], 0)
-        self.assertEqual(item["output_tokens"], 0)
+        self.assertEqual(items[0]["input_tokens"], 0)
+        self.assertEqual(items[0]["output_tokens"], 0)
 
     @mock.patch("ghc_api.routes.webiq.search")
-    def test_detail_view_carries_request_and_response_bodies(self, search_mock):
-        upstream = {"webResults": [{"title": "t", "url": "u", "content": "c"}],
-                    "traceId": "trace-2"}
-        search_mock.return_value = upstream
+    def test_detail_view_carries_both_bodies(self, search_mock):
+        search_mock.return_value = upstream_response(
+            200, b'{"webResults":[{"title":"t","url":"u","content":"c"}]}')
 
-        self.client.post(SEARCH_PATH, json={"query": "python", "maxResults": 3})
+        self.client.post(SEARCH_PATH, json={"query": "python"})
 
-        entry_id = self.client.get("/api/requests").get_json()["items"][0]["id"]
-        detail = self.client.get(f"/api/request/{entry_id}").get_json()
-        self.assertEqual(detail["request_body"], {"query": "python", "maxResults": 3})
-        # What is recorded is the upstream body, unedited.
-        self.assertEqual(detail["response_body"], upstream)
-        # Both logs must describe the same search.
-        self.assertEqual(webiq_log.recent()[0]["id"], entry_id)
+        request_id = self.client.get("/api/requests").get_json()["items"][0]["id"]
+        detail = self.client.get(f"/api/request/{request_id}").get_json()
+        self.assertEqual(detail["request_body"], {"query": "python"})
+        self.assertEqual(detail["response_body"]["webResults"][0]["title"], "t")
 
-    def test_failed_search_is_listed_as_an_error(self):
-        self.client.post(SEARCH_PATH, json={"query": "  "})
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_failed_search_is_listed_as_an_error(self, search_mock):
+        search_mock.return_value = upstream_response(429, b'{"error":"slow down"}')
 
-        item = self.client.get("/api/requests").get_json()["items"][0]
-        self.assertEqual(item["state"], "error")
-        self.assertEqual(item["status_code"], 400)
+        self.client.post(SEARCH_PATH, json={"query": "python"})
+
+        items = self.client.get("/api/requests").get_json()["items"]
+        self.assertEqual(items[0]["state"], "error")
+        self.assertEqual(items[0]["status_code"], 429)
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_search_is_findable_by_full_text(self, search_mock):
-        search_mock.return_value = {"webResults": []}
+        search_mock.return_value = upstream_response(
+            200, b'{"webResults":[{"title":"Zebra facts","url":"u","content":"c"}]}')
 
-        self.client.post(SEARCH_PATH, json={"query": "quantum computing"})
+        self.client.post(SEARCH_PATH, json={"query": "zebra"})
 
-        found = self.client.get("/api/requests/search?q=quantum").get_json()
+        found = self.client.get("/api/requests/search?q=Zebra").get_json()
         self.assertEqual(found["total"], 1)
-        self.assertEqual(found["items"][0]["endpoint"], SEARCH_PATH)
+
+
+class RuntimeConfigTest(IsolatedConfigDirTest):
+    def test_log_toggle_is_exposed_and_updatable(self):
+        original = state.log_webiq_requests
+        self.addCleanup(setattr, state, "log_webiq_requests", original)
+
+        config = self.client.get("/api/runtime-config").get_json()
+        self.assertIn("log_webiq_requests", config)
+
+        res = self.client.post("/api/runtime-config", json={"log_webiq_requests": False})
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(state.log_webiq_requests)
+
+        res = self.client.post("/api/runtime-config", json={"log_webiq_requests": "yes"})
+        self.assertEqual(res.status_code, 400)
+
+    def test_retired_buffer_setting_is_gone(self):
+        """The in-memory Web IQ buffer was removed; its knob must not linger."""
+        config = self.client.get("/api/runtime-config").get_json()
+        self.assertNotIn("webiq_log_max_entries", config)
+        self.assertFalse(hasattr(state, "webiq_log_max_entries"))
+
+    def test_retired_dashboard_apis_are_gone(self):
+        """Web IQ searches are read from the shared request APIs now."""
+        self.assertEqual(self.client.get("/api/webiq/requests").status_code, 404)
+        self.assertEqual(self.client.get("/api/webiq/request/x").status_code, 404)
 
 
 if __name__ == "__main__":

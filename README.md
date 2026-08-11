@@ -24,11 +24,12 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
 - **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
-- **Microsoft Web IQ Search**: `/v3/search/web` speaking the official Web Search v3 contract verbatim, backed by a server-held API key
+- **Microsoft Web IQ Search**: `/v3/search/web`, a transparent proxy for the official Web Search v3 API, backed by a server-held API key
 
 ## Maintenance Guides
 
 - [Anthropic Messages to Responses compatibility warning runbook](ANTHROPIC_RESPONSES_WARNING_RUNBOOK.md)
+- [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 
 ## Installation
 
@@ -277,7 +278,7 @@ When `save_request_to_file: true`, ghc-api appends each completed request to:
 
 The saved `.jl` line format is the same as dashboard export (`/api/requests/export`) and can be imported by dashboard import (`/api/requests/import`).
 
-Web IQ searches are recorded as requests too (model name `webiq_search`, zero tokens), so they appear in these files, in `/api/stats` and in the request statistics alongside LLM traffic. Their full detail additionally lives in `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`.
+Web IQ searches are recorded as requests too (model name `webiq_search`, zero tokens), so they appear in these files, in `/api/stats` and in the request statistics alongside LLM traffic. That copy obeys `cache_max_request_size` like any other; the untruncated record of a search lives in `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`.
 
 Open `/request-stats` to select one or more daily files and generate request-size, request-duration, and billing-token distributions overall, by model, or by exact HTTP response code. Scans run asynchronously and write one lightweight JSONL sidecar plus metadata per request file under `requests/.request-stats-index/`. Each sidecar row stores scalar metrics and the source byte offset/length/hash, never request/response bodies or headers. If a source file is unchanged its sidecar is reused without reopening the source; append-only growth is indexed incrementally, while truncated, replaced, corrupt, or incompatible files are rebuilt safely.
 
@@ -400,9 +401,11 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 
 - `POST /v3/search/web` - Web Search v3, backed by the server-held Web IQ API key
 
-The path, request body and response body are the official Microsoft Web Search v3
-contract, verbatim. A client written against `api.microsoft.ai`
-works here by changing only the base URL — the same deal the OpenAI- and
+A transparent proxy for the [official Microsoft Web Search v3
+API](https://webiq.microsoft.ai/documentation/api-reference/web/). The request
+body is forwarded as the bytes the client sent, and the upstream status, headers
+and body come back verbatim. A client written against `api.microsoft.ai` works
+here by changing only the base URL — the same deal the OpenAI- and
 Anthropic-shaped endpoints offer.
 
 ```bash
@@ -411,31 +414,38 @@ curl -X POST http://localhost:8313/v3/search/web \
   -d '{"query": "latest trends in LLM RAG", "maxResults": 10, "contentFormat": "passage"}'
 ```
 
-What the proxy adds is key custody (`webiq_api_key` never leaves the server),
-the optional user-token auth gate, logging, and per-request caps. All of that is
-applied to the **outgoing** request; the upstream response is returned
-untouched, so `traceId`, `contentTier`, `clickUrl`, `crawledAt` and every other
-field survive.
+What the proxy adds is key custody (`webiq_api_key` never leaves the server), the
+optional user-token auth gate, and logging. It adds nothing to the search itself:
 
-- `webiq_language`, `webiq_region`, `webiq_content_format`, `webiq_max_results`,
-  `webiq_max_length`, `webiq_safe_search` are **defaults** for parameters a
-  request omits; any request may override any of them.
-- `webiq_max_results_cap` and `webiq_max_length_cap` are hard ceilings that a
-  request cannot exceed. They default to the official maxima (50 / 500000), so
-  out of the box this endpoint accepts everything the real API accepts.
-- A value outside the official range is rejected with 400; a value inside it but
-  above a local cap is clamped, and the clamped body is what the log shows.
-- Upstream status codes keep their meaning, except 401/403 — those mean *this
-  server's* key was rejected, so they surface as 503 with an explicit message
-  rather than being confused with this proxy rejecting the caller's token.
+- **There are no server-side search settings.** Every parameter and every default
+  is Microsoft's, including the defaults for what a request omits (`maxResults`
+  10, `contentFormat` html, `maxLength` 10000). A server-side default would
+  silently make this endpoint disagree with the API it claims to be. If you want
+  passage format, ask for it in the request — that is what `/chat` and
+  `scripts/webiq_search_demo.py` do.
+- **There is no parameter whitelist and no local validation.** A parameter
+  Microsoft adds tomorrow works here today, and an invalid request gets the
+  authoritative upstream error instead of an imitation of it.
+- **Errors and error headers are passed through too**, so `Retry-After` on a 429
+  reaches the client that has to back off. The single exception is upstream
+  401/403: those mean *this server's* key was rejected, so they surface as 503
+  with an explicit message rather than being confused with this proxy rejecting
+  the caller's token.
+- **A client's own `x-apikey` is ignored**, never forwarded, and redacted before
+  the request is logged. Searches always spend this server's key and quota.
 
 The proxy never searches on a model's behalf. Clients declare the `webiq_search`
 function tool, the model decides whether and what to search, and the client
 executes the tool call against this endpoint; `/chat` does that automatically
 when the Web IQ toggle is on. That tool schema stays narrow (`query`,
-`max_results`) on purpose — it is a prompt surface, not the API — so clients
-translate `max_results` to the official `maxResults`. See
+`max_results`) on purpose — it is a prompt surface, not the API — so the client
+is what turns those arguments into a full official request. See
 `scripts/webiq_search_demo.py`.
+
+Every call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
+(`log_webiq_requests`, on by default), which is the only untruncated record of a
+search, and added to the shared request cache so it appears in the request list,
+full-text search, detail view and export under the model name `webiq_search`.
 
 ### Configured Upstream Proxy
 

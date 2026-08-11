@@ -18,7 +18,6 @@ import yaml
 
 from . import __version__
 from . import webiq
-from .webiq_log import MAX_MEMORY_ENTRIES_LIMIT as WEBIQ_LOG_MAX_ENTRIES, webiq_log
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
 from .config import (
@@ -268,41 +267,13 @@ def main():
             state.webiq_api_key = str(config['webiq_api_key'] or '')
         if 'webiq_endpoint' in config:
             state.webiq_endpoint = str(config['webiq_endpoint'] or '')
-        if 'webiq_max_results' in config:
-            state.webiq_max_results = max(1, min(webiq.RESULTS_MAX, int(config['webiq_max_results'])))
-        if 'webiq_max_length' in config:
-            state.webiq_max_length = max(1, min(webiq.LENGTH_MAX, int(config['webiq_max_length'])))
-        if 'webiq_max_results_cap' in config:
-            state.webiq_max_results_cap = max(1, min(webiq.RESULTS_MAX, int(config['webiq_max_results_cap'])))
-        if 'webiq_max_length_cap' in config:
-            state.webiq_max_length_cap = max(1, min(webiq.LENGTH_MAX, int(config['webiq_max_length_cap'])))
-        # Enumerated parameters are validated at load time, so a typo fails the
-        # start instead of turning every single search into an upstream 400.
-        if 'webiq_content_format' in config:
-            content_format = str(config['webiq_content_format'])
-            if content_format not in webiq.CONTENT_FORMATS:
-                raise ValueError(
-                    f"webiq_content_format must be one of: {', '.join(webiq.CONTENT_FORMATS)}")
-            state.webiq_content_format = content_format
-        if 'webiq_language' in config:
-            state.webiq_language = str(config['webiq_language'])
-        if 'webiq_region' in config:
-            state.webiq_region = str(config['webiq_region'])
-        if 'webiq_safe_search' in config:
-            safe_search = str(config['webiq_safe_search'])
-            if safe_search not in webiq.SAFE_SEARCH_VALUES:
-                raise ValueError(
-                    f"webiq_safe_search must be one of: {', '.join(webiq.SAFE_SEARCH_VALUES)}")
-            state.webiq_safe_search = safe_search
+        # There are no search-parameter settings on purpose: /v3/search/web
+        # forwards the client's body as received, so every default is
+        # Microsoft's.
         if 'webiq_timeout' in config:
             state.webiq_timeout = max(1, int(config['webiq_timeout']))
         if 'log_webiq_requests' in config:
             state.log_webiq_requests = bool(config['log_webiq_requests'])
-        if 'webiq_log_max_entries' in config:
-            state.webiq_log_max_entries = max(
-                1, min(WEBIQ_LOG_MAX_ENTRIES, int(config['webiq_log_max_entries']))
-            )
-        webiq_log.set_max_entries(state.webiq_log_max_entries)
 
         # Load user-token auth setting
         if 'enable_auth' in config:

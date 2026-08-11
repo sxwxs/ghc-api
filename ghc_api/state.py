@@ -87,26 +87,15 @@ class State:
         # recording proxy or a regional deployment. The URL is deliberately not
         # duplicated here: two copies of it is how a wrong host survived before.
         self.webiq_endpoint: str = ""
-        # Defaults for requests that omit a parameter. A client may override
-        # any of them; the *_cap values below are the hard ceilings it cannot.
-        self.webiq_max_results: int = 5
-        self.webiq_max_length: int = 3000
-        self.webiq_content_format: str = "passage"
-        self.webiq_language: str = "en"
-        self.webiq_region: str = "US"
-        self.webiq_safe_search: str = "strict"
-        # Local ceilings on a request, protecting the shared paid key. They
-        # default to the official maxima, so out of the box this endpoint
-        # accepts everything the real API accepts.
-        self.webiq_max_results_cap: int = 50
-        self.webiq_max_length_cap: int = 500000
+        # There are deliberately no search-parameter settings. /v3/search/web is
+        # a transparent proxy: the client's body is forwarded as received, so
+        # every default is Microsoft's. Server-side defaults would silently make
+        # this endpoint disagree with the API it claims to be.
         self.webiq_timeout: int = 30
-        # Record every /v3/search/web request and response. Entries go to a
-        # daily .jl file under <config_dir>/webiq/ (on by default, unlike the
-        # much larger LLM request dumps) and to an in-memory ring buffer of the
-        # most recent webiq_log_max_entries searches for the dashboard.
+        # Append every /v3/search/web request and response to a daily .jl file
+        # under <config_dir>/webiq/. On by default: unlike the LLM request
+        # dumps, this is the only untruncated record of a search.
         self.log_webiq_requests: bool = True
-        self.webiq_log_max_entries: int = 20
 
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses,

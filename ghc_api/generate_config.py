@@ -230,42 +230,32 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
 # Microsoft Web IQ Search
 # -----------------------
-# Exposes POST /v3/search/web -- the official Microsoft Web Search v3 contract,
-# request and response verbatim -- backed by the key below. Any client written
-# against api.microsoft.ai works here by changing only the base URL.
-# webiq_endpoint overrides the upstream the proxy calls; leave it empty to use
-# the endpoint the specification defines.
+# Exposes POST /v3/search/web, a transparent proxy for the official Microsoft
+# Web Search v3 API backed by the key below:
+#   https://webiq.microsoft.ai/documentation/api-reference/web/
+# The client's request body is forwarded as received and the upstream status,
+# headers and body are returned verbatim, so any client written against
+# api.microsoft.ai works here by changing only the base URL, and every search
+# parameter and default is Microsoft's. There are deliberately no server-side
+# search settings: a client that wants passage format asks for it.
+# A client's own x-apikey header is ignored (this server's key is always the
+# one used) and redacted before the request is logged.
+# webiq_endpoint overrides the upstream URL; leave it empty to use the endpoint
+# the specification defines.
 # The proxy never searches on a model's behalf: clients declare the
 # 'webiq_search' function tool, the model decides whether and what to search,
 # and the client executes the tool call against that endpoint. The built-in
 # chat UI (/chat) does this automatically when the Web IQ toggle is on.
 # The key stays on this server and is never sent to the UI or to Copilot.
-#
-# The settings below are DEFAULTS for parameters a request omits; a request may
-# override any of them. passage format is recommended for LLM tool use because
-# full HTML can consume many model tokens.
 enable_webiq_search: false
 webiq_api_key: ""
 webiq_endpoint: ""
-webiq_max_results: 5
-webiq_max_length: 3000
-webiq_content_format: "passage"
-webiq_language: "en"
-webiq_region: "US"
-webiq_safe_search: "strict"
 webiq_timeout: 30
-# Hard ceilings a request cannot exceed, protecting the shared paid key.
-# They default to the official maxima, so out of the box this endpoint accepts
-# everything the real API accepts. Lower them to bound cost per search.
-webiq_max_results_cap: 50
-webiq_max_length_cap: 500000
-# Every /v3/search/web call (query, upstream payload, results or error) is
-# appended to <config_dir>/webiq/YYYY-MM-DD.jl and the newest
-# webiq_log_max_entries are kept in memory for the dashboard's Web IQ Searches
-# panel. Unlike save_request_to_file these records are small, so logging is on
-# by default. The API key is never written to the log.
+# Every /v3/search/web call (request body, upstream status, response or error)
+# is appended to <config_dir>/webiq/YYYY-MM-DD.jl. That file is the only
+# untruncated record of a search, so logging is on by default. The API key is
+# never written to it.
 log_webiq_requests: true
-webiq_log_max_entries: 20
 
 # User Authentication
 # -------------------
