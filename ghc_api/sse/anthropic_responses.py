@@ -298,31 +298,32 @@ class ResponsesAnthropicEventTranslator:
                 )
 
         effective_type = incoming_type or state.item_type
-        if effective_type == "web_search_call" and self.stable_ids:
-            incoming_id = item.get("id")
-            existing_id = state.item.get("id") if isinstance(state.item, dict) else None
-            if incoming_id is not None and existing_id is not None and str(incoming_id) != str(existing_id):
-                return (
-                    "responses.web_search_id_mutation",
-                    f"/output/{state.output_index}/id",
-                )
-        if effective_type in ("function_call", "custom_tool_call"):
-            incoming_call_id = item.get("call_id")
-            if incoming_call_id is not None:
-                incoming_call_id = str(incoming_call_id)
-                if state.call_id and incoming_call_id != state.call_id:
+        if self.stable_ids:
+            if effective_type in ("message", "reasoning", "web_search_call", "function_call", "custom_tool_call"):
+                incoming_id = item.get("id")
+                existing_id = state.item.get("id") if isinstance(state.item, dict) else None
+                if incoming_id is not None and existing_id is not None and str(incoming_id) != str(existing_id):
                     return (
-                        "responses.call_id_mutation",
-                        f"/output/{state.output_index}/call_id",
+                        "responses.item_id_mutation" if effective_type != "web_search_call" else "responses.web_search_id_mutation",
+                        f"/output/{state.output_index}/id",
                     )
-            incoming_name = item.get("name")
-            if incoming_name is not None:
-                incoming_name = str(incoming_name)
-                if state.name and incoming_name != state.name:
-                    return (
-                        "responses.tool_name_mutation",
-                        f"/output/{state.output_index}/name",
-                    )
+            if effective_type in ("function_call", "custom_tool_call"):
+                incoming_call_id = item.get("call_id")
+                if incoming_call_id is not None:
+                    incoming_call_id = str(incoming_call_id)
+                    if state.call_id and incoming_call_id != state.call_id:
+                        return (
+                            "responses.call_id_mutation",
+                            f"/output/{state.output_index}/call_id",
+                        )
+                incoming_name = item.get("name")
+                if incoming_name is not None:
+                    incoming_name = str(incoming_name)
+                    if state.name and incoming_name != state.name:
+                        return (
+                            "responses.tool_name_mutation",
+                            f"/output/{state.output_index}/name",
+                        )
 
         if effective_type == "function_call":
             terminal = item.get("arguments")

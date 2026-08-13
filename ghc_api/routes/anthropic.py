@@ -1374,6 +1374,7 @@ def _stream_pending_anthropic_responses_request(
                         exc,
                     )
                     ensure_copilot_token()
+                    headers["Authorization"] = f"Bearer {state.copilot_token}"
                     if active_conn_attempt < connection_retries:
                         time.sleep(min(2 ** active_conn_attempt, 8))
 
@@ -1763,6 +1764,7 @@ def handle_responses_anthropic_request(
                 exc,
             )
             ensure_copilot_token()
+            headers["Authorization"] = f"Bearer {state.copilot_token}"
             if conn_attempt < connection_retries:
                 time.sleep(min(2 ** conn_attempt, 8))
 
@@ -1970,7 +1972,7 @@ def handle_responses_anthropic_request(
         result.status_code = 502
         return _set_compatibility_headers(result, warnings)
 
-    if upstream_response.get("status") == "failed" or upstream_response.get("error"):
+    if upstream_response.get("status") == "failed" or upstream_response.get("error") is not None:
         failure_status = responses_error_status(
             upstream_response.get("error") or upstream_response, 500
         )
