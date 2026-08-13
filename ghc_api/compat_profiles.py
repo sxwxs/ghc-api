@@ -1544,7 +1544,7 @@ def _audit_responses_item_into(
             _json_type(item_type),
             ("string",),
             evidence={"item_type": None if item_type is _MISSING else item_type},
-            fail_always=True,
+            fail_in_lossless=True,
         )
         return
     _require_fields(
@@ -1672,7 +1672,10 @@ def audit_responses_event(
             _json_type(event_type),
             ("string",),
             evidence={"event_type": None if event_type is _MISSING else event_type},
-            fail_always=True,
+            # The upstream Responses surface keeps adding lifecycle events.
+            # Compatibility mode records and skips them; only a lossless
+            # contract may refuse the whole exchange over one unknown frame.
+            fail_in_lossless=True,
         )
     else:
         _require_fields(

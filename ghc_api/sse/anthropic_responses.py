@@ -15,18 +15,23 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..anthropic_responses import (
     MODE_COMPATIBILITY,
+    MODE_LOSSLESS_REQUIRED,
     AnthropicToResponsesResult,
     ConversionReport,
     IdentifierCodec,
     PRESERVATION_APPROXIMATION,
     PRESERVATION_SEMANTIC,
     PRESERVATION_SIDECAR,
+    PRESERVATION_UNSUPPORTED,
     ResponsesToAnthropicResult,
+    WIRE_PROFILES,
     anthropic_error_from_responses,
     convert_responses_to_anthropic,
     parse_strict_json_bytes,
+    responses_error_status,
 )
 from ..compat_profiles import audit_responses_event
+from ..compat_profiles import KNOWN_RESPONSES_EVENT_TYPES
 from ..reasoning_carrier import (
     build_reasoning_carrier,
     redact_reasoning_carriers_for_cache,
@@ -108,12 +113,21 @@ class _OutputState:
     arguments_forwarded: int = 0
     arguments_complete: bool = False
     web_search_stage: int = 0
+    ignored: bool = False
     annotation_indices: set = field(default_factory=set)
     scanner: Optional[StopSequenceScanner] = None
 
 
 class ResponsesAnthropicEventTranslator:
     """Ordered Responses-event to Anthropic-event state machine."""
+
+    # Item types this translator knows how to project into Anthropic blocks.
+    # Anything else is recorded and skipped rather than killing the exchange.
+    _PROJECTED_ITEM_TYPES = frozenset(
+        ("message", "reasoning", "function_call", "custom_tool_call", "web_search_call")
+    )
+
+    _TERMINAL_EVENTS = frozenset(("response.completed", "response.incomplete"))
 
     _NO_CONTENT_EVENTS = {
         "response.queued",
@@ -148,8 +162,10 @@ class ResponsesAnthropicEventTranslator:
         self.call_id_codec = call_id_codec or IdentifierCodec()
         self.stop_sequences = list(stop_sequences or [])
         self.mode = mode
+        self.strict = mode == MODE_LOSSLESS_REQUIRED
         self.wire_profile = wire_profile
-        self.stable_item_ids = wire_profile != "copilot_responses_lite"
+        profile = WIRE_PROFILES.get(wire_profile)
+        self.stable_ids = profile.stable_ids if profile is not None else True
 
         self.message_started = False
         self.message_stopped = False
@@ -282,7 +298,7 @@ class ResponsesAnthropicEventTranslator:
                 )
 
         effective_type = incoming_type or state.item_type
-        if effective_type == "web_search_call" and self.stable_item_ids:
+        if effective_type == "web_search_call" and self.stable_ids:
             incoming_id = item.get("id")
             existing_id = state.item.get("id") if isinstance(state.item, dict) else None
             if incoming_id is not None and existing_id is not None and str(incoming_id) != str(existing_id):
@@ -378,6 +394,8 @@ class ResponsesAnthropicEventTranslator:
         return None
 
     def _warn(self, code: str, path: str, action: str = "error") -> None:
+        # ``action`` mirrors the compatibility-report dispositions: "error"
+        # marks a fatal protocol failure, everything else is diagnostic.
         warning = {"code": code, "path": path, "action": action}
         if warning not in self.compatibility_warnings:
             self.compatibility_warnings.append(warning)
@@ -459,6 +477,27 @@ class ResponsesAnthropicEventTranslator:
         events: List[Tuple[str, Dict[str, Any]]] = []
         while self.next_output_index in self.states:
             state = self.states[self.next_output_index]
+            if (
+                not state.ignored
+                and state.item_type
+                and state.item_type not in self._PROJECTED_ITEM_TYPES
+            ):
+                fatal = self._recoverable_drift(
+                    "responses.unknown_output_item",
+                    f"/output/{state.output_index}",
+                    "Unknown Responses output item recorded and skipped",
+                )
+                if fatal is not None:
+                    return events + fatal
+                state.ignored = True
+            if state.ignored:
+                # The item carries no projectable Anthropic content. Hold the
+                # index open until upstream closes it so ordering is kept.
+                if not state.done:
+                    break
+                state.closed = True
+                self.next_output_index += 1
+                continue
             if not self._state_ready(state):
                 break
             if state.item_type == "web_search_call":
@@ -629,6 +668,25 @@ class ResponsesAnthropicEventTranslator:
         error = {"type": "error", "error": {"type": "api_error", "message": f"Unsupported Responses stream shape ({code})"}}
         return [("error", error)]
 
+    def _recoverable_drift(
+        self,
+        code: str,
+        path: str,
+        detail: str,
+    ) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        """Record drift that cannot corrupt already-delivered content.
+
+        Returns fatal events under a lossless contract and ``None`` when the
+        exchange may continue.  Destroying a complete answer over a cosmetic
+        upstream deviation costs a whole turn and delivers nothing in return.
+        """
+
+        if self.strict:
+            return self._protocol_error(code, path)
+        self._warn(code, path, PRESERVATION_UNSUPPORTED)
+        self.report.mark(path, PRESERVATION_UNSUPPORTED, detail=detail)
+        return None
+
     def _hydrate_terminal(
         self,
         response: Dict[str, Any],
@@ -657,8 +715,15 @@ class ResponsesAnthropicEventTranslator:
         terminal_id = str(response.get("id") or "")
         terminal_model = str(response.get("model") or "")
         if self.response_id and terminal_id != self.response_id:
-            return self._protocol_error(
-                "responses.terminal_response_id_mismatch", "/response/id"
+            if self.stable_ids:
+                return self._protocol_error(
+                    "responses.terminal_response_id_mismatch", "/response/id"
+                )
+            # Profiles with rotating identifiers re-encrypt the response id on
+            # every frame; the message id already sent to the client stays
+            # anchored to the first one.
+            self._warn(
+                "responses.rotating_response_id", "/response/id", "semantic"
             )
         if (
             self.response_created_seen
@@ -666,18 +731,34 @@ class ResponsesAnthropicEventTranslator:
             and terminal_model
             and terminal_model != self.created_response_model
         ):
-            return self._protocol_error(
-                "responses.terminal_response_model_mismatch", "/response/model"
+            # The Anthropic message already advertises the client-requested
+            # model, so an upstream routing change cannot corrupt the answer.
+            fatal = self._recoverable_drift(
+                "responses.terminal_response_model_mismatch",
+                "/response/model",
+                "Upstream changed the serving model between created and terminal frames",
             )
+            if fatal is not None:
+                return fatal
         expected_status = {
             "response.completed": "completed",
             "response.incomplete": "incomplete",
         }[terminal_event_type]
         terminal_status = response.get("status")
         if terminal_status is not None and terminal_status != expected_status:
-            return self._protocol_error(
-                "responses.terminal_status_mismatch", "/response/status"
+            if terminal_status in ("failed", "cancelled", "canceled", "queued", "in_progress"):
+                # A success terminal that claims failure or non-termination has
+                # no safe reading: the content may be partial or invalid.
+                return self._protocol_error(
+                    "responses.terminal_status_mismatch", "/response/status"
+                )
+            fatal = self._recoverable_drift(
+                "responses.terminal_status_mismatch",
+                "/response/status",
+                "Unknown terminal status projected as the terminal event type",
             )
+            if fatal is not None:
+                return fatal
         if response.get("error") is not None:
             return self._protocol_error(
                 "responses.error_on_success_terminal", "/response/error"
@@ -686,13 +767,21 @@ class ResponsesAnthropicEventTranslator:
         if isinstance(output, list):
             missing_indices = sorted(set(self.states) - set(range(len(output))))
             if missing_indices:
-                return self._protocol_error(
+                # Streamed items are already delivered; a shorter terminal
+                # output list only loses the terminal projection of them.
+                fatal = self._recoverable_drift(
                     "responses.terminal_output_missing_item",
                     f"/output/{missing_indices[0]}",
+                    "Terminal output omitted an item that was already streamed",
                 )
+                if fatal is not None:
+                    return fatal
 
         self.terminal_response = copy.deepcopy(response)
-        self.response_id = terminal_id or self.response_id
+        # Unstable profiles must not replace the id that anchored an already
+        # emitted message, but a terminal-only stream still needs a unique id.
+        if self.stable_ids or not self.response_id:
+            self.response_id = terminal_id or self.response_id
         self.response_model = terminal_model or self.response_model
         events = self._start_message()
         terminal_drift = self._hydrate_terminal(response)
@@ -702,14 +791,30 @@ class ResponsesAnthropicEventTranslator:
         events.extend(self._drain())
         if self.message_stopped:
             return events
-        # Any remaining unknown/missing index is a fatal lifecycle drift.
+        # Items still open here were never projectable (missing type, unusable
+        # arguments, ...).  Balance any open Anthropic block and keep the
+        # already-delivered content instead of discarding the whole turn.
         remaining = [
             index for index, state in self.states.items()
             if not state.closed
         ]
         if remaining:
-            events.extend(self._protocol_error("responses.unclosed_output_item", f"/output/{min(remaining)}"))
-            return events
+            fatal = self._recoverable_drift(
+                "responses.unclosed_output_item",
+                f"/output/{min(remaining)}",
+                "Output item never reached a projectable state and was dropped",
+            )
+            if fatal is not None:
+                events.extend(fatal)
+                return events
+            for index in sorted(remaining):
+                state = self.states[index]
+                if state.started:
+                    events.extend(self._close_block(state))
+                else:
+                    state.closed = True
+                if self.next_output_index <= index:
+                    self.next_output_index = index + 1
         try:
             self.terminal_result = convert_responses_to_anthropic(
                 {"type": terminal_event_type, "response": response},
@@ -723,7 +828,13 @@ class ResponsesAnthropicEventTranslator:
             )
         except Exception as exc:
             events.extend(self._protocol_error("responses.terminal_conversion_failed", "/response"))
-            self._warn(type(exc).__name__, "/response")
+            # Keep the failure class in the diagnostics without ever copying an
+            # exception message, which can quote upstream payload content.
+            self.report.mark(
+                "/response",
+                PRESERVATION_UNSUPPORTED,
+                detail=f"Terminal conversion raised {type(exc).__name__}",
+            )
             return events
         if self.local_stop_sequence:
             stop_reason = "stop_sequence"
@@ -753,9 +864,8 @@ class ResponsesAnthropicEventTranslator:
                     "responses.missing_created_response_id", "/response/id"
                 )
             if self.response_created_seen:
-                if (
-                    response_id != self.response_id
-                    or response_model != self.created_response_model
+                if response_model != self.created_response_model or (
+                    self.stable_ids and response_id != self.response_id
                 ):
                     return self._protocol_error(
                         "responses.created_response_mutation", "/response"
@@ -766,6 +876,10 @@ class ResponsesAnthropicEventTranslator:
             self.created_response_model = response_model
             self.response_model = response_model or self.original_model
             return self._start_message()
+        if event_type not in self._TERMINAL_EVENTS:
+            skipped = self._skip_ignored_item_event(event_type, event)
+            if skipped is not None:
+                return skipped
         if event_type in self._NO_CONTENT_EVENTS:
             state = None
             if "output_index" in event:
@@ -785,7 +899,7 @@ class ResponsesAnthropicEventTranslator:
                         "responses.annotation_without_message",
                         f"/events/{event_type}",
                     )
-                if self.stable_item_ids:
+                if self.stable_ids:
                     expected_id = str(state.item.get("id") or "")
                     item_id = str(event.get("item_id") or "")
                     if expected_id and item_id != expected_id:
@@ -820,7 +934,7 @@ class ResponsesAnthropicEventTranslator:
                         "responses.web_search_lifecycle_without_item",
                         f"/events/{event_type}",
                     )
-                if self.stable_item_ids:
+                if self.stable_ids:
                     expected_id = str(state.item.get("id") or "")
                     item_id = str(event.get("item_id") or "")
                     if expected_id and item_id != expected_id:
@@ -852,8 +966,8 @@ class ResponsesAnthropicEventTranslator:
             drift = self._merge_item(state, item)
             if drift is not None:
                 return self._protocol_error(*drift)
-            if state.item_type not in ("reasoning", "message", "function_call", "custom_tool_call", "web_search_call"):
-                return self._protocol_error("responses.unknown_output_item", f"/output/{state.output_index}")
+            # Unknown item types are classified inside the drain so that items
+            # first seen in the terminal frame take exactly the same path.
             return self._drain()
         if event_type == "response.output_item.done":
             state = self._state(event.get("output_index"))
@@ -1067,12 +1181,46 @@ class ResponsesAnthropicEventTranslator:
             return self._terminal_events(response, event_type)
         if event_type in ("response.failed", "error"):
             error_value = event.get("response") if event_type == "response.failed" else event
-            error = anthropic_error_from_responses(error_value, 500)
+            # Preserve the upstream failure class so clients can back off on a
+            # rate limit instead of treating every failure as a proxy fault.
+            status_code = responses_error_status(error_value, 500)
+            error = anthropic_error_from_responses(error_value, status_code)
             self.protocol_failed = True
-            self.error_status_code = 502
+            self.error_status_code = status_code if status_code >= 400 else 502
             self.message_stopped = True
             return [("error", error)]
-        return self._protocol_error("responses.unknown_event", f"/events/{event_type or 'missing'}")
+        fatal = self._recoverable_drift(
+            "responses.unknown_event",
+            f"/events/{event_type if event_type in KNOWN_RESPONSES_EVENT_TYPES else 'unknown'}",
+            "Unknown Responses lifecycle event recorded and skipped",
+        )
+        return fatal if fatal is not None else []
+
+    def _skip_ignored_item_event(
+        self,
+        event_type: str,
+        event: Dict[str, Any],
+    ) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        """Swallow per-item events that belong to a skipped output item."""
+
+        if "output_index" not in event:
+            return None
+        try:
+            output_index = int(event["output_index"])
+        except (TypeError, ValueError):
+            return None
+        state = self.states.get(output_index)
+        if state is None or not state.ignored:
+            return None
+        if state.closed:
+            return self._protocol_error(
+                "responses.event_after_closed_output_item",
+                f"/output/{state.output_index}",
+            )
+        if event_type == "response.output_item.done":
+            state.done = True
+            return self._drain()
+        return []
 
     def finalize_interrupted(self) -> List[Tuple[str, Dict[str, Any]]]:
         if self.message_stopped:

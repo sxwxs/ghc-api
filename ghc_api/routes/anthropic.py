@@ -27,12 +27,14 @@ from ..api_helpers import (
 )
 from ..anthropic_responses import (
     MODE_COMPATIBILITY,
+    PRESERVATION_UNSUPPORTED,
     AnthropicResponsesConversionError,
     StrictJSONError,
     anthropic_error_from_responses,
     convert_anthropic_to_responses,
     convert_responses_to_anthropic,
     parse_strict_json_bytes,
+    responses_error_status,
 )
 from ..compat_profiles import (
     CLAUDE_CLI_TOOL_CONTRACT_BASELINES,
@@ -1916,6 +1918,10 @@ def handle_responses_anthropic_request(
         "incomplete": "response.incomplete",
         "failed": "response.failed",
     }.get(response_status, "response.unknown_status")
+    # A non-stream body is projected wholesale, so an unterminated or unknown
+    # status has no safe interpretation and must still fail closed even though
+    # unknown *streaming* events are only recorded and skipped.
+    unknown_terminal_status = response_event_type == "response.unknown_status"
     response_audit = audit_responses_event(
         {
             "type": response_event_type,
@@ -1932,7 +1938,7 @@ def handle_responses_anthropic_request(
         "request": request_audit.to_dict(),
         "response": response_audit.to_dict(),
     }
-    if response_audit.should_fail:
+    if response_audit.should_fail or unknown_terminal_status:
         anthropic_error = {
             "type": "error",
             "error": {
@@ -1965,8 +1971,11 @@ def handle_responses_anthropic_request(
         return _set_compatibility_headers(result, warnings)
 
     if upstream_response.get("status") == "failed" or upstream_response.get("error"):
-        anthropic_error = anthropic_error_from_responses(
+        failure_status = responses_error_status(
             upstream_response.get("error") or upstream_response, 500
+        )
+        anthropic_error = anthropic_error_from_responses(
+            upstream_response.get("error") or upstream_response, failure_status
         )
         cache.add_request(request_id, _responses_request_cache_record(
             request_headers=request_headers,
@@ -1976,7 +1985,7 @@ def handle_responses_anthropic_request(
             responses_payload=responses_payload,
             response_body=anthropic_error,
             upstream_response_body=upstream_response,
-            status_code=500,
+            status_code=failure_status,
             request_size=request_size,
             response_size=len(getattr(response, "text", "").encode("utf-8")),
             start_time=start_time,
@@ -1988,7 +1997,7 @@ def handle_responses_anthropic_request(
             compatibility_audit=combined_audit,
         ))
         result = jsonify(anthropic_error)
-        result.status_code = 500
+        result.status_code = failure_status
         return _set_compatibility_headers(result, warnings)
 
     try:
@@ -2034,6 +2043,40 @@ def handle_responses_anthropic_request(
     )
 
     anthropic_response = translated.response
+    if not anthropic_response.get("content") and any(
+        record.disposition == PRESERVATION_UNSUPPORTED
+        and record.source_path.startswith("/output")
+        for record in translated.report.records
+    ):
+        # Nothing was delivered yet on this transport, so refusing an answer
+        # that projected to no content at all costs the caller nothing and is
+        # more honest than returning an empty assistant message.
+        _log_compatibility_warnings(request_id, warnings)
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message="Unsupported Responses response shape",
+            status_code=502,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            response_report=translated.report,
+            compatibility_audit=combined_audit,
+            upstream_response_body=upstream_response,
+            response_size=len(getattr(response, "text", "").encode("utf-8")),
+        )
+        return _responses_transport_error(
+            message="Unsupported Responses response shape",
+            status_code=502,
+            warnings=warnings,
+        )
     cache.add_request(request_id, _responses_request_cache_record(
         request_headers=request_headers,
         client_ip=client_ip,

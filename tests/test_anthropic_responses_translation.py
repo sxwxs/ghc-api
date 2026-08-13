@@ -449,7 +449,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertEqual(other_usage.report.unaccounted_paths, [])
         self.assertNotIn("server_tool_use", other_usage.response["usage"])
 
-    def test_terminal_response_requires_id_output_and_supported_items(self):
+    def test_terminal_response_requires_id_and_output(self):
         base = {
             "id": "resp_valid",
             "model": "gpt-test",
@@ -460,12 +460,38 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         for mutation in (
             lambda value: value.pop("id"),
             lambda value: value.pop("output"),
-            lambda value: value.update({"output": [{"type": "agent_message"}]}),
         ):
             payload = copy.deepcopy(base)
             mutation(payload)
             with self.assertRaises(AnthropicResponsesConversionError):
                 convert_responses_to_anthropic(payload, original_model="gpt-test")
+
+    def test_unsupported_output_item_is_skipped_unless_lossless(self):
+        payload = {
+            "id": "resp_valid",
+            "model": "gpt-test",
+            "status": "completed",
+            "output": [
+                {"type": "agent_message", "private_value": "DO-NOT-LEAK"},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "kept"}],
+                },
+            ],
+            "usage": {},
+        }
+        result = convert_responses_to_anthropic(payload, original_model="gpt-test")
+        self.assertEqual(
+            result.response["content"], [{"type": "text", "text": "kept"}]
+        )
+        serialized = json.dumps(result.report.to_dict())
+        self.assertNotIn("DO-NOT-LEAK", serialized)
+        self.assertNotIn("agent_message", serialized)
+        with self.assertRaises(AnthropicResponsesConversionError):
+            convert_responses_to_anthropic(
+                payload, original_model="gpt-test", mode=MODE_LOSSLESS_REQUIRED
+            )
 
     def test_tool_result_error_is_explicit_approximation(self):
         payload = {
@@ -845,22 +871,32 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
         )
         self.assertEqual(result.response["stop_reason"], "max_tokens")
 
-    def test_unknown_or_missing_incomplete_reason_fails_closed(self):
+    def test_unknown_or_missing_incomplete_reason_is_projected_as_truncation(self):
         for details in ({"reason": "future-private-reason"}, {}, None):
             response = self.terminal_response()
             response["status"] = "incomplete"
             response["incomplete_details"] = details
             response["output"] = []
             with self.subTest(details=details):
-                with self.assertRaises(AnthropicResponsesConversionError) as raised:
-                    convert_responses_to_anthropic(
-                        response, original_model="claude"
-                    )
+                result = convert_responses_to_anthropic(
+                    response, original_model="claude"
+                )
+                # "Incomplete" always means truncation; the closest Anthropic
+                # stop reason keeps the turn usable instead of discarding it.
+                self.assertEqual(result.response["stop_reason"], "max_tokens")
                 self.assertTrue(any(
                     record.disposition == "unsupported"
                     and record.source_path.startswith("/incomplete_details")
-                    for record in raised.exception.report.records
+                    for record in result.report.records
                 ))
+                self.assertNotIn(
+                    "future-private-reason",
+                    json.dumps(result.report.to_dict()),
+                )
+                with self.assertRaises(AnthropicResponsesConversionError) as raised:
+                    convert_responses_to_anthropic(
+                        response, original_model="claude", mode=MODE_LOSSLESS_REQUIRED
+                    )
                 self.assertNotIn(
                     "future-private-reason",
                     json.dumps(raised.exception.report.to_dict()),

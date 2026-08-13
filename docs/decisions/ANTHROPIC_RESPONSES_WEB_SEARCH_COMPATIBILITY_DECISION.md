@@ -115,6 +115,8 @@ Without this validation, the implementation could add protocol complexity withou
 
 Captured Copilot Responses Lite events use different opaque item IDs for the same search across lifecycle events. These IDs may also be long or unsuitable for Anthropic tool identifiers.
 
+The same instability applies at the response level: live `response.created`, `response.in_progress`, and `response.completed` frames each carry a different encrypted `response.id`. Cross-frame identity therefore carries no protocol meaning on this profile and must not be validated as drift (it previously produced fatal mid-stream 502s). Profiles record this through `ResponsesWireProfile.stable_ids`.
+
 The translator cannot use those IDs directly. It must correlate Lite events by `output_index` and generate its own stable Anthropic ID. Public Responses profiles may require stricter upstream identity validation, so the behavior must be profile-aware.
 
 ### 4. Streaming, terminal responses, replay, and caches can diverge

@@ -1,0 +1,268 @@
+{
+  "events": [
+    {
+      "response": {
+        "id": "<id:1>",
+        "model": "gpt-5.6-sol"
+      },
+      "sequence_number": 0,
+      "type": "response.created"
+    },
+    {
+      "response": {
+        "id": "<id:2>",
+        "model": "gpt-5.6-sol"
+      },
+      "sequence_number": 1,
+      "type": "response.in_progress"
+    },
+    {
+      "item": {
+        "content": [],
+        "encrypted_content": "<opaque>",
+        "id": "<item_id:1>",
+        "summary": [],
+        "type": "reasoning"
+      },
+      "output_index": 0,
+      "sequence_number": 2,
+      "type": "response.output_item.added"
+    },
+    {
+      "item": {
+        "content": [],
+        "encrypted_content": "<opaque>",
+        "id": "<item_id:2>",
+        "summary": [
+          {
+            "text": "<text>",
+            "type": "summary_text"
+          }
+        ],
+        "type": "reasoning"
+      },
+      "output_index": 0,
+      "sequence_number": 3,
+      "type": "response.output_item.done"
+    },
+    {
+      "item": {
+        "content": [],
+        "id": "<item_id:3>",
+        "role": "assistant",
+        "status": "in_progress",
+        "type": "message"
+      },
+      "output_index": 1,
+      "sequence_number": 4,
+      "type": "response.output_item.added"
+    },
+    {
+      "content_index": 0,
+      "item_id": "<item_id:4>",
+      "output_index": 1,
+      "part": {
+        "annotations": [],
+        "text": "",
+        "type": "output_text"
+      },
+      "sequence_number": 5,
+      "type": "response.content_part.added"
+    },
+    {
+      "content_index": 0,
+      "delta": "<chunk-1>",
+      "item_id": "<item_id:5>",
+      "output_index": 1,
+      "sequence_number": 6,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": "<chunk-2>",
+      "item_id": "<item_id:6>",
+      "output_index": 1,
+      "sequence_number": 7,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "delta": "<chunk-3>",
+      "item_id": "<item_id:7>",
+      "output_index": 1,
+      "sequence_number": 8,
+      "type": "response.output_text.delta"
+    },
+    {
+      "content_index": 0,
+      "item_id": "<item_id:8>",
+      "output_index": 1,
+      "sequence_number": 9,
+      "text": "<chunk-1><chunk-2><chunk-3>",
+      "type": "response.output_text.done"
+    },
+    {
+      "content_index": 0,
+      "item_id": "<item_id:9>",
+      "output_index": 1,
+      "part": {
+        "annotations": [],
+        "text": "<chunk-1><chunk-2><chunk-3>",
+        "type": "output_text"
+      },
+      "sequence_number": 10,
+      "type": "response.content_part.done"
+    },
+    {
+      "item": {
+        "content": [
+          {
+            "annotations": [],
+            "text": "<chunk-1><chunk-2><chunk-3>",
+            "type": "output_text"
+          }
+        ],
+        "id": "<item_id:10>",
+        "role": "assistant",
+        "status": "completed",
+        "type": "message"
+      },
+      "output_index": 1,
+      "sequence_number": 11,
+      "type": "response.output_item.done"
+    },
+    {
+      "item": {
+        "arguments": "",
+        "call_id": "<call_id:1>",
+        "id": "<item_id:11>",
+        "name": "fixture_tool_001",
+        "status": "in_progress",
+        "type": "function_call"
+      },
+      "output_index": 2,
+      "sequence_number": 12,
+      "type": "response.output_item.added"
+    },
+    {
+      "delta": "{\"fixture_arg\": ",
+      "item_id": "<item_id:12>",
+      "output_index": 2,
+      "sequence_number": 13,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "\"<value>\"",
+      "item_id": "<item_id:13>",
+      "output_index": 2,
+      "sequence_number": 14,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "delta": "}",
+      "item_id": "<item_id:14>",
+      "output_index": 2,
+      "sequence_number": 15,
+      "type": "response.function_call_arguments.delta"
+    },
+    {
+      "arguments": "{\"fixture_arg\": \"<value>\"}",
+      "item_id": "<item_id:15>",
+      "output_index": 2,
+      "sequence_number": 16,
+      "type": "response.function_call_arguments.done"
+    },
+    {
+      "item": {
+        "arguments": "{\"fixture_arg\": \"<value>\"}",
+        "call_id": "<call_id:1>",
+        "id": "<item_id:16>",
+        "name": "fixture_tool_001",
+        "status": "completed",
+        "type": "function_call"
+      },
+      "output_index": 2,
+      "sequence_number": 17,
+      "type": "response.output_item.done"
+    },
+    {
+      "response": {
+        "error": null,
+        "id": "<id:3>",
+        "incomplete_details": null,
+        "model": "gpt-5.6-sol",
+        "output": [
+          {
+            "content": [],
+            "encrypted_content": "<opaque>",
+            "id": "<item_id:17>",
+            "summary": [
+              {
+                "text": "<text>",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning"
+          },
+          {
+            "content": [
+              {
+                "annotations": [],
+                "text": "<chunk-1><chunk-2><chunk-3>",
+                "type": "output_text"
+              }
+            ],
+            "id": "<item_id:18>",
+            "role": "assistant",
+            "status": "completed",
+            "type": "message"
+          },
+          {
+            "arguments": "{\"fixture_arg\": \"<value>\"}",
+            "call_id": "<call_id:1>",
+            "id": "<item_id:19>",
+            "name": "fixture_tool_001",
+            "status": "completed",
+            "type": "function_call"
+          }
+        ],
+        "status": "completed",
+        "usage": {
+          "input_tokens": 1,
+          "input_tokens_details": {
+            "cached_tokens": 0
+          },
+          "output_tokens": 1
+        }
+      },
+      "sequence_number": 18,
+      "type": "response.completed"
+    }
+  ],
+  "expected": {
+    "content_block_types": [
+      "thinking",
+      "text",
+      "tool_use"
+    ],
+    "event_suffix": [
+      "message_delta",
+      "message_stop"
+    ],
+    "text": "<chunk-1><chunk-2><chunk-3>",
+    "tool_input": {
+      "fixture_arg": "<value>"
+    },
+    "tool_name": "fixture_tool_001"
+  },
+  "fixture_schema": "ghc-anthropic-responses-coherent-stream-v1",
+  "observed": {
+    "distinct_response_ids": 3,
+    "response_id_frames": 3
+  },
+  "profile": "copilot_responses_lite",
+  "source": {
+    "file": "2026-07-10.jl",
+    "record": 1
+  }
+}

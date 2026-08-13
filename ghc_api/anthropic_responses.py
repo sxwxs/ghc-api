@@ -280,6 +280,9 @@ class ResponsesWireProfile:
     supports_reasoning_context: bool
     reasoning_efforts: Tuple[str, ...]
     default_text_verbosity: Optional[str] = None
+    # Some backends re-encrypt every identifier per SSE event, so the same
+    # logical response/item carries a different opaque id in each frame.
+    stable_ids: bool = True
 
 
 WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
@@ -312,6 +315,10 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
         supports_reasoning_context=True,
         reasoning_efforts=("none", "low", "medium", "high", "xhigh", "max"),
         default_text_verbosity="low",
+        # Observed live: response.created / response.in_progress /
+        # response.completed each carry a different encrypted response id, and
+        # every item event carries a freshly encrypted item id.
+        stable_ids=False,
     ),
 }
 
@@ -1819,11 +1826,20 @@ def convert_responses_to_anthropic(
                     if key not in {"type", "call_id", "id", "name", "arguments", "input"}:
                         report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Tool-call metadata retained for diagnostics", subtree=True)
             else:
-                report.mark(path, PRESERVATION_UNSUPPORTED, detail=f"Unknown Responses output item type: {item_type}", subtree=True)
-                raise AnthropicResponsesConversionError(
-                    f"Responses output item type is not safely representable: {item_type}",
-                    report,
+                report.mark(
+                    path,
+                    PRESERVATION_UNSUPPORTED,
+                    detail="Unknown Responses output item type recorded and skipped",
+                    subtree=True,
                 )
+                if mode == MODE_LOSSLESS_REQUIRED:
+                    raise AnthropicResponsesConversionError(
+                        "Responses output item type is not safely representable",
+                        report,
+                    )
+                # Skipping one unrepresentable item keeps the rest of a
+                # finished answer; refusing it delivers nothing at all.
+                seen_non_reasoning_output = True
 
     active_stop_sequences = list(stop_sequences or [])
     content, matched_stop = _truncate_blocks_at_stop(
@@ -1854,10 +1870,14 @@ def convert_responses_to_anthropic(
                 detail="Unknown or missing incomplete response reason",
                 subtree=not isinstance(incomplete_value, dict),
             )
-            raise AnthropicResponsesConversionError(
-                "Responses incomplete reason is not safely representable",
-                report,
-            )
+            if mode == MODE_LOSSLESS_REQUIRED:
+                raise AnthropicResponsesConversionError(
+                    "Responses incomplete reason is not safely representable",
+                    report,
+                )
+            # "Incomplete" always means the answer was cut short; reporting the
+            # closest Anthropic truncation reason beats discarding the content.
+            incomplete_stop_reason = "max_tokens"
     if matched_stop:
         stop_reason = "stop_sequence"
     elif incomplete_stop_reason is not None:
@@ -1949,6 +1969,61 @@ def convert_responses_to_anthropic(
         report=report,
         matched_stop_sequence=matched_stop,
     )
+
+
+_RESPONSES_ERROR_STATUS_BY_CODE = {
+    "rate_limit_exceeded": 429,
+    "rate_limit_error": 429,
+    "insufficient_quota": 429,
+    "quota_exceeded": 429,
+    "tokens_exceeded": 429,
+    "overloaded": 529,
+    "overloaded_error": 529,
+    "server_overloaded": 529,
+    "invalid_request_error": 400,
+    "invalid_request": 400,
+    "context_length_exceeded": 400,
+    "invalid_prompt": 400,
+    "string_above_max_length": 400,
+    "authentication_error": 401,
+    "invalid_api_key": 401,
+    "unauthorized": 401,
+    "permission_error": 403,
+    "permission_denied": 403,
+    "model_not_found": 404,
+    "not_found_error": 404,
+    "request_too_large": 413,
+    "server_error": 500,
+    "api_error": 500,
+}
+
+
+def responses_error_status(error_value: Any, default: int = 500) -> int:
+    """Map an upstream Responses error to the HTTP class it really is.
+
+    Collapsing every upstream failure into one status hides retryable
+    conditions (rate limits, overload) from clients that back off on them.
+    """
+
+    error: Any = error_value
+    if isinstance(error, dict) and isinstance(error.get("error"), dict):
+        error = error["error"]
+    if not isinstance(error, dict):
+        return default
+    status = error.get("status") or error.get("status_code") or error.get("http_status")
+    if isinstance(status, bool):
+        status = None
+    if isinstance(status, str) and status.isdigit():
+        status = int(status)
+    if isinstance(status, int) and 400 <= status <= 599:
+        return status
+    for key in ("code", "type", "param"):
+        value = error.get(key)
+        if isinstance(value, str):
+            mapped = _RESPONSES_ERROR_STATUS_BY_CODE.get(value.strip().lower())
+            if mapped is not None:
+                return mapped
+    return default
 
 
 def anthropic_error_from_responses(error_value: Any, status_code: int = 500) -> Dict[str, Any]:

@@ -816,35 +816,56 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                     item, mode=MODE_LOSSLESS_REQUIRED
                 ).should_fail)
 
-    def test_unknown_event_fails_closed_in_both_modes_without_value_leak(self):
-        for mode in (MODE_COMPATIBILITY, MODE_LOSSLESS_REQUIRED):
+    def test_unknown_event_is_recorded_and_skipped_without_value_leak(self):
+        expected = {
+            MODE_COMPATIBILITY: (False, "warn"),
+            MODE_LOSSLESS_REQUIRED: (True, "reject"),
+        }
+        for mode, (should_fail, action) in expected.items():
             audit = audit_responses_event(
                 {"type": "response.private_future.delta", "delta": "SECRET"}, mode=mode
             )
             with self.subTest(mode=mode):
-                self.assertTrue(audit.should_fail)
+                # A new upstream lifecycle event must never destroy a live
+                # exchange in compatibility mode; it is recorded and skipped.
+                self.assertEqual(audit.should_fail, should_fail)
                 self.assertEqual(audit.warnings[0]["code"], "responses.unknown_event")
-                self.assertEqual(audit.warnings[0]["action"], "reject")
+                self.assertEqual(audit.warnings[0]["action"], action)
                 serialized = json.dumps(audit.warnings, sort_keys=True)
                 self.assertNotIn("response.private_future.delta", serialized)
                 self.assertNotIn("SECRET", serialized)
 
-    def test_unknown_item_fails_closed_directly_and_inside_terminal_event(self):
-        direct = audit_responses_item({"type": "private_future_item", "body": "SECRET"})
-        terminal = audit_responses_event(
-            {
-                "type": "response.completed",
-                "response": {
-                    "output": [{"type": "private_future_item", "body": "SECRET"}]
-                },
-            }
-        )
-        for audit in (direct, terminal):
-            self.assertTrue(audit.should_fail)
-            self.assertIn("responses.unknown_item", {item["code"] for item in audit.warnings})
-            serialized = json.dumps(audit.warnings, sort_keys=True)
-            self.assertNotIn("private_future_item", serialized)
-            self.assertNotIn("SECRET", serialized)
+    def test_unknown_item_is_recorded_directly_and_inside_terminal_event(self):
+        def audits(mode):
+            return (
+                audit_responses_item(
+                    {"type": "private_future_item", "body": "SECRET"}, mode=mode
+                ),
+                audit_responses_event(
+                    {
+                        "type": "response.completed",
+                        "response": {
+                            "output": [{"type": "private_future_item", "body": "SECRET"}]
+                        },
+                    },
+                    mode=mode,
+                ),
+            )
+
+        for mode, should_fail in (
+            (MODE_COMPATIBILITY, False),
+            (MODE_LOSSLESS_REQUIRED, True),
+        ):
+            for audit in audits(mode):
+                with self.subTest(mode=mode):
+                    self.assertEqual(audit.should_fail, should_fail)
+                    self.assertIn(
+                        "responses.unknown_item",
+                        {item["code"] for item in audit.warnings},
+                    )
+                    serialized = json.dumps(audit.warnings, sort_keys=True)
+                    self.assertNotIn("private_future_item", serialized)
+                    self.assertNotIn("SECRET", serialized)
 
     def test_non_object_event_and_item_fail_closed(self):
         self.assertTrue(audit_responses_event("private event").should_fail)

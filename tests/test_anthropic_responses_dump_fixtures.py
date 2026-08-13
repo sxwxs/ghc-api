@@ -62,6 +62,29 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
                     self.assertIn("<opaque>", serialized)
                     self.assertIn("<input>", serialized)
 
+    def test_sanitizer_preserves_cross_field_item_id_relations(self):
+        sanitizer = generator.Sanitizer()
+        added = sanitizer.value({
+            "type": "response.output_item.added",
+            "item": {
+                "type": "function_call",
+                "id": "shared-item-id",
+                "call_id": "stable-call-id",
+            },
+        })
+        delta = sanitizer.value({
+            "type": "response.function_call_arguments.delta",
+            "item_id": "shared-item-id",
+        })
+        response = sanitizer.value({
+            "object": "response",
+            "id": "shared-item-id",
+        })
+
+        self.assertEqual(added["item"]["id"], delta["item_id"])
+        self.assertNotEqual(added["item"]["id"], added["item"]["call_id"])
+        self.assertNotEqual(added["item"]["id"], response["id"])
+
     def test_manifest_declares_no_coverage_gaps(self):
         for profile, profile_manifest in self.manifest["profiles"].items():
             with self.subTest(profile=profile):
@@ -254,9 +277,15 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
                 # Samples are field-covering minimal events rather than one
                 # coherent stream. Processing each from a clean state proves
                 # every observed event/field shape is accepted without using
-                # any source prompt, identity, or encrypted value.
+                # any source prompt, identity, or encrypted value.  Ordered
+                # replay is covered separately by the coherent-stream fixtures.
                 translated = translator.process(event.get("type", ""), event)
                 self.assertIsInstance(translated, list)
+                self.assertFalse(
+                    translator.protocol_failed,
+                    (event.get("type"), translator.compatibility_warnings),
+                )
+                self.assertNotIn("error", [name for name, _ in translated])
 
     def test_sanitized_coherent_stream_matches_output_oracle(self):
         document = json.loads(
@@ -299,6 +328,82 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
         self.assertEqual(terminal.response["stop_reason"], expected["stop_reason"])
         for key, value in expected["usage"].items():
             self.assertEqual(terminal.response["usage"][key], value)
+
+    def test_captured_lite_stream_replays_end_to_end(self):
+        """Replay one real Responses-Lite stream in its original order.
+
+        The structural catalogs above feed each event to a fresh state machine,
+        so no cross-frame rule (identifier rotation, index ordering, delta/done
+        text continuity) was ever exercised against captured traffic.  A live
+        502 regression hid in exactly that gap.
+        """
+
+        document = json.loads(
+            (FIXTURE_DIR / "coherent_stream_lite.json").read_text(encoding="utf-8")
+        )
+        serialized = json.dumps(document, ensure_ascii=False, sort_keys=True)
+        self.assertEqual(generator.audit_sanitized_fixture(document), [])
+        self.assertNotIn("Authorization", serialized)
+        self.assertNotIn("Bearer ", serialized)
+        self.assertNotRegex(serialized, r"[A-Za-z]:\\")
+
+        # The captured backend re-encrypts the response id on every frame; the
+        # fixture must keep that property or it cannot prove anything.
+        response_ids = [
+            event["response"]["id"]
+            for event in document["events"]
+            if isinstance(event.get("response"), dict) and "id" in event["response"]
+        ]
+        self.assertGreater(len(response_ids), 1)
+        self.assertEqual(len(set(response_ids)), len(response_ids))
+        self.assertEqual(
+            document["observed"]["distinct_response_ids"], len(set(response_ids))
+        )
+
+        translator = ResponsesAnthropicEventTranslator(
+            original_model="claude-fixture",
+            reasoning_model="gpt-fixture",
+            wire_profile=document["profile"],
+        )
+        output = []
+        for event in document["events"]:
+            audit = audit_responses_event(event, mode="compatibility")
+            self.assertFalse(audit.should_fail, event["type"])
+            output.extend(translator.process(event["type"], event))
+
+        self.assertFalse(translator.protocol_failed)
+        self.assertNotIn("error", [name for name, _ in output])
+        self.assertIsNotNone(translator.terminal_result)
+        expected = document["expected"]
+        names = [name for name, _ in output]
+        self.assertEqual(names[-2:], expected["event_suffix"])
+        self.assertEqual(
+            [
+                event["content_block"]["type"]
+                for name, event in output
+                if name == "content_block_start"
+            ],
+            expected["content_block_types"],
+        )
+        streamed_text = "".join(
+            event["delta"]["text"]
+            for name, event in output
+            if name == "content_block_delta"
+            and event.get("delta", {}).get("type") == "text_delta"
+        )
+        self.assertEqual(streamed_text, expected["text"])
+        content = translator.terminal_result.response["content"]
+        self.assertEqual(
+            [block["type"] for block in content], expected["content_block_types"]
+        )
+        text_block = next(block for block in content if block["type"] == "text")
+        self.assertEqual(text_block["text"], expected["text"])
+        if expected["tool_name"] is not None:
+            tool_block = next(
+                block for block in content if block["type"] == "tool_use"
+            )
+            self.assertEqual(tool_block["name"], expected["tool_name"])
+            self.assertEqual(tool_block["input"], expected["tool_input"])
 
 
 if __name__ == "__main__":

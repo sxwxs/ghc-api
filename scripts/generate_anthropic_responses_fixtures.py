@@ -10,6 +10,19 @@ The resulting fixtures are structural catalogs, not replay transcripts.  Each
 sample records the protocol root it covers (headers, request, event, ...), so
 the accompanying manifest can prove that every observed structural token is
 represented without retaining the original conversation.
+
+Sanitizing must preserve *relations*, not just types.  Identifier equality and
+index ordering are protocol contracts: an earlier version replaced every id
+with one constant placeholder, which turned an upstream backend that rotates
+every identifier into an apparently stable one and hid a production 502 from
+every fixture test.  Distinct source ids therefore map to distinct markers and
+structural indices are copied verbatim.  Fixtures generated before that change
+still carry the collapsed form until they are regenerated from a source dump.
+
+Ordered replay coverage lives in ``coherent_stream_lite.json``, built with::
+
+    python scripts/generate_anthropic_responses_fixtures.py \\
+        --coherent-lite <dump.jl> [--coherent-lite-record N]
 """
 
 from __future__ import annotations
@@ -32,7 +45,28 @@ GPT_DUMP = "2026-07-10.jl"
 TARGET_GPT_MODEL = "gpt-5.6-sol"
 # Hand-authored, fully synthetic output-oracle fixture. It lives beside the
 # generated structural catalogs but must survive a normal regeneration.
-PRESERVED_FIXTURE_NAMES = {"coherent_stream.json"}
+PRESERVED_FIXTURE_NAMES = {"coherent_stream.json", "coherent_stream_lite.json"}
+
+# Replay fixture derived from one real Copilot Responses-Lite stream. Built by
+# ``--coherent-lite`` because the structural catalogs above deliberately cover
+# shapes rather than ordered streams, which left cross-frame lifecycle rules
+# (identifier stability, index ordering, text continuity) completely untested.
+COHERENT_LITE_FIXTURE = "coherent_stream_lite.json"
+COHERENT_LITE_SCHEMA = "ghc-anthropic-responses-coherent-stream-v1"
+# Consecutive same-shaped delta frames are truncated: a run proves the shape
+# and the continuity rule, and the rest is only source prose length.
+MAX_DELTA_RUN = 3
+
+# Indices and sequence numbers are protocol structure, not content: collapsing
+# them the way generic numbers are collapsed would destroy ordering.
+STRUCTURAL_NUMERIC_KEYS = {
+    "sequence_number",
+    "output_index",
+    "content_index",
+    "summary_index",
+    "annotation_index",
+    "partial_image_index",
+}
 
 SENSITIVE_HEADER_NAMES = {"authorization", "proxy-authorization", "cookie", "set-cookie"}
 
@@ -239,6 +273,19 @@ class Sanitizer:
 
     def __init__(self) -> None:
         self._tool_names: Dict[str, str] = {}
+        # Identifier equality/inequality *is* protocol shape: it decides which
+        # cross-frame identity rules a translator may rely on.  Collapsing every
+        # id onto one placeholder silently turned unstable upstream ids into
+        # stable ones and hid a live 502 from every fixture test, so distinct
+        # source values must stay distinct here.
+        self._identifiers: Dict[Tuple[str, str], str] = {}
+
+    def identifier(self, value: str, kind: str) -> str:
+        key = (kind, value)
+        if key not in self._identifiers:
+            index = sum(1 for existing in self._identifiers if existing[0] == kind) + 1
+            self._identifiers[key] = f"<{kind}:{index}>"
+        return self._identifiers[key]
 
     def tool_name(self, value: str) -> str:
         if value in SAFE_TOOL_NAMES:
@@ -293,6 +340,8 @@ class Sanitizer:
             return value
         if isinstance(value, (int, float)):
             key = path[-1] if path else ""
+            if key in STRUCTURAL_NUMERIC_KEYS:
+                return value
             if self._in_schema(path) and key in SCHEMA_NUMERIC_KEYS:
                 return value
             if key in {"max_tokens", "max_output_tokens", "budget_tokens", "temperature", "top_p"}:
@@ -318,6 +367,16 @@ class Sanitizer:
     def _in_schema(path: Sequence[str]) -> bool:
         return any(part in {"input_schema", "parameters", "json_schema"} for part in path)
 
+    @staticmethod
+    def _is_responses_output_item_id(path: Sequence[str]) -> bool:
+        """Return whether ``path`` names a Responses output-item id."""
+
+        if len(path) < 2:
+            return False
+        if path[-2] == "item":
+            return True
+        return len(path) >= 3 and path[-2] == "[]" and path[-3] == "output"
+
     def _string(self, value: str, path: Tuple[str, ...], parent: Optional[Mapping[str, Any]]) -> str:
         key = path[-1] if path else ""
         parent_type = parent.get("type") if isinstance(parent, Mapping) else None
@@ -341,15 +400,20 @@ class Sanitizer:
             return "<grammar>"
 
         if key in {"call_id", "tool_use_id"}:
-            return "<call_id>"
+            return self.identifier(value, "call_id")
         if key == "item_id":
-            return "<item_id>"
+            return self.identifier(value, "item_id")
         if key == "id":
+            # ``item.id`` and lifecycle ``item_id`` refer to the same protocol
+            # identity and must share a namespace. A function call's separate
+            # ``call_id`` remains stable independently of its output-item id.
+            if self._is_responses_output_item_id(path):
+                return self.identifier(value, "item_id")
             if parent_type in {"tool_use", "function_call", "custom_tool_call"}:
-                return "<call_id>"
-            return "<id>"
+                return self.identifier(value, "call_id")
+            return self.identifier(value, "id")
         if key in {"previous_response_id", "safety_identifier", "prompt_cache_key"}:
-            return "<id>"
+            return self.identifier(value, "id")
 
         lower_key = key.lower()
         if any(token in lower_key for token in ("user", "session", "thread", "turn", "window", "installation")):
@@ -611,6 +675,162 @@ def _manifest_for_root(observed: Observation, covered: Observation) -> Dict[str,
     }
 
 
+def build_coherent_lite_stream(
+    record: Mapping[str, Any],
+    *,
+    source_file: str,
+    record_number: int,
+) -> Dict[str, Any]:
+    """Turn one captured Responses-Lite stream into a replayable fixture.
+
+    The event order, indices, and identifier (in)equality of the source are
+    preserved because those are exactly the properties a streaming translator
+    must honour.  Every payload value is replaced with synthetic, internally
+    consistent text so the fixture stays a protocol artefact.
+    """
+
+    sanitizer = Sanitizer()
+    events: List[Dict[str, Any]] = []
+    previous_type: Optional[str] = None
+    run_length = 0
+    for raw in record.get("raw_events") or []:
+        event = _parse_raw_event(raw)
+        if event is None:
+            continue
+        event_type = str(event.get("type") or "")
+        if event_type.endswith(".delta"):
+            run_length = run_length + 1 if event_type == previous_type else 1
+            if run_length > MAX_DELTA_RUN:
+                previous_type = event_type
+                continue
+        else:
+            run_length = 0
+        previous_type = event_type
+        events.append(sanitizer.value(event, ("event",)))
+
+    text_parts: Dict[Tuple[int, int], List[str]] = defaultdict(list)
+    argument_parts: Dict[int, List[str]] = defaultdict(list)
+    argument_pieces = ('{"fixture_arg": ', '"<value>"', "}")
+
+    def joined_text(output_index: int, content_index: int) -> str:
+        return "".join(text_parts[(output_index, content_index)])
+
+    for event in events:
+        event_type = str(event.get("type") or "")
+        output_index = event.get("output_index")
+        if event_type == "response.output_text.delta":
+            key = (output_index, event.get("content_index", 0))
+            event["delta"] = f"<chunk-{len(text_parts[key]) + 1}>"
+            text_parts[key].append(event["delta"])
+        elif event_type == "response.output_text.done":
+            event["text"] = joined_text(output_index, event.get("content_index", 0))
+        elif event_type == "response.content_part.added":
+            part = event.get("part")
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                # An added part opens the empty prefix of the delta stream.
+                part["text"] = ""
+        elif event_type == "response.content_part.done":
+            part = event.get("part")
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                part["text"] = joined_text(output_index, event.get("content_index", 0))
+        elif event_type == "response.function_call_arguments.delta":
+            index = len(argument_parts[output_index])
+            piece = argument_pieces[min(index, len(argument_pieces) - 1)]
+            if index >= len(argument_pieces):
+                piece = ""
+            event["delta"] = piece
+            argument_parts[output_index].append(piece)
+        elif event_type == "response.function_call_arguments.done":
+            event["arguments"] = "".join(argument_pieces)
+            argument_parts[output_index] = list(argument_pieces)
+
+    def repair_item(
+        item: MutableMapping[str, Any],
+        output_index: int,
+        opening: bool = False,
+    ) -> None:
+        if item.get("type") == "message":
+            parts = item.get("content")
+            if isinstance(parts, list):
+                for content_index, part in enumerate(parts):
+                    if isinstance(part, dict) and part.get("type") == "output_text":
+                        part["text"] = (
+                            "" if opening else joined_text(output_index, content_index)
+                        )
+        elif item.get("type") == "function_call":
+            # An opening item carries the empty prefix of the argument stream.
+            item["arguments"] = "" if opening else "".join(argument_pieces)
+
+    for event in events:
+        item = event.get("item")
+        if isinstance(item, dict):
+            repair_item(
+                item,
+                event.get("output_index"),
+                opening=event.get("type") == "response.output_item.added",
+            )
+        response = event.get("response")
+        if isinstance(response, dict) and isinstance(response.get("output"), list):
+            for output_index, output_item in enumerate(response["output"]):
+                if isinstance(output_item, dict):
+                    repair_item(output_item, output_index)
+
+    terminal = next(
+        (
+            event
+            for event in reversed(events)
+            if event.get("type") in ("response.completed", "response.incomplete")
+        ),
+        None,
+    )
+    if terminal is None:
+        raise ValueError("source record has no terminal Responses event")
+    terminal_output = terminal.get("response", {}).get("output") or []
+    response_ids = [
+        event["response"]["id"]
+        for event in events
+        if isinstance(event.get("response"), dict) and "id" in event["response"]
+    ]
+    expected_text = "".join(
+        joined_text(output_index, content_index)
+        for output_index, item in enumerate(terminal_output)
+        if isinstance(item, dict) and item.get("type") == "message"
+        for content_index, part in enumerate(item.get("content") or [])
+        if isinstance(part, dict) and part.get("type") == "output_text"
+    )
+    block_types = []
+    tool_name = None
+    for item in terminal_output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "reasoning":
+            block_types.append("thinking")
+        elif item.get("type") == "message":
+            block_types.append("text")
+        elif item.get("type") in ("function_call", "custom_tool_call"):
+            block_types.append("tool_use")
+            tool_name = item.get("name")
+    return {
+        "fixture_schema": COHERENT_LITE_SCHEMA,
+        "profile": "copilot_responses_lite",
+        "source": {"file": source_file, "record": record_number},
+        "observed": {
+            # Recorded from the source stream: the backend re-encrypts every
+            # identifier per frame, so cross-frame identity means nothing here.
+            "distinct_response_ids": len(set(response_ids)),
+            "response_id_frames": len(response_ids),
+        },
+        "events": events,
+        "expected": {
+            "event_suffix": ["message_delta", "message_stop"],
+            "content_block_types": block_types,
+            "text": expected_text,
+            "tool_name": tool_name,
+            "tool_input": json.loads("".join(argument_pieces)) if tool_name else None,
+        },
+    }
+
+
 def build_outputs(source_root: Path) -> Dict[str, str]:
     profiles = collect_profiles(source_root)
     output_documents: Dict[str, Dict[str, Any]] = {}
@@ -689,6 +909,16 @@ def build_outputs(source_root: Path) -> Dict[str, str]:
     return result
 
 
+def _is_synthetic_text(value: str) -> bool:
+    """Accept the synthetic markers a coherent replay stream needs.
+
+    A replay fixture must keep delta/done text continuity, which one constant
+    placeholder cannot express, so numbered chunk markers are also allowed.
+    """
+
+    return value == "<text>" or re.fullmatch(r"(<chunk-\d+>)*", value) is not None
+
+
 def audit_sanitized_fixture(document: Mapping[str, Any]) -> List[str]:
     """Return human-readable violations if a fixture contains source-like data."""
 
@@ -701,7 +931,7 @@ def audit_sanitized_fixture(document: Mapping[str, Any]) -> List[str]:
                     violations.append(f"{_pointer('fixture', path + (key,))}: sensitive header retained")
                 if key == "description" and isinstance(child, str) and child != "<description>":
                     violations.append(f"{_pointer('fixture', path + (key,))}: description not redacted")
-                if key in {"text", "thinking"} and isinstance(child, str) and child != "<text>":
+                if key in {"text", "thinking"} and isinstance(child, str) and not _is_synthetic_text(child):
                     violations.append(f"{_pointer('fixture', path + (key,))}: text not redacted")
                 if key in {"signature", "encrypted_content", "data"} and isinstance(child, str) and child != "<opaque>":
                     violations.append(f"{_pointer('fixture', path + (key,))}: opaque content not redacted")
@@ -724,7 +954,12 @@ def audit_sanitized_fixture(document: Mapping[str, Any]) -> List[str]:
     return violations
 
 
-def _write_or_check(outputs: Mapping[str, str], output_dir: Path, check: bool) -> int:
+def _write_or_check(
+    outputs: Mapping[str, str],
+    output_dir: Path,
+    check: bool,
+    prune: bool = True,
+) -> int:
     if check:
         mismatches = []
         for name, expected in outputs.items():
@@ -739,12 +974,15 @@ def _write_or_check(outputs: Mapping[str, str], output_dir: Path, check: bool) -
 
     output_dir.mkdir(parents=True, exist_ok=True)
     expected_names = set(outputs)
-    for existing in output_dir.glob("*.json"):
-        if (
-            existing.name not in expected_names
-            and existing.name not in PRESERVED_FIXTURE_NAMES
-        ):
-            existing.unlink()
+    # A partial run (for example one replay fixture) must never delete the
+    # fixtures it did not generate.
+    if prune:
+        for existing in output_dir.glob("*.json"):
+            if (
+                existing.name not in expected_names
+                and existing.name not in PRESERVED_FIXTURE_NAMES
+            ):
+                existing.unlink()
     for name, content in outputs.items():
         (output_dir / name).write_text(content, encoding="utf-8", newline="\n")
     return 0
@@ -760,7 +998,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         default=repo_root / "tests" / "fixtures" / "anthropic_responses",
     )
     parser.add_argument("--check", action="store_true", help="fail if checked-in fixtures differ")
+    parser.add_argument(
+        "--coherent-lite",
+        type=Path,
+        help="JSONL dump to derive the ordered Responses-Lite replay fixture from",
+    )
+    parser.add_argument(
+        "--coherent-lite-record",
+        type=int,
+        default=None,
+        help="1-based record number inside --coherent-lite to use",
+    )
     args = parser.parse_args(argv)
+
+    if args.coherent_lite is not None:
+        source = args.coherent_lite.resolve()
+        selected: Optional[Tuple[int, Dict[str, Any]]] = None
+        for record_number, record in _iter_jsonl(source):
+            if args.coherent_lite_record is not None:
+                if record_number == args.coherent_lite_record:
+                    selected = (record_number, record)
+                    break
+                continue
+            types = {
+                str((_parse_raw_event(raw) or {}).get("type") or "")
+                for raw in record.get("raw_events") or []
+            }
+            if "response.completed" in types:
+                selected = (record_number, record)
+                break
+        if selected is None:
+            print("no usable stream record found", file=sys.stderr)
+            return 1
+        document = build_coherent_lite_stream(
+            selected[1], source_file=source.name, record_number=selected[0]
+        )
+        violations = audit_sanitized_fixture(document)
+        if violations:
+            print("refusing to write an unsanitized fixture:", file=sys.stderr)
+            for violation in violations:
+                print("  " + violation, file=sys.stderr)
+            return 1
+        return _write_or_check(
+            {COHERENT_LITE_FIXTURE: json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n"},
+            args.output_dir.resolve(),
+            args.check,
+            prune=False,
+        )
 
     outputs = build_outputs(args.source_root.resolve())
     return _write_or_check(outputs, args.output_dir.resolve(), args.check)

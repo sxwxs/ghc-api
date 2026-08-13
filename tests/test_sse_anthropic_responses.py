@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from ghc_api.anthropic_responses import MODE_LOSSLESS_REQUIRED
 from ghc_api.sse.anthropic_responses import (
     ResponsesAnthropicEventTranslator,
     StopSequenceScanner,
@@ -171,8 +172,76 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             "output": [],
             "usage": {},
         }})
+        # Compatibility mode keeps the already-delivered turn and records the
+        # dropped item; only a lossless contract refuses the exchange.
+        self.assertNotIn("error", event_types(output))
+        self.assertEqual(event_types(output)[-1], "message_stop")
+        self.assertIn(
+            "responses.terminal_output_missing_item",
+            {warning["code"] for warning in translator.compatibility_warnings},
+        )
+
+        strict = self.translator(mode=MODE_LOSSLESS_REQUIRED)
+        strict.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "web_search_call", "id": "search_1", "status": "in_progress"},
+        })
+        output = strict.process("response.completed", {"response": {
+            "id": "resp_search",
+            "model": "gpt",
+            "status": "completed",
+            "output": [],
+            "usage": {},
+        }})
         self.assertIn("error", event_types(output))
         self.assertNotIn("message_stop", event_types(output))
+
+    def test_lite_profile_tolerates_rotating_response_ids(self):
+        # The live Copilot backend re-encrypts the response id in every frame,
+        # so identity across frames carries no protocol meaning there.
+        translator = self.translator()
+        output = translator.process(
+            "response.created", {"response": {"id": "enc_a", "model": "gpt"}}
+        )
+        output += translator.process("response.in_progress", {
+            "response": {"id": "enc_b", "model": "gpt"},
+        })
+        output += translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        })
+        output += translator.process("response.output_text.delta", {
+            "output_index": 0, "content_index": 0, "delta": "hi",
+        })
+        output += translator.process("response.completed", {"response": {
+            "id": "enc_c", "model": "gpt", "status": "completed",
+            "output": [{
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "hi"}],
+            }],
+            "usage": {},
+        }})
+        self.assertFalse(translator.protocol_failed)
+        self.assertNotIn("error", event_types(output))
+        self.assertEqual(event_types(output)[-1], "message_stop")
+
+    def test_lite_terminal_only_stream_uses_terminal_response_id(self):
+        message_ids = []
+        for response_id in ("enc_terminal_a", "enc_terminal_b"):
+            translator = self.translator()
+            output = translator.process("response.completed", {"response": {
+                "id": response_id,
+                "model": "gpt",
+                "status": "completed",
+                "output": [],
+                "usage": {},
+            }})
+            message_ids.append(next(
+                event["message"]["id"]
+                for name, event in output
+                if name == "message_start"
+            ))
+        self.assertNotEqual(message_ids[0], message_ids[1])
 
     def test_public_profile_rejects_web_search_id_mismatch(self):
         translator = ResponsesAnthropicEventTranslator(
@@ -567,14 +636,14 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             ({
                 "id": "resp_other", "model": "gpt", "status": "completed",
                 "output": [], "usage": {},
-            }, "responses.terminal_response_id_mismatch"),
+            }, "responses.terminal_response_id_mismatch", "public_responses"),
             ({
                 "id": "resp", "model": "gpt", "status": "failed",
                 "error": {"message": "failed"}, "output": [], "usage": {},
-            }, "responses.terminal_status_mismatch"),
+            }, "responses.terminal_status_mismatch", "copilot_responses_lite"),
         )
-        for terminal, expected_code in cases:
-            translator = self.translator()
+        for terminal, expected_code, profile in cases:
+            translator = self.translator(wire_profile=profile)
             output = translator.process(
                 "response.created", {"response": {"id": "resp", "model": "gpt"}}
             )
@@ -610,9 +679,22 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             "responses.event_after_closed_output_item",
         )
 
-    def test_unknown_incomplete_reason_is_fatal_without_output_state(self):
+    def test_unknown_incomplete_reason_is_projected_as_truncation(self):
         translator = self.translator()
         output = translator.process("response.incomplete", {"response": {
+            "id": "resp", "model": "gpt", "status": "incomplete",
+            "incomplete_details": {"reason": "future-private-reason"},
+            "output": [], "usage": {},
+        }})
+        self.assertNotIn("error", event_types(output))
+        self.assertEqual(event_types(output)[-1], "message_stop")
+        delta = next(
+            event for name, event in output if name == "message_delta"
+        )
+        self.assertEqual(delta["delta"]["stop_reason"], "max_tokens")
+
+        strict = self.translator(mode=MODE_LOSSLESS_REQUIRED)
+        output = strict.process("response.incomplete", {"response": {
             "id": "resp", "model": "gpt", "status": "incomplete",
             "incomplete_details": {"reason": "future-private-reason"},
             "output": [], "usage": {},
@@ -715,11 +797,106 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertEqual(text, "terminal")
         self.assertEqual(event_types(output)[-2:], ["message_delta", "message_stop"])
 
-    def test_unknown_event_fails_closed(self):
+    def test_unknown_event_is_skipped_in_compatibility_and_fatal_when_lossless(self):
         translator = self.translator()
-        output = translator.process("response.future_content.delta", {"type": "response.future_content.delta"})
+        output = translator.process(
+            "response.future_content.delta",
+            {"type": "response.future_content.delta"},
+        )
+        # A lifecycle event we have never seen must not destroy a live turn.
+        self.assertEqual(output, [])
+        self.assertFalse(translator.protocol_failed)
+        warning = translator.compatibility_warnings[0]
+        self.assertEqual(warning["code"], "responses.unknown_event")
+        self.assertNotIn("future_content", json.dumps(translator.compatibility_warnings))
+
+        strict = self.translator(mode=MODE_LOSSLESS_REQUIRED)
+        output = strict.process(
+            "response.future_content.delta",
+            {"type": "response.future_content.delta"},
+        )
         self.assertEqual(event_types(output), ["error"])
-        self.assertEqual(translator.compatibility_warnings[0]["code"], "responses.unknown_event")
+        self.assertTrue(strict.protocol_failed)
+
+    def test_unknown_output_item_is_skipped_without_losing_sibling_content(self):
+        translator = self.translator()
+        output = translator.process(
+            "response.created", {"response": {"id": "resp", "model": "gpt"}}
+        )
+        output += translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "image_generation_call", "id": "img_1", "status": "in_progress"},
+        })
+        output += translator.process("response.image_generation_call.partial_image", {
+            "output_index": 0, "partial_image_index": 0,
+        })
+        output += translator.process("response.output_item.done", {
+            "output_index": 0,
+            "item": {"type": "image_generation_call", "id": "img_1", "status": "completed"},
+        })
+        output += translator.process("response.output_item.added", {
+            "output_index": 1,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        })
+        output += translator.process("response.output_text.delta", {
+            "output_index": 1, "content_index": 0, "delta": "after the image",
+        })
+        output += translator.process("response.completed", {"response": {
+            "id": "resp", "model": "gpt", "status": "completed",
+            "output": [
+                {"type": "image_generation_call", "id": "img_1", "status": "completed"},
+                {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "after the image"}],
+                },
+            ],
+            "usage": {},
+        }})
+        self.assertFalse(translator.protocol_failed)
+        self.assertNotIn("error", event_types(output))
+        self.assertEqual(event_types(output)[-1], "message_stop")
+        visible = "".join(
+            event["delta"]["text"]
+            for name, event in output
+            if name == "content_block_delta"
+            and event.get("delta", {}).get("type") == "text_delta"
+        )
+        self.assertEqual(visible, "after the image")
+        self.assertIn(
+            "responses.unknown_output_item",
+            {warning["code"] for warning in translator.compatibility_warnings},
+        )
+
+    def test_event_after_closed_unknown_item_is_fatal(self):
+        translator = self.translator()
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "image_generation_call", "id": "img_1"},
+        })
+        translator.process("response.output_item.done", {
+            "output_index": 0,
+            "item": {"type": "image_generation_call", "id": "img_1"},
+        })
+        output = translator.process("response.output_text.delta", {
+            "output_index": 0,
+            "content_index": 0,
+            "delta": "must not be silently discarded",
+        })
+        self.assertEqual(event_types(output), ["error"])
+        self.assertTrue(translator.protocol_failed)
+        self.assertIn(
+            "responses.event_after_closed_output_item",
+            {warning["code"] for warning in translator.compatibility_warnings},
+        )
+
+    def test_upstream_failure_keeps_its_http_class(self):
+        translator = self.translator()
+        output = translator.process("response.failed", {
+            "response": {"error": {"code": "rate_limit_exceeded", "message": "slow down"}},
+        })
+        self.assertEqual(event_types(output), ["error"])
+        self.assertEqual(output[0][1]["error"]["type"], "rate_limit_error")
+        self.assertEqual(translator.error_status_code, 429)
 
     def test_failed_response_emits_anthropic_error(self):
         translator = self.translator()
