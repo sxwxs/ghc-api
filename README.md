@@ -63,7 +63,7 @@ By default, the server will start on `http://localhost:8313`.
 - `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.23`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.24`)
 - `--help`: Show help message
 
 ### Configuration
