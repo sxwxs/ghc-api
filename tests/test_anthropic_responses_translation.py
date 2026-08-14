@@ -394,7 +394,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertEqual([part["type"] for part in content], ["input_image", "input_image", "input_file", "input_text"])
         self.assertEqual(result.report.unaccounted_paths, [])
 
-    def test_web_search_call_is_sidecar_only_and_tool_usage_is_accounted(self):
+    def test_web_search_before_reasoning_is_sidecar_only_and_usage_is_accounted(self):
         result = convert_responses_to_anthropic(
             {
                 "id": "resp_search",
@@ -412,6 +412,11 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                         },
                     },
                     {
+                        "type": "reasoning",
+                        "summary": [],
+                        "encrypted_content": "opaque-reasoning",
+                    },
+                    {
                         "type": "message",
                         "role": "assistant",
                         "content": [{
@@ -426,7 +431,13 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
             },
             original_model="gpt-5.6-sol",
         )
-        self.assertEqual(result.response["content"], [{"type": "text", "text": "search answer"}])
+        self.assertEqual(
+            [block["type"] for block in result.response["content"]],
+            ["thinking", "text"],
+        )
+        self.assertEqual(result.response["content"][1], {
+            "type": "text", "text": "search answer"
+        })
         self.assertEqual(result.response["stop_reason"], "end_turn")
         self.assertEqual(
             result.response["usage"]["server_tool_use"],

@@ -603,7 +603,6 @@ class ResponsesAnthropicEventTranslator:
             if state.item_type == "web_search_call":
                 if not state.done:
                     break
-                self.non_reasoning_output_committed = True
                 self.report.mark(
                     f"/output/{state.output_index}",
                     PRESERVATION_SIDECAR,

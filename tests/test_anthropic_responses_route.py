@@ -777,6 +777,98 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("stream", cached["conversion_report"])
         self.assertIn("response", cached["conversion_report"])
 
+    def test_stream_native_web_search_can_precede_reasoning(self):
+        message = self._terminal_response()["output"][0]
+        search_added = {
+            "type": "web_search_call",
+            "id": "opaque-search-added",
+            "status": "in_progress",
+        }
+        search_done = {
+            "type": "web_search_call",
+            "id": "opaque-search-done",
+            "status": "completed",
+            "action": {"type": "search", "query": "private query"},
+        }
+        reasoning = {
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-search-reasoning",
+        }
+        events = [
+            {"type": "response.created", "response": {"id": "resp_search", "model": "gpt-5.6-sol"}},
+            {"type": "response.output_item.added", "output_index": 0, "item": search_added},
+            {"type": "response.web_search_call.in_progress", "output_index": 0, "item_id": "opaque-search-progress"},
+            {"type": "response.web_search_call.searching", "output_index": 0, "item_id": "opaque-search-searching"},
+            {"type": "response.web_search_call.completed", "output_index": 0, "item_id": "opaque-search-completed"},
+            {"type": "response.output_item.done", "output_index": 0, "item": search_done},
+            {"type": "response.output_item.added", "output_index": 1, "item": reasoning},
+            {"type": "response.output_item.done", "output_index": 1, "item": reasoning},
+            {
+                "type": "response.output_item.added",
+                "output_index": 2,
+                "item": {**message, "id": "opaque-message-added", "content": []},
+            },
+            {
+                "type": "response.output_text.delta",
+                "output_index": 2,
+                "content_index": 0,
+                "item_id": "opaque-message-added",
+                "delta": "hello back",
+                "logprobs": [],
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 2,
+                "item": {**message, "id": "opaque-message-done"},
+            },
+            {
+                "type": "response.completed",
+                "response": {
+                    **self._terminal_response(),
+                    "id": "resp_search",
+                    "output": [search_done, reasoning, message],
+                    "tool_usage": {"web_search": {"num_requests": 1}},
+                },
+            },
+        ]
+        for sequence_number, event in enumerate(events):
+            event["sequence_number"] = sequence_number
+        upstream = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(event, separators=(",", ":"))).encode()
+            for event in events
+        ])
+        payload = self._request_payload(stream=True)
+        payload["tools"] = [{
+            "type": "web_search_20250305",
+            "name": "web_search",
+        }]
+
+        with mock.patch.object(
+            anthropic_module.requests, "post", return_value=upstream
+        ) as post:
+            response = self.client.post("/v1/messages", json=payload)
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_args.kwargs["json"]["tools"], [{
+            "type": "web_search"
+        }])
+        self.assertIn('"type":"thinking"', body)
+        self.assertIn('"text":"hello back"', body)
+        self.assertIn("event: message_stop\n", body)
+        self.assertNotIn("event: error\n", body)
+        self.assertNotIn("responses.late_reasoning_item", body)
+        self.assertNotIn("private query", body)
+
+        cached = next(iter(self.cache.cache.values()))
+        self.assertEqual(cached["state"], self.cache.STATE_COMPLETED)
+        self.assertEqual(
+            [block["type"] for block in cached["response_body"]["content"]],
+            ["thinking", "text"],
+        )
+        self.assertNotIn("private query", json.dumps(cached["raw_events"]))
+
     def test_stream_retries_early_response_failed_before_anthropic_output(self):
         failed_events = [
             {

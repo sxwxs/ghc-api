@@ -1768,7 +1768,6 @@ def convert_responses_to_anthropic(
                     if key not in {"type", "role", "phase", "content"}:
                         report.mark(path + "/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Output message metadata retained for diagnostics", subtree=True)
             elif item_type == "web_search_call":
-                seen_non_reasoning_output = True
                 report.mark(path, PRESERVATION_SIDECAR, detail="Native web search execution retained for diagnostics and omitted from visible Anthropic content", subtree=True)
             elif item_type in ("function_call", "custom_tool_call"):
                 seen_non_reasoning_output = True

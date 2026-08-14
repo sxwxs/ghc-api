@@ -63,7 +63,7 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertEqual(carrier.encrypted_content, "x")
         self.assertEqual(output[-2][1]["usage"]["input_tokens"], 8)
 
-    def test_web_search_lifecycle_is_sidecar_only_and_final_text_streams(self):
+    def test_web_search_before_reasoning_is_sidecar_only_and_final_text_streams(self):
         translator = self.translator()
         search_added = {
             "type": "web_search_call",
@@ -79,6 +79,11 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
                 "query": "private query",
                 "queries": ["private query"],
             },
+        }
+        reasoning = {
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "opaque-reasoning",
         }
         message = {
             "type": "message",
@@ -103,21 +108,23 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             ("response.web_search_call.searching", {"output_index": 0, "item_id": "opaque-search-searching"}),
             ("response.web_search_call.completed", {"output_index": 0, "item_id": "opaque-search-completed"}),
             ("response.output_item.done", {"output_index": 0, "item": search_done}),
-            ("response.output_item.added", {"output_index": 1, "item": {**message, "id": "opaque-message-added", "content": []}}),
-            ("response.output_text.delta", {"output_index": 1, "content_index": 0, "delta": "search answer"}),
+            ("response.output_item.added", {"output_index": 1, "item": reasoning}),
+            ("response.output_item.done", {"output_index": 1, "item": reasoning}),
+            ("response.output_item.added", {"output_index": 2, "item": {**message, "id": "opaque-message-added", "content": []}}),
+            ("response.output_text.delta", {"output_index": 2, "content_index": 0, "delta": "search answer"}),
             ("response.output_text.annotation.added", {
-                "output_index": 1,
+                "output_index": 2,
                 "content_index": 0,
                 "item_id": "opaque-annotation-event",
                 "annotation_index": 0,
                 "annotation": message["content"][0]["annotations"][0],
             }),
-            ("response.output_item.done", {"output_index": 1, "item": {**message, "id": "opaque-message-done"}}),
+            ("response.output_item.done", {"output_index": 2, "item": {**message, "id": "opaque-message-done"}}),
             ("response.completed", {"response": {
                 "id": "resp_search",
                 "model": "gpt",
                 "status": "completed",
-                "output": [search_done, message],
+                "output": [search_done, reasoning, message],
                 "usage": {},
                 "tool_usage": {"web_search": {"num_requests": 1}},
             }}),
@@ -126,8 +133,10 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         for name, event in sequence:
             output.extend(translator.process(name, event))
         self.assertEqual(event_types(output), [
-            "message_start", "content_block_start", "content_block_delta",
-            "content_block_stop", "message_delta", "message_stop",
+            "message_start",
+            "content_block_start", "content_block_delta", "content_block_stop",
+            "content_block_start", "content_block_delta", "content_block_stop",
+            "message_delta", "message_stop",
         ])
         self.assertNotIn("private query", str(output))
         self.assertFalse(any(
@@ -136,9 +145,13 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
             )
             for _, event in output
         ))
-        self.assertEqual(translator.terminal_result.response["content"], [
-            {"type": "text", "text": "search answer"}
-        ])
+        self.assertEqual(
+            [block["type"] for block in translator.terminal_result.response["content"]],
+            ["thinking", "text"],
+        )
+        self.assertEqual(translator.terminal_result.response["content"][1], {
+            "type": "text", "text": "search answer"
+        })
         self.assertEqual(translator.terminal_result.report.unaccounted_paths, [])
 
     def test_web_search_lifecycle_uses_output_index_identity_and_rejects_unclosed_item(self):
