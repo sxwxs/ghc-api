@@ -17,3 +17,6 @@ build/
 
 # Generated benchmark artifacts.
 /benchmarks/results/
+
+# Runtime diagnostics must not be committed under package source.
+/ghc_api/connection_retry.jl

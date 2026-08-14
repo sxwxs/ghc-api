@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
@@ -173,6 +174,10 @@ class ResponsesAnthropicEventTranslator:
         self.created_response_model = ""
         self.response_id = ""
         self.response_model = original_model
+        self.fallback_message_id = "msg_" + secrets.token_hex(12)
+        self.message_id: Optional[str] = None
+        self.last_sequence_number: Optional[int] = None
+        self.emitted_tool_use = False
         self.next_block_index = 0
         self.next_output_index = 0
         self.states: Dict[int, _OutputState] = {}
@@ -189,9 +194,17 @@ class ResponsesAnthropicEventTranslator:
     # --------------------------------------------------------------- events
 
     def _message_id(self) -> str:
+        if self.message_id is not None:
+            return self.message_id
         if self.response_id.startswith("msg_"):
-            return self.response_id
-        return "msg_" + hashlib.sha256(self.response_id.encode("utf-8")).hexdigest()[:24]
+            self.message_id = self.response_id
+        elif self.response_id:
+            self.message_id = "msg_" + hashlib.sha256(
+                self.response_id.encode("utf-8")
+            ).hexdigest()[:24]
+        else:
+            self.message_id = self.fallback_message_id
+        return self.message_id
 
     def _start_message(self) -> List[Tuple[str, Dict[str, Any]]]:
         if self.message_started:
@@ -298,32 +311,42 @@ class ResponsesAnthropicEventTranslator:
                 )
 
         effective_type = incoming_type or state.item_type
-        if self.stable_ids:
-            if effective_type in ("message", "reasoning", "web_search_call", "function_call", "custom_tool_call"):
-                incoming_id = item.get("id")
-                existing_id = state.item.get("id") if isinstance(state.item, dict) else None
-                if incoming_id is not None and existing_id is not None and str(incoming_id) != str(existing_id):
+        if self.stable_ids and effective_type in (
+            "message", "reasoning", "web_search_call", "function_call",
+            "custom_tool_call",
+        ):
+            incoming_id = item.get("id")
+            existing_id = state.item.get("id") if isinstance(state.item, dict) else None
+            if (
+                incoming_id is not None
+                and existing_id is not None
+                and str(incoming_id) != str(existing_id)
+            ):
+                return (
+                    "responses.item_id_mutation"
+                    if effective_type != "web_search_call"
+                    else "responses.web_search_id_mutation",
+                    f"/output/{state.output_index}/id",
+                )
+        # ``stable_ids`` only describes opaque response/item identifiers. Tool
+        # identity is executable protocol data and must never rotate.
+        if effective_type in ("function_call", "custom_tool_call"):
+            incoming_call_id = item.get("call_id")
+            if incoming_call_id is not None:
+                incoming_call_id = str(incoming_call_id)
+                if state.call_id and incoming_call_id != state.call_id:
                     return (
-                        "responses.item_id_mutation" if effective_type != "web_search_call" else "responses.web_search_id_mutation",
-                        f"/output/{state.output_index}/id",
+                        "responses.call_id_mutation",
+                        f"/output/{state.output_index}/call_id",
                     )
-            if effective_type in ("function_call", "custom_tool_call"):
-                incoming_call_id = item.get("call_id")
-                if incoming_call_id is not None:
-                    incoming_call_id = str(incoming_call_id)
-                    if state.call_id and incoming_call_id != state.call_id:
-                        return (
-                            "responses.call_id_mutation",
-                            f"/output/{state.output_index}/call_id",
-                        )
-                incoming_name = item.get("name")
-                if incoming_name is not None:
-                    incoming_name = str(incoming_name)
-                    if state.name and incoming_name != state.name:
-                        return (
-                            "responses.tool_name_mutation",
-                            f"/output/{state.output_index}/name",
-                        )
+            incoming_name = item.get("name")
+            if incoming_name is not None:
+                incoming_name = str(incoming_name)
+                if state.name and incoming_name != state.name:
+                    return (
+                        "responses.tool_name_mutation",
+                        f"/output/{state.output_index}/name",
+                    )
 
         if effective_type == "function_call":
             terminal = item.get("arguments")
@@ -367,11 +390,14 @@ class ResponsesAnthropicEventTranslator:
             full_text = ""
             parts = item.get("content")
             if isinstance(parts, list):
-                full_parts = {
-                    index: str(part.get("text") or part.get("refusal") or "")
-                    for index, part in enumerate(parts)
-                    if isinstance(part, dict)
-                }
+                full_parts: Dict[int, str] = {}
+                for index, part in enumerate(parts):
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "output_text":
+                        full_parts[index] = str(part.get("text") or "")
+                    elif part.get("type") == "refusal":
+                        full_parts[index] = str(part.get("refusal") or "")
                 full_text = "".join(full_parts[index] for index in sorted(full_parts))
                 if not state.text_parts and not state.text:
                     state.text_parts = full_parts
@@ -392,6 +418,78 @@ class ResponsesAnthropicEventTranslator:
                 state.call_id = str(item["call_id"])
             if item.get("name") is not None:
                 state.name = str(item["name"])
+        return None
+
+    @staticmethod
+    def _final_tool_identity_error(
+        item: Dict[str, Any],
+        output_index: int,
+        item_type: str = "",
+    ) -> Optional[Tuple[str, str]]:
+        effective_type = item.get("type") or item_type
+        if effective_type not in ("function_call", "custom_tool_call"):
+            return None
+        call_id = item.get("call_id")
+        if not isinstance(call_id, str) or not call_id:
+            return (
+                "responses.missing_tool_call_id",
+                f"/output/{output_index}/call_id",
+            )
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            return (
+                "responses.missing_tool_name",
+                f"/output/{output_index}/name",
+            )
+        return None
+
+    def _content_item_id_error(
+        self,
+        state: _OutputState,
+        event: Dict[str, Any],
+    ) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        if not self.stable_ids:
+            return None
+        expected_id = state.item.get("id") if isinstance(state.item, dict) else None
+        item_id = event.get("item_id")
+        if (
+            not isinstance(expected_id, str)
+            or not expected_id
+            or not isinstance(item_id, str)
+            or not item_id
+            or item_id != expected_id
+        ):
+            return self._protocol_error(
+                "responses.content_item_id_mismatch",
+                f"/output/{state.output_index}/id",
+            )
+        return None
+
+    def _accept_sequence_number(
+        self,
+        event: Dict[str, Any],
+    ) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
+        if "sequence_number" not in event:
+            # Older compatibility streams and synthetic unit events may be
+            # unnumbered. They do not participate in monotonic tracking.
+            return None
+        sequence_number = event.get("sequence_number")
+        if (
+            not isinstance(sequence_number, int)
+            or isinstance(sequence_number, bool)
+            or sequence_number < 0
+        ):
+            return self._protocol_error(
+                "responses.invalid_sequence_number", "/events/sequence_number"
+            )
+        if (
+            self.last_sequence_number is not None
+            and sequence_number <= self.last_sequence_number
+        ):
+            return self._protocol_error(
+                "responses.sequence_number_regression", "/events/sequence_number"
+            )
+        self.last_sequence_number = sequence_number
         return None
 
     def _warn(self, code: str, path: str, action: str = "error") -> None:
@@ -423,6 +521,7 @@ class ResponsesAnthropicEventTranslator:
                 "name": self.name_codec.decode(state.name),
                 "input": {},
             }
+            self.emitted_tool_use = True
         return [("content_block_start", {
             "type": "content_block_start",
             "index": state.block_index,
@@ -702,6 +801,11 @@ class ResponsesAnthropicEventTranslator:
             drift = self._merge_item(state, item)
             if drift is not None:
                 return drift
+            identity_error = self._final_tool_identity_error(
+                item, index, state.item_type
+            )
+            if identity_error is not None:
+                return identity_error
             state.done = True
         return None
 
@@ -837,11 +941,18 @@ class ResponsesAnthropicEventTranslator:
                 detail=f"Terminal conversion raised {type(exc).__name__}",
             )
             return events
+        terminal_stop_reason = self.terminal_result.response.get("stop_reason")
         if self.local_stop_sequence:
             stop_reason = "stop_sequence"
             stop_sequence = self.local_stop_sequence
+        elif terminal_stop_reason in ("max_tokens", "refusal"):
+            stop_reason = terminal_stop_reason
+            stop_sequence = self.terminal_result.response.get("stop_sequence")
+        elif self.emitted_tool_use:
+            stop_reason = "tool_use"
+            stop_sequence = None
         else:
-            stop_reason = self.terminal_result.response.get("stop_reason")
+            stop_reason = "end_turn"
             stop_sequence = self.terminal_result.response.get("stop_sequence")
         events.append(("message_delta", {
             "type": "message_delta",
@@ -856,6 +967,9 @@ class ResponsesAnthropicEventTranslator:
         if self.message_stopped:
             return []
         event_type = event_type or str(event.get("type") or "")
+        sequence_error = self._accept_sequence_number(event)
+        if sequence_error is not None:
+            return sequence_error
         if event_type == "response.created":
             response = event.get("response") if isinstance(event.get("response"), dict) else {}
             response_id = str(response.get("id") or event.get("response_id") or "")
@@ -981,6 +1095,11 @@ class ResponsesAnthropicEventTranslator:
             drift = self._merge_item(state, item)
             if drift is not None:
                 return self._protocol_error(*drift)
+            identity_error = self._final_tool_identity_error(
+                item, state.output_index, state.item_type
+            )
+            if identity_error is not None:
+                return self._protocol_error(*identity_error)
             state.done = True
             return self._drain()
         if event_type in ("response.content_part.added", "response.content_part.done"):
@@ -995,6 +1114,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             part = event.get("part") if isinstance(event.get("part"), dict) else {}
             if not state.item_type:
                 state.item_type = "message"
@@ -1026,6 +1148,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             state.item_type = state.item_type or "message"
             content_index = self._content_index(event)
             if content_index is None:
@@ -1053,6 +1178,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             content_index = self._content_index(event)
             if content_index is None:
                 return self._protocol_error(
@@ -1081,6 +1209,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             state.item_type = state.item_type or expected_type
             state.arguments += str(event.get("delta") or "")
             return self._drain()
@@ -1097,6 +1228,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             state.item_type = state.item_type or expected_type
             key = "input" if "custom_tool" in event_type else "arguments"
             full = event.get(key)
@@ -1129,6 +1263,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             state.item_type = state.item_type or "message"
             content_index = self._content_index(event)
             if content_index is None:
@@ -1157,6 +1294,9 @@ class ResponsesAnthropicEventTranslator:
                     "responses.item_type_mutation",
                     f"/output/{state.output_index}/type",
                 )
+            identity_error = self._content_item_id_error(state, event)
+            if identity_error is not None:
+                return identity_error
             state.item_type = state.item_type or "message"
             content_index = self._content_index(event)
             if content_index is None:

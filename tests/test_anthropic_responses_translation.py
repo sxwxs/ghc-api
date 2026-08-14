@@ -944,6 +944,33 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
             {"path": "README.md"},
         )
 
+    def test_terminal_tool_identity_must_be_nonempty(self):
+        for item_type in ("function_call", "custom_tool_call"):
+            argument_key = "arguments" if item_type == "function_call" else "input"
+            for field, value in (
+                ("call_id", None), ("call_id", ""),
+                ("name", None), ("name", ""),
+            ):
+                response = self.terminal_response()
+                item = {
+                    "type": item_type, "call_id": "call_1", "name": "Read",
+                    argument_key: "{}",
+                }
+                if value is None:
+                    item.pop(field)
+                else:
+                    item[field] = value
+                response["output"] = [item]
+                with self.subTest(item_type=item_type, field=field, value=value):
+                    with self.assertRaises(AnthropicResponsesConversionError) as raised:
+                        convert_responses_to_anthropic(
+                            response, original_model="claude"
+                        )
+                    self.assertEqual(
+                        raised.exception.report.warnings[0]["path"],
+                        f"/output/0/{field}",
+                    )
+
     def test_custom_tool_input_uses_reversible_wrapper(self):
         response = self.terminal_response()
         response["output"] = [{

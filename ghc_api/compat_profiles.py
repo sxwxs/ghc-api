@@ -1522,6 +1522,22 @@ def audit_anthropic_request(
     return CompatibilityAudit(mode=mode, profile=profile, warnings=collector.warnings)
 
 
+def _audit_content_part_context(
+    part_type: str,
+    allowed_types: Set[str],
+    path: str,
+    collector: _WarningCollector,
+) -> None:
+    if part_type not in allowed_types:
+        collector.add(
+            "responses.invalid_content_part_context",
+            _join_path(path, "type"),
+            "string",
+            tuple(sorted(allowed_types)),
+            fail_always=True,
+        )
+
+
 def _audit_responses_item_into(
     item: Any,
     path: str,
@@ -1613,6 +1629,24 @@ def _audit_responses_item_into(
                     fail_always=True,
                 )
                 continue
+            if item_type == "message" and content_key == "content":
+                if path.startswith("/output/"):
+                    allowed_types = {"output_text", "refusal"}
+                elif path.startswith("/input/"):
+                    allowed_types = (
+                        {"output_text", "refusal"}
+                        if item.get("role") == "assistant"
+                        else {"input_text"}
+                    )
+                else:
+                    allowed_types = {"input_text", "output_text", "refusal"}
+                _audit_content_part_context(
+                    part_type, allowed_types, part_path, collector
+                )
+            elif item_type == "reasoning" and content_key == "summary":
+                _audit_content_part_context(
+                    part_type, {"summary_text"}, part_path, collector
+                )
             _require_fields(
                 part,
                 _RESPONSES_CONTENT_REQUIRED_FIELDS[part_type],
@@ -1733,6 +1767,26 @@ def audit_responses_event(
                 fail_always=True,
             )
         else:
+            if event_type in (
+                "response.content_part.added",
+                "response.content_part.done",
+            ):
+                _audit_content_part_context(
+                    part_type,
+                    {"output_text", "refusal"},
+                    "/events/part",
+                    collector,
+                )
+            elif event_type in (
+                "response.reasoning_summary_part.added",
+                "response.reasoning_summary_part.done",
+            ):
+                _audit_content_part_context(
+                    part_type,
+                    {"summary_text"},
+                    "/events/part",
+                    collector,
+                )
             _require_fields(
                 part,
                 _RESPONSES_CONTENT_REQUIRED_FIELDS[part_type],

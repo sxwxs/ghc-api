@@ -790,21 +790,43 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                     self.assertNotIn(private, json.dumps(lossless.warnings))
 
     def test_response_content_parts_require_their_payload_field(self):
-        parts = {
-            "input_text": "text",
-            "output_text": "text",
-            "refusal": "refusal",
-            "summary_text": "text",
-            "encrypted_content": "encrypted_content",
-        }
-        for part_type, required_field in parts.items():
-            item = {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": part_type}],
-            }
-            compatibility = audit_responses_item(item)
-            expected_path = "/output/0/content/0/" + required_field
+        cases = (
+            (
+                "input_text", "text", "/input/0",
+                {"type": "message", "role": "user", "content": []},
+                "content",
+            ),
+            (
+                "output_text", "text", "/output/0",
+                {"type": "message", "role": "assistant", "content": []},
+                "content",
+            ),
+            (
+                "refusal", "refusal", "/output/0",
+                {"type": "message", "role": "assistant", "content": []},
+                "content",
+            ),
+            (
+                "summary_text", "text", "/output/0",
+                {
+                    "type": "reasoning", "summary": [],
+                    "encrypted_content": "fixture",
+                },
+                "summary",
+            ),
+            (
+                "encrypted_content", "encrypted_content", "/output/0",
+                {
+                    "type": "reasoning", "summary": [], "content": [],
+                    "encrypted_content": "fixture",
+                },
+                "content",
+            ),
+        )
+        for part_type, required_field, path, item, content_key in cases:
+            item[content_key] = [{"type": part_type}]
+            compatibility = audit_responses_item(item, path=path)
+            expected_path = f"{path}/{content_key}/0/{required_field}"
             with self.subTest(part_type=part_type):
                 warning = next(
                     value for value in compatibility.warnings
@@ -813,8 +835,38 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                 self.assertEqual(warning["path"], expected_path)
                 self.assertFalse(compatibility.should_fail)
                 self.assertTrue(audit_responses_item(
-                    item, mode=MODE_LOSSLESS_REQUIRED
+                    item, mode=MODE_LOSSLESS_REQUIRED, path=path
                 ).should_fail)
+
+    def test_message_content_discriminators_are_context_sensitive(self):
+        invalid = (
+            (
+                {"type": "message", "role": "assistant", "content": [
+                    {"type": "input_text", "text": "private"},
+                ]},
+                "/output/0",
+            ),
+            (
+                {"type": "message", "role": "user", "content": [
+                    {"type": "output_text", "text": "private"},
+                ]},
+                "/input/0",
+            ),
+        )
+        for item, path in invalid:
+            audit = audit_responses_item(item, path=path)
+            with self.subTest(path=path):
+                self.assertTrue(audit.should_fail)
+                self.assertIn(
+                    "responses.invalid_content_part_context",
+                    {warning["code"] for warning in audit.warnings},
+                )
+
+        self.assertFalse(audit_responses_item({
+            "type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "answer"},
+            ],
+        }, path="/input/0").should_fail)
 
     def test_unknown_event_is_recorded_and_skipped_without_value_leak(self):
         expected = {

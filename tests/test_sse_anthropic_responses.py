@@ -533,6 +533,126 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
                     expected_code,
                 )
 
+    def test_public_profile_rejects_foreign_content_item_ids(self):
+        cases = (
+            (
+                {"type": "message", "id": "item_1", "role": "assistant", "content": []},
+                "response.output_text.delta",
+                {"content_index": 0, "delta": "secret"},
+                "text",
+            ),
+            (
+                {
+                    "type": "function_call", "id": "item_1",
+                    "call_id": "call_1", "name": "Read", "arguments": "",
+                },
+                "response.function_call_arguments.delta",
+                {"delta": '{"path":"secret"}'},
+                "arguments",
+            ),
+        )
+        for item, event_type, event, state_field in cases:
+            translator = self.translator(wire_profile="public_responses")
+            translator.process("response.output_item.added", {
+                "output_index": 0, "item": item,
+            })
+            output = translator.process(event_type, {
+                "output_index": 0, "item_id": "foreign_item", **event,
+            })
+            with self.subTest(event_type=event_type):
+                self.assertEqual(event_types(output), ["error"])
+                self.assertEqual(getattr(translator.states[0], state_field), "")
+                self.assertEqual(
+                    translator.compatibility_warnings[-1]["code"],
+                    "responses.content_item_id_mismatch",
+                )
+
+    def test_non_output_message_parts_are_not_streamed_as_assistant_text(self):
+        for part_type in ("input_text", "summary_text", "encrypted_content"):
+            translator = self.translator()
+            output = translator.process("response.output_item.done", {
+                "output_index": 0,
+                "item": {
+                    "type": "message", "role": "assistant",
+                    "content": [{
+                        "type": part_type,
+                        "text": "PRIVATE PROMPT",
+                        "encrypted_content": "PRIVATE ENCRYPTED",
+                    }],
+                },
+            })
+            with self.subTest(part_type=part_type):
+                self.assertNotIn("PRIVATE", json.dumps(output))
+                self.assertEqual(translator.states[0].text, "")
+
+    def test_duplicate_or_regressing_sequence_number_is_fatal_before_replay(self):
+        translator = self.translator()
+        translator.process("response.output_item.added", {
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        })
+        first = translator.process("response.output_text.delta", {
+            "sequence_number": 2, "output_index": 0, "delta": "once",
+        })
+        replay = translator.process("response.output_text.delta", {
+            "sequence_number": 2, "output_index": 0, "delta": "once",
+        })
+        self.assertIn("content_block_delta", event_types(first))
+        self.assertEqual(event_types(replay), ["error"])
+        self.assertEqual(translator.states[0].text, "once")
+
+        translator = self.translator()
+        translator.process("response.output_item.added", {
+            "sequence_number": 5,
+            "output_index": 0,
+            "item": {
+                "type": "function_call", "call_id": "call_1",
+                "name": "Read", "arguments": "",
+            },
+        })
+        translator.process("response.function_call_arguments.delta", {
+            "sequence_number": 6, "output_index": 0, "delta": "{}",
+        })
+        replay = translator.process("response.function_call_arguments.delta", {
+            "sequence_number": 4, "output_index": 0, "delta": "{}",
+        })
+        self.assertEqual(event_types(replay), ["error"])
+        self.assertEqual(translator.states[0].arguments, "{}")
+
+    def test_done_tool_items_require_nonempty_call_id_and_name(self):
+        for item_type in ("function_call", "custom_tool_call"):
+            argument_key = "arguments" if item_type == "function_call" else "input"
+            for field, value in (("call_id", None), ("call_id", ""), ("name", None), ("name", "")):
+                item = {
+                    "type": item_type, "call_id": "call_1", "name": "Read",
+                    argument_key: "{}",
+                }
+                if value is None:
+                    item.pop(field)
+                else:
+                    item[field] = value
+                translator = self.translator()
+                output = translator.process("response.output_item.done", {
+                    "output_index": 0, "item": item,
+                })
+                with self.subTest(item_type=item_type, field=field, value=value):
+                    self.assertEqual(event_types(output), ["error"])
+                    self.assertNotIn("content_block_start", event_types(output))
+
+    def test_output_before_created_uses_request_scoped_unique_message_id(self):
+        message_ids = []
+        for _ in range(2):
+            translator = self.translator()
+            output = translator.process("response.output_text.delta", {
+                "output_index": 0, "delta": "hello",
+            })
+            message_ids.append(next(
+                event["message"]["id"]
+                for name, event in output if name == "message_start"
+            ))
+        self.assertNotEqual(message_ids[0], message_ids[1])
+
     def test_reasoning_after_committed_text_is_fatal(self):
         translator = self.translator()
         output = translator.process(

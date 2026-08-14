@@ -61,6 +61,23 @@ class LogErrorRequestTests(unittest.TestCase):
         self.assertEqual(entry["endpoint"], "/v1/messages")
         self.assertEqual(entry["status_code"], 500)
 
+    def test_connection_retry_log_is_written_to_runtime_config_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(utils, "get_config_dir", return_value=tmp):
+                utils.log_connection_retry(
+                    "request-1", "/v1/messages", 0, 2,
+                    ConnectionError("retry"),
+                )
+
+            path = os.path.join(tmp, "connection_retry.jl")
+            self.assertTrue(os.path.isfile(path))
+            with open(path, encoding="utf-8") as f:
+                entry = json.loads(f.readline())
+
+        self.assertEqual(entry["request_id"], "request-1")
+        self.assertEqual(entry["attempt"], 1)
+        self.assertEqual(entry["max_attempts"], 3)
+
     def test_upstream_error_log_keeps_response_content_with_a_size_limit(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.object(utils, "get_config_dir", return_value=tmp):

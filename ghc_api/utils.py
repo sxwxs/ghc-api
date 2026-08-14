@@ -191,9 +191,8 @@ def log_tool_result_cleanup(log_entry: Dict) -> None:
 
 
 
-# Log file for connection retry events
-CONNECTION_RETRY_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection_retry.jl")
-
+# Connection retry diagnostics are runtime data and must never be written into
+# the installed package/source directory.
 def log_connection_retry(request_id: str, endpoint: str, attempt: int, max_retries: int, error: Exception) -> None:
     """
     Write a connection retry event to the JSON Lines log file.
@@ -208,7 +207,13 @@ def log_connection_retry(request_id: str, endpoint: str, attempt: int, max_retri
             "error_type": type(error).__name__,
             "error_message": str(error),
         }
-        with open(CONNECTION_RETRY_LOG, "a", encoding="utf-8") as f:
+        log_dir = get_config_dir()
+        os.makedirs(log_dir, exist_ok=True)
+        with open(
+            os.path.join(log_dir, "connection_retry.jl"),
+            "a",
+            encoding="utf-8",
+        ) as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[Connection Retry] Failed to write log: {e}")

@@ -1772,9 +1772,28 @@ def convert_responses_to_anthropic(
                 report.mark(path, PRESERVATION_SIDECAR, detail="Native web search execution retained for diagnostics and omitted from visible Anthropic content", subtree=True)
             elif item_type in ("function_call", "custom_tool_call"):
                 seen_non_reasoning_output = True
-                has_tool_use = True
-                encoded_id = str(item.get("call_id") or item.get("id") or "")
-                encoded_name = str(item.get("name") or "")
+                encoded_id = item.get("call_id")
+                if not isinstance(encoded_id, str) or not encoded_id:
+                    report.mark(
+                        path + "/call_id",
+                        PRESERVATION_UNSUPPORTED,
+                        detail="Tool call requires a non-empty string call_id",
+                    )
+                    raise AnthropicResponsesConversionError(
+                        "Responses tool call requires a non-empty call_id",
+                        report,
+                    )
+                encoded_name = item.get("name")
+                if not isinstance(encoded_name, str) or not encoded_name:
+                    report.mark(
+                        path + "/name",
+                        PRESERVATION_UNSUPPORTED,
+                        detail="Tool call requires a non-empty string name",
+                    )
+                    raise AnthropicResponsesConversionError(
+                        "Responses tool call requires a non-empty name",
+                        report,
+                    )
                 original_id = call_id_codec.decode(encoded_id)
                 original_name = name_codec.decode(encoded_name)
                 raw_arguments = item.get("arguments") if item_type == "function_call" else item.get("input")
@@ -1815,6 +1834,7 @@ def convert_responses_to_anthropic(
                     )
                 content.append({"type": "tool_use", "id": original_id, "name": original_name, "input": parsed_arguments})
                 content_group_ids.append(("tool", index))
+                has_tool_use = True
                 report.mark(path + "/type", PRESERVATION_SEMANTIC)
                 if "call_id" in item:
                     report.mark(path + "/call_id", PRESERVATION_EXACT if original_id == encoded_id else PRESERVATION_SEMANTIC)
