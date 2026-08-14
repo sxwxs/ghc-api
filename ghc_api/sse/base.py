@@ -70,6 +70,7 @@ class SSEStreamHandler:
     # each line as Anthropic JSON would choke on a bare ``[DONE]``.
     emit_done_sentinel: bool = True
     capture_raw_sse_lines: bool = False
+    passthrough_event_headers: bool = True
 
     def __init__(
         self,
@@ -298,10 +299,11 @@ class SSEStreamHandler:
                         sse_event_type = sse_event_type[1:]
                     if sse_event_type == "ping":
                         counters.incr("ping_received")
-                    if not self.emit_event_header:
+                    if not self.emit_event_header and self.passthrough_event_headers:
                         # Pass the event header through verbatim and let the
                         # next ``data:`` line emit only the data part. Matches
-                        # the existing ``/v1/responses`` handler.
+                        # the existing ``/v1/responses`` handler. OpenAI
+                        # adapters that require data-only frames can opt out.
                         yield f"{line}\n"
                     # When ``emit_event_header`` is True the header is bundled
                     # with each ``data:`` line below; do not yield it here.

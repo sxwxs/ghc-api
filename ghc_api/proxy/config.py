@@ -15,6 +15,7 @@ from ..utils import get_config_dir
 
 
 SUPPORTED_APIS = frozenset({"responses", "chat_completions"})
+SUPPORTED_COMPATIBILITIES = frozenset({"kimi_k3_papyrus"})
 MODEL_REQUEST_MODES = frozenset({"preserve", "omit", "upstream"})
 MODEL_RESPONSE_MODES = frozenset({"preserve", "public"})
 AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
@@ -71,6 +72,7 @@ class ProxyModelApiConfig:
     enabled: bool = True
     upstream_model: Optional[str] = None
     headers: Dict[str, str] = field(default_factory=dict)
+    compatibility: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -284,9 +286,22 @@ def _parse_model_apis(value, enabled_apis: Dict[str, ProxyApiConfig], field_name
     for api_name, raw_value in raw_apis.items():
         if api_name not in SUPPORTED_APIS:
             raise ProxyConfigError(f"Unsupported API '{api_name}' in '{field_name}'")
+        raw = _require_mapping(raw_value, f"{field_name}.{api_name}")
+        compatibility = raw.get("compatibility")
+        if compatibility is not None and (
+            not isinstance(compatibility, str)
+            or compatibility not in SUPPORTED_COMPATIBILITIES
+        ):
+            raise ProxyConfigError(
+                f"'{field_name}.{api_name}.compatibility' must be one of: "
+                f"{', '.join(sorted(SUPPORTED_COMPATIBILITIES))}"
+            )
+        if compatibility == "kimi_k3_papyrus" and api_name != "chat_completions":
+            raise ProxyConfigError(
+                f"'{field_name}.{api_name}.compatibility' kimi_k3_papyrus is only valid for chat_completions"
+            )
         if api_name not in enabled_apis:
             continue
-        raw = _require_mapping(raw_value, f"{field_name}.{api_name}")
         enabled = _parse_bool(raw.get("enabled", True), f"{field_name}.{api_name}.enabled")
         upstream_model = raw.get("upstream_model")
         if upstream_model is not None and (not isinstance(upstream_model, str) or not upstream_model):
@@ -294,6 +309,7 @@ def _parse_model_apis(value, enabled_apis: Dict[str, ProxyApiConfig], field_name
         result[api_name] = ProxyModelApiConfig(
             enabled=enabled,
             upstream_model=upstream_model,
+            compatibility=compatibility,
             headers=_parse_headers(raw.get("headers"), f"{field_name}.{api_name}.headers"),
         )
     return result

@@ -21,6 +21,7 @@ from .config import (
     ProxyProfileConfig,
     ProxyRegistry,
 )
+from .kimi_k3 import KIMI_K3_PAPYRUS, fold_chat_messages
 
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -68,6 +69,12 @@ def transform_payload(
         upstream_payload["model"] = model_api.upstream_model
     else:
         upstream_payload["model"] = model.id
+
+    # Compatibility is selected by validated model API configuration, never by
+    # either the public or upstream model name.  Run it after model rewriting so
+    # the exact payload returned here is the one sent and cached.
+    if model_api.compatibility == KIMI_K3_PAPYRUS:
+        upstream_payload = fold_chat_messages(upstream_payload)
     return upstream_payload
 
 

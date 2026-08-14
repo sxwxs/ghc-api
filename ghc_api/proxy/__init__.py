@@ -1,6 +1,7 @@
 """Isolated, config-driven OpenAI-compatible upstream proxy support."""
 
 from .client import ProxyRequestError, ProxyRuntime, ProxyUpstreamResult, transform_payload
+from .kimi_k3 import ProxyPayloadError
 from .config import (
     ProxyApiConfig,
     ProxyConfigError,
@@ -20,6 +21,7 @@ __all__ = [
     "ProxyModelConfig",
     "ProxyProfileConfig",
     "ProxyRegistry",
+    "ProxyPayloadError",
     "ProxyRequestError",
     "ProxyRuntime",
     "ProxyUpstreamResult",

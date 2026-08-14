@@ -187,6 +187,58 @@ apis:
 
 The strict content-type check remains the default. Chat Completions streaming also normalizes a bare `[DONE]` line from non-conforming upstreams to the standard `data: [DONE]` sentinel.
 
+## Per-model Chat Completions compatibility
+
+Compatibility adapters are opt-in on an individual model/API route. Unknown
+values fail configuration validation; model names are never used to infer an
+adapter. Omitting `compatibility` keeps the byte-compatible configured-proxy
+behavior.
+
+Kimi K3 behind Papyrus can be exposed as a standard, text-only OpenAI Chat
+Completions model with:
+
+```yaml
+apis:
+  chat_completions:
+    upstream_url: https://gateway.example.test/chat/completions
+    request_model: upstream
+    response_model: public
+    accept_mislabeled_sse: true
+
+models:
+  kimi-k3-proxy:
+    display_name: Kimi K3 (Configured Proxy)
+    reasoning: true
+    input: [text]
+    context_window: 128000
+    max_output_tokens: 16384
+    headers:
+      papyrus-model-name: Kimi-K3-Eval
+    apis:
+      responses:
+        enabled: false
+      chat_completions:
+        enabled: true
+        upstream_model: Kimi-K3-Eval
+        compatibility: kimi_k3_papyrus
+```
+
+`kimi_k3_papyrus` performs the following operations only on that model route:
+
+- joins arrays containing only text blocks and rejects image/unknown blocks;
+- folds system/developer instructions, conversation messages, assistant
+  reasoning/tool calls, and tool results into one bounded user transcript;
+- converts `<think>...</think>` into `reasoning_content` without exposing tags;
+- parses the strict Papyrus native tool grammar only when the complete output is
+  valid and the selected tool was declared in the request;
+- emits standard SSE frames, a terminal chunk with `finish_reason`, and a final
+  `data: [DONE]` frame, including when upstream omitted a finish chunk;
+- applies the same reasoning/tool conversion to non-streaming responses.
+
+The original client request, effective folded request, raw upstream response or
+SSE events, and public converted response are retained in the request cache.
+Configured upstream authorization headers are never stored.
+
 ## Affinity routing
 
 Some gateways return a response header that must be included on later requests routed to the same upstream partition.

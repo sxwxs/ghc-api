@@ -72,6 +72,15 @@ class RequestCache:
                     entry["response_body"] = placeholder
             else:
                 entry["response_body"] = placeholder
+            # Protocol adapters may retain both sides of a translation as
+            # explicit cache sidecars. Keep the same bounded-cache guarantee for
+            # those projections instead of allowing the duplicates to bypass it.
+            for key in (
+                "raw_response_body", "public_response_body", "public_events",
+                "raw_sse_lines",
+            ):
+                if entry.get(key) is not None:
+                    entry[key] = placeholder
 
     @classmethod
     def _normalize_import_timestamp(cls, value: Any) -> int:

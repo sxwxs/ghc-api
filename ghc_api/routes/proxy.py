@@ -13,9 +13,18 @@ from flask import Blueprint, Response, g, jsonify, request
 
 from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
 from ..cache import cache
-from ..proxy import ProxyRequestError, ProxyRuntime
+from ..proxy import ProxyPayloadError, ProxyRequestError, ProxyRuntime
 from ..proxy.config import ProxyApiConfig, ProxyModelApiConfig, ProxyModelConfig, ProxyProfileConfig
-from ..sse import ProxyChatCompletionsStreamHandler, ProxyResponsesStreamHandler
+from ..proxy.kimi_k3 import (
+    KIMI_K3_PAPYRUS,
+    convert_non_stream_response,
+    declared_tool_names,
+)
+from ..sse import (
+    KimiK3ChatCompletionsStreamHandler,
+    ProxyChatCompletionsStreamHandler,
+    ProxyResponsesStreamHandler,
+)
 from ..state import state
 from ..utils import get_client_ip
 
@@ -119,6 +128,8 @@ def _cache_non_stream(
     request_size: int,
     response_size: int,
     duration: float,
+    raw_response_body=None,
+    compatibility: Optional[str] = None,
 ) -> None:
     if status_code < 400:
         input_tokens, output_tokens, cache_creation, cache_read = _usage_for_api(api_name, result)
@@ -145,6 +156,8 @@ def _cache_non_stream(
         "upstream_provider": "configured_proxy",
         "upstream_profile": profile_name,
         "upstream_api": api_name,
+        **({"raw_response_body": raw_response_body} if raw_response_body is not None else {}),
+        **({"public_response_body": result, "compatibility": compatibility} if compatibility else {}),
     })
 
 
@@ -192,6 +205,8 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             payload=payload,
             stream=use_streaming,
         )
+    except ProxyPayloadError as exc:
+        return _error(str(exc), "unsupported_content", 400, "messages")
     except ProxyRequestError as exc:
         print(f"[Configured Proxy] Request {request_id} could not start: {exc}")
         return _error("Configured upstream request could not be started.", "upstream_unavailable", 503)
@@ -232,6 +247,11 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         }
         if api_name == "responses":
             return ProxyResponsesStreamHandler(**common).stream()
+        if model_api.compatibility == KIMI_K3_PAPYRUS:
+            return KimiK3ChatCompletionsStreamHandler(
+                **common,
+                declared_tools=declared_tool_names(original_request_body.get("tools")),
+            ).stream()
         return ProxyChatCompletionsStreamHandler(**common).stream()
 
     duration = round(time.time() - start_time, 2)
@@ -260,8 +280,14 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     except ValueError:
         result = response.text
         result_is_json = False
+    raw_response_body = copy.deepcopy(result)
 
     if response.ok and result_is_json:
+        if model_api.compatibility == KIMI_K3_PAPYRUS:
+            result = convert_non_stream_response(
+                result,
+                declared_tool_names(original_request_body.get("tools")),
+            )
         result = _rewrite_non_stream_model(
             result, original_model, api.response_model == "public"
         )
@@ -270,6 +296,8 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         request_id, endpoint, profile_name, api_name, original_model,
         translated_model, original_request_body, upstream_payload, request_headers, client_ip,
         user_id, response.status_code, result, request_size, response_size, duration,
+        raw_response_body=(raw_response_body if model_api.compatibility else None),
+        compatibility=model_api.compatibility,
     )
 
     if result_is_json:
