@@ -51,6 +51,9 @@ proxies:
         max_connection_retries: 1
         request_model: upstream
         response_model: public
+        # Opt in only for known SSE-compatible upstreams that incorrectly use
+        # a non-event-stream response Content-Type.
+        accept_mislabeled_sse: false
         headers:
           X-Protocol: chat-completions
 

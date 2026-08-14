@@ -209,7 +209,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         if content_length == "0":
             response.close()
             return _error("The configured upstream returned an empty streaming response.", "empty_upstream_response", 502)
-        if "text/event-stream" not in content_type.lower():
+        if "text/event-stream" not in content_type.lower() and not api.accept_mislabeled_sse:
             response.close()
             return _error("The configured upstream did not return an event stream.", "invalid_upstream_stream", 502)
 

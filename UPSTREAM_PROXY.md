@@ -77,6 +77,7 @@ proxies:
         upstream_url: https://gateway.example.test/chat/completions
         request_model: upstream
         response_model: public
+        accept_mislabeled_sse: false
 
     models:
       example-coding-model:
@@ -176,6 +177,16 @@ models:
 
 `response_model: public` rewrites model identifiers in successful JSON responses and SSE events back to the public model id. It does not modify tool calls, reasoning items, encrypted content, item ids, or usage.
 
+Streaming responses must normally use `Content-Type: text/event-stream`. For a known-compatible upstream that emits valid OpenAI SSE fields under an incorrect content type, opt in per API:
+
+```yaml
+apis:
+  chat_completions:
+    accept_mislabeled_sse: true
+```
+
+The strict content-type check remains the default. Chat Completions streaming also normalizes a bare `[DONE]` line from non-conforming upstreams to the standard `data: [DONE]` sentinel.
+
 ## Affinity routing
 
 Some gateways return a response header that must be included on later requests routed to the same upstream partition.
@@ -274,5 +285,5 @@ When ghc-api `enable_auth` is enabled, configure the normal ghc-api user token i
 - Credential command failure: only that request returns 503.
 - Upstream connection failure: only that request returns 503.
 - Empty successful upstream body: returned as 502.
-- Invalid streaming content type: returned as 502.
+- Invalid streaming content type: returned as 502 unless that API explicitly sets `accept_mislabeled_sse: true`.
 - Affinity persistence failure: logged without failing the current upstream response.

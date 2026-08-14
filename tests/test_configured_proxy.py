@@ -94,6 +94,7 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         self.assertEqual(set(profile.apis), {"responses", "chat_completions"})
         self.assertEqual(profile.apis["responses"].request_model, "omit")
         self.assertEqual(profile.apis["chat_completions"].request_model, "upstream")
+        self.assertFalse(profile.apis["chat_completions"].accept_mislabeled_sse)
         self.assertEqual(
             profile.models["demo-model"].apis["chat_completions"].upstream_model,
             "chat-deployment",
@@ -112,6 +113,7 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
             ("affinity", "enabled"),
             ("affinity", "persist"),
             ("apis", "responses", "enabled"),
+            ("apis", "chat_completions", "accept_mislabeled_sse"),
             ("models", "demo-model", "reasoning"),
             ("models", "demo-model", "apis", "responses", "enabled"),
         ]
@@ -124,6 +126,14 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
                 target[path[-1]] = "false"
                 with self.assertRaises(ProxyConfigError):
                     parse_proxy_config(config)
+
+    def test_accepts_explicit_mislabeled_sse_compatibility(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["apis"]["chat_completions"]["accept_mislabeled_sse"] = True
+
+        profile = parse_proxy_config(config).profiles["demo-profile"]
+
+        self.assertTrue(profile.apis["chat_completions"].accept_mislabeled_sse)
 
     def test_header_names_are_trimmed_and_duplicates_rejected(self):
         config = __import__("yaml").safe_load(CONFIG)
@@ -359,6 +369,57 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
             cache.get_user_model_token_snapshot()[("anonymous", "chat-deployment")]["request_count"],
             1,
         )
+
+    def test_mislabeled_chat_stream_is_rejected_by_default(self):
+        upstream = FakeResponse(
+            headers={"Content-Type": "application/json"},
+            lines=[b'data: {"choices":[]}', b"[DONE]"],
+            content=b"unused",
+        )
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/chat/completions", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                })
+
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.get_json()["error"]["code"], "invalid_upstream_stream")
+        self.assertTrue(upstream.closed)
+
+    def test_opted_in_mislabeled_chat_stream_normalizes_bare_done(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["apis"]["chat_completions"]["accept_mislabeled_sse"] = True
+        config_path = self.root / "compat-proxies.yaml"
+        config_path.write_text(__import__("yaml").safe_dump(config), encoding="utf-8")
+        compat_runtime = ProxyRuntime(
+            registry=ProxyRegistry(config_path),
+            affinity_store=ProxyAffinityStore(self.root / "compat-affinity.json"),
+        )
+        upstream = FakeResponse(
+            headers={"Content-Type": "application/json"},
+            lines=[
+                b'data: {"id":"chat-1","choices":[{"index":0,"delta":{"content":"OK"}}]}',
+                b"[DONE]",
+            ],
+            content=b"unused",
+        )
+
+        with mock.patch.object(proxy_routes, "proxy_runtime", compat_runtime), \
+                mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/chat/completions", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": True,
+                })
+                body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('data: {"id":"chat-1"', body)
+        self.assertIn("data: [DONE]\n\n", body)
 
     def test_responses_stream_rewrites_nested_model_and_extracts_usage(self):
         lines = [

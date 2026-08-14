@@ -62,6 +62,7 @@ class ProxyApiConfig:
     max_connection_retries: int = 0
     request_model: str = "preserve"
     response_model: str = "preserve"
+    accept_mislabeled_sse: bool = False
     headers: Dict[str, str] = field(default_factory=dict)
 
 
@@ -261,6 +262,10 @@ def _parse_apis(value, field_name: str) -> Dict[str, ProxyApiConfig]:
             ),
             request_model=request_model,
             response_model=response_model,
+            accept_mislabeled_sse=_parse_bool(
+                raw.get("accept_mislabeled_sse", False),
+                f"{field_name}.{api_name}.accept_mislabeled_sse",
+            ),
             headers=_parse_headers(raw.get("headers"), f"{field_name}.{api_name}.headers"),
         )
     if not apis:

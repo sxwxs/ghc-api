@@ -45,6 +45,17 @@ class ProxyChatCompletionsStreamHandler(SSEStreamHandler):
         rewritten["model"] = self.public_model
         yield event_type, json.dumps(rewritten, ensure_ascii=False, separators=(",", ":"))
 
+    def forward_raw_line(self, line: str) -> Iterator[str]:
+        # Some otherwise OpenAI-compatible gateways terminate a stream with a
+        # bare ``[DONE]`` line instead of the required ``data: [DONE]`` SSE
+        # field. Normalize that narrow drift while retaining the base handler's
+        # behavior for every other non-SSE line.
+        if line.strip() == "[DONE]":
+            if self.emit_done_sentinel:
+                yield "data: [DONE]\n\n"
+            return
+        yield from super().forward_raw_line(line)
+
     def extra_cache_fields(self) -> Dict:
         return {
             "upstream_provider": "configured_proxy",
