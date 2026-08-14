@@ -77,6 +77,6 @@ proxies:
           chat_completions:
             enabled: true
             upstream_model: example-chat-deployment
-            # Optional, model-scoped adapter. The only currently supported
-            # value is kimi_k3_papyrus; omit it for normal passthrough behavior.
+            # Optional, model-scoped adapter. Supported values are
+            # kimi_k3_papyrus and glm_5_2_nvfp4; omit it for normal passthrough.
             # compatibility: kimi_k3_papyrus

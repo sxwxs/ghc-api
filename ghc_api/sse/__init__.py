@@ -24,6 +24,7 @@ from .anthropic_responses import (
     StopSequenceScanner,
 )
 from .proxy_chat_completions import ProxyChatCompletionsStreamHandler
+from .proxy_glm_5_2 import Glm52ChatCompletionsStreamHandler
 from .proxy_kimi_k3 import KimiK3ChatCompletionsStreamHandler
 from .proxy_responses import ProxyResponsesStreamHandler
 
@@ -37,6 +38,7 @@ __all__ = [
     "ResponsesAnthropicEventTranslator",
     "StopSequenceScanner",
     "ProxyChatCompletionsStreamHandler",
+    "Glm52ChatCompletionsStreamHandler",
     "KimiK3ChatCompletionsStreamHandler",
     "ProxyResponsesStreamHandler",
 ]

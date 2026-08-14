@@ -15,12 +15,18 @@ from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
 from ..cache import cache
 from ..proxy import ProxyPayloadError, ProxyRequestError, ProxyRuntime
 from ..proxy.config import ProxyApiConfig, ProxyModelApiConfig, ProxyModelConfig, ProxyProfileConfig
+from ..proxy.glm_5_2 import (
+    GLM_5_2_NVFP4,
+    convert_non_stream_response as convert_glm_non_stream_response,
+    declared_tool_schemas,
+)
 from ..proxy.kimi_k3 import (
     KIMI_K3_PAPYRUS,
     convert_non_stream_response,
     declared_tool_names,
 )
 from ..sse import (
+    Glm52ChatCompletionsStreamHandler,
     KimiK3ChatCompletionsStreamHandler,
     ProxyChatCompletionsStreamHandler,
     ProxyResponsesStreamHandler,
@@ -252,6 +258,11 @@ def _handle_proxy_request(profile_name: str, api_name: str):
                 **common,
                 declared_tools=declared_tool_names(original_request_body.get("tools")),
             ).stream()
+        if model_api.compatibility == GLM_5_2_NVFP4:
+            return Glm52ChatCompletionsStreamHandler(
+                **common,
+                declared_tools=declared_tool_schemas(original_request_body.get("tools")),
+            ).stream()
         return ProxyChatCompletionsStreamHandler(**common).stream()
 
     duration = round(time.time() - start_time, 2)
@@ -287,6 +298,11 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             result = convert_non_stream_response(
                 result,
                 declared_tool_names(original_request_body.get("tools")),
+            )
+        elif model_api.compatibility == GLM_5_2_NVFP4:
+            result = convert_glm_non_stream_response(
+                result,
+                declared_tool_schemas(original_request_body.get("tools")),
             )
         result = _rewrite_non_stream_model(
             result, original_model, api.response_model == "public"

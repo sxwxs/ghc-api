@@ -21,6 +21,7 @@ from .config import (
     ProxyProfileConfig,
     ProxyRegistry,
 )
+from .glm_5_2 import GLM_5_2_NVFP4, fold_glm_chat_messages
 from .kimi_k3 import KIMI_K3_PAPYRUS, fold_chat_messages
 
 
@@ -75,6 +76,8 @@ def transform_payload(
     # the exact payload returned here is the one sent and cached.
     if model_api.compatibility == KIMI_K3_PAPYRUS:
         upstream_payload = fold_chat_messages(upstream_payload)
+    elif model_api.compatibility == GLM_5_2_NVFP4:
+        upstream_payload = fold_glm_chat_messages(upstream_payload)
     return upstream_payload
 
 

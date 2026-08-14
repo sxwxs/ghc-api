@@ -15,7 +15,8 @@ from ..utils import get_config_dir
 
 
 SUPPORTED_APIS = frozenset({"responses", "chat_completions"})
-SUPPORTED_COMPATIBILITIES = frozenset({"kimi_k3_papyrus"})
+SUPPORTED_COMPATIBILITIES = frozenset({"glm_5_2_nvfp4", "kimi_k3_papyrus"})
+CHAT_COMPLETIONS_COMPATIBILITIES = SUPPORTED_COMPATIBILITIES
 MODEL_REQUEST_MODES = frozenset({"preserve", "omit", "upstream"})
 MODEL_RESPONSE_MODES = frozenset({"preserve", "public"})
 AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
@@ -296,9 +297,9 @@ def _parse_model_apis(value, enabled_apis: Dict[str, ProxyApiConfig], field_name
                 f"'{field_name}.{api_name}.compatibility' must be one of: "
                 f"{', '.join(sorted(SUPPORTED_COMPATIBILITIES))}"
             )
-        if compatibility == "kimi_k3_papyrus" and api_name != "chat_completions":
+        if compatibility in CHAT_COMPLETIONS_COMPATIBILITIES and api_name != "chat_completions":
             raise ProxyConfigError(
-                f"'{field_name}.{api_name}.compatibility' kimi_k3_papyrus is only valid for chat_completions"
+                f"'{field_name}.{api_name}.compatibility' {compatibility} is only valid for chat_completions"
             )
         if api_name not in enabled_apis:
             continue

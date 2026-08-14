@@ -235,6 +235,31 @@ models:
   `data: [DONE]` frame, including when upstream omitted a finish chunk;
 - applies the same reasoning/tool conversion to non-streaming responses.
 
+GLM 5.2 on the dedicated NVFP4 endpoint can use the same profile shape with:
+
+```yaml
+models:
+  glm-5.2-proxy:
+    display_name: GLM 5.2 (Configured Proxy)
+    reasoning: true
+    input: [text]
+    context_window: 128000
+    max_output_tokens: 16384
+    apis:
+      chat_completions:
+        enabled: true
+        upstream_model: null
+        compatibility: glm_5_2_nvfp4
+```
+
+`glm_5_2_nvfp4` folds text-only message arrays into the string transcript
+accepted by that endpoint, separates `<think>...</think>` as
+`reasoning_content`, and converts its declared native
+`<tool_call>/<arg_key>/<arg_value>` grammar into OpenAI tool calls. Tool names,
+argument names/types, and required arguments are checked against the client tool
+schemas. A hallucinated native observation after a complete tool call is not
+forwarded to the client.
+
 The original client request, effective folded request, raw upstream response or
 SSE events, and public converted response are retained in the request cache.
 Configured upstream authorization headers are never stored.
