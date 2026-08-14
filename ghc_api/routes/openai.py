@@ -1691,6 +1691,16 @@ def responses():
                 immediate_response = pending_response.get(timeout=0.05)
             except queue.Empty:
                 immediate_response = None
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+                immediate_response = None
+
+                def raise_immediate_connection_error(error=exc):
+                    raise error
+
+                # ``get`` consumed the failed background result. Re-wrap the
+                # same exception so the streaming retry/504 path handles fast
+                # and slow connection failures identically.
+                pending_response = BackgroundResult(raise_immediate_connection_error)
 
             if immediate_response is not None and immediate_response.ok:
                 upstream_response = immediate_response

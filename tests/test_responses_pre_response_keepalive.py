@@ -3,6 +3,8 @@ import time
 import unittest
 from unittest import mock
 
+import requests
+
 from ghc_api.app import create_app
 from ghc_api.cache import RequestCache
 from ghc_api.routes import openai as openai_routes
@@ -30,6 +32,7 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
     def setUp(self):
         self.saved_models = state.models
         self.saved_retries = state.enable_responses_early_failure_retry
+        self.saved_connection_retries = state.max_connection_retries
         state.models = {"data": [
             {"id": "gpt-5", "supported_endpoints": ["/responses"]},
         ]}
@@ -40,6 +43,7 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
     def tearDown(self):
         state.models = self.saved_models
         state.enable_responses_early_failure_retry = self.saved_retries
+        state.max_connection_retries = self.saved_connection_retries
 
     def test_stream_sends_headers_and_keepalive_before_upstream_headers(self):
         completed = json.dumps({
@@ -94,6 +98,37 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
         entry = next(iter(self.cache.cache.values()))
         self.assertEqual(entry["status_code"], 200)
         self.assertEqual(entry["state"], RequestCache.STATE_COMPLETED)
+
+    def test_fast_connection_failure_uses_streaming_504_path(self):
+        state.max_connection_retries = 0
+        connection_error = requests.exceptions.ConnectionError("upstream unavailable")
+
+        patches = [
+            mock.patch.object(openai_routes, "cache", self.cache),
+            mock.patch.object(base_module, "cache", self.cache),
+            mock.patch.object(openai_routes, "ensure_copilot_token"),
+            mock.patch.object(openai_routes, "get_copilot_headers", return_value={}),
+            mock.patch.object(openai_routes, "get_copilot_base_url", return_value="https://upstream.test"),
+            mock.patch.object(openai_routes, "log_connection_retry"),
+            mock.patch.object(openai_routes.requests, "post", side_effect=connection_error),
+        ]
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with self.app.test_client() as client:
+                response = client.post(
+                    "/v1/responses",
+                    json={"model": "gpt-5", "stream": True, "input": []},
+                    buffered=True,
+                )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body.startswith(": keepalive\n\n"))
+        self.assertIn("event: response.failed\n", body)
+        self.assertIn('"code": "upstream_connection_error"', body)
+        entry = next(iter(self.cache.cache.values()))
+        self.assertEqual(entry["status_code"], 504)
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
 
 
 if __name__ == "__main__":
