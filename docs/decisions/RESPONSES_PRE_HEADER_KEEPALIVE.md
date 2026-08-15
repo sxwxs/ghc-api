@@ -5,7 +5,8 @@ Record of the review of [PR #42](https://github.com/sxwxs/ghc-api/pull/42)
 client). It keeps the reasoning that is not visible in the diff: what we decided
 and why, what we deliberately did not do, and what is still open.
 
-Shipped as four commits: `Fix Responses pre-header stream keepalive`,
+Merged as [PR #42](https://github.com/sxwxs/ghc-api/pull/42) (`a7f966a`) in four
+commits: `Fix Responses pre-header stream keepalive`,
 `Handle fast Responses connection failures`,
 `Preserve Responses errors and close cancelled streams`,
 `Restore the keepalive off switch and stop replaying permanent errors`.
@@ -167,7 +168,10 @@ counters have collected anything.
    orphaned-tool-result falls through to the next `for attempt in
    range(max_retries + 1)` iteration instead of breaking, so any 400 costs 4
    upstream calls. One-line fix, unrelated to this PR.
-6. **README links `ANTHROPIC_RESPONSES_WARNING_RUNBOOK.md`, which does not exist.**
+6. **The README linked `ANTHROPIC_RESPONSES_WARNING_RUNBOOK.md`, which was never
+   written** — it exists in no branch and no commit, and nothing in the code
+   references it. The dead link was removed alongside this document; write the
+   runbook if the warning it referred to still needs documenting.
 7. Minor: the synthetic `error` message is the raw upstream body and may be an
    HTML error page (truncate it); `ping_sent` conflates pre-header keepalives
    with in-stream pings, which is exactly the distinction §1 needs.
