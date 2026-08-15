@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from .json_guard import MAX_JSON_NESTING_DEPTH, exceeds_max_nesting
 from .reasoning_carrier import (
     build_reasoning_carrier,
     is_reasoning_carrier,
@@ -51,44 +52,26 @@ class StrictJSONError(ValueError):
 # the decoder's RecursionError: CPython's C accelerated scanner only raises
 # around ~10k levels (and the exact point moves between versions and builds),
 # while everything downstream is far more fragile -- ``copy.deepcopy`` of the
-# parsed payload already dies near 500 levels. The limit below is orders of
-# magnitude above any real Anthropic request (tool JSON Schemas nest a dozen
-# levels at most) and comfortably under every recursive consumer.
-MAX_JSON_NESTING_DEPTH = 100
-
-# One pass that swallows a whole string literal (unrolled loop form, which is
-# markedly faster than the naive alternation) or a run of characters that
-# carries no structure, leaving only the brackets to count. On a 4.6 MB body
-# this costs ~30 ms, against ~90 ms for the readable two-regex version.
-_JSON_STRUCTURE_ONLY_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[^\[\]{}"]+', re.S)
+# parsed payload already dies near 500 levels. See ghc_api.json_guard for the
+# shared limit, which the OpenAI-format endpoints apply too.
 
 
-def _reject_deep_nesting(text: str) -> None:
+def _reject_deep_nesting(raw: bytes) -> None:
     """Raise ``StrictJSONError`` when structural nesting exceeds the limit.
 
-    Runs on the raw text before decoding so a hostile body never reaches the
-    decoder (or any recursive consumer of the parsed value). String literals
-    are stripped first so brackets inside them are not counted; the remaining
-    scan touches only structural characters.
+    Runs on the raw body before decoding so a hostile document never reaches
+    the decoder, or any recursive consumer of the parsed value.
     """
-    structure = _JSON_STRUCTURE_ONLY_RE.sub("", text)
-    depth = 0
-    for char in structure:
-        if char in "[{":
-            depth += 1
-            if depth > MAX_JSON_NESTING_DEPTH:
-                raise StrictJSONError(
-                    "JSON nesting is too deep: exceeds the maximum of "
-                    f"{MAX_JSON_NESTING_DEPTH} levels"
-                )
-        elif char in "]}":
-            depth -= 1
-        # A leftover quote only survives for an unterminated string, which the
-        # decoder rejects a moment later; it must not disturb the depth count.
+    if exceeds_max_nesting(raw):
+        raise StrictJSONError(
+            "JSON nesting is too deep: exceeds the maximum of "
+            f"{MAX_JSON_NESTING_DEPTH} levels"
+        )
 
 
 def parse_strict_json_bytes(raw: bytes) -> Any:
     """Parse UTF-8 JSON while rejecting duplicate keys and non-finite numbers."""
+    _reject_deep_nesting(raw)
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -96,8 +79,6 @@ def parse_strict_json_bytes(raw: bytes) -> Any:
 
     def reject_constant(value: str) -> None:
         raise StrictJSONError(f"Non-finite JSON number is not allowed: {value}")
-
-    _reject_deep_nesting(text)
 
     def unique_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
         result: Dict[str, Any] = {}

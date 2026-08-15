@@ -5,6 +5,7 @@ Flask application factory and initialization
 from flask import Flask, g, jsonify, request
 
 from .auth import ANONYMOUS_USER_ID, require_auth
+from .json_guard import MAX_JSON_NESTING_DEPTH, exceeds_max_nesting
 from .routes.agent import agent_bp
 from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
@@ -62,6 +63,43 @@ def create_app() -> Flask:
 
         g.user_id = result.user_id
         return None
+
+    @app.before_request
+    def _reject_deeply_nested_json():
+        """Reject a JSON body that nests deeper than the shared guard allows.
+
+        Runs for every endpoint because the danger is not endpoint-specific:
+        ``request.get_json()`` raises ``RecursionError`` on a deep enough body
+        (``silent=True`` does not catch it, it is not a parse error), and the
+        routes that do parse it hand the value to ``copy.deepcopy`` and
+        ``json.dumps``, which give out even earlier. Either way a few KB of
+        ``[[[[...`` became a 500. Checking once here, before routing work
+        begins, keeps every endpoint's answer a deterministic 400.
+
+        It runs after the auth gate so an unauthenticated client cannot spend
+        the scan on a protected path.
+        """
+        if not request.is_json:
+            return None
+        if not exceeds_max_nesting(request.get_data(cache=True)):
+            return None
+
+        message = (
+            "JSON nesting is too deep: exceeds the maximum of "
+            f"{MAX_JSON_NESTING_DEPTH} levels"
+        )
+        if request.blueprint == "anthropic":
+            return jsonify({
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": message},
+            }), 400
+        return jsonify({
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": "invalid_json",
+            }
+        }), 400
 
     # Register blueprints
     app.register_blueprint(dashboard_bp)
