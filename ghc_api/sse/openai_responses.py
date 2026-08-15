@@ -188,3 +188,10 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
             # should still identify the terminal SSE failure.
             self.error_occurred = True
             self.status_code = 502
+        elif event_type == "error":
+            # Same for the standard Responses streaming ``error`` event, which
+            # the proxy itself emits when an upstream error arrives after the
+            # response headers were already committed. Without this a chained
+            # ghc-api would record the failure as 200/completed.
+            self.error_occurred = True
+            self.status_code = 502

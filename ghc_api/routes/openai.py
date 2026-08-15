@@ -61,7 +61,7 @@ def _start_responses_post(headers: Dict, payload: Dict) -> BackgroundResult:
         json=payload,
         stream=True,
         timeout=state.upstream_read_timeout,
-    ))
+    ), label="responses")
 
 
 def _responses_keepalive() -> str:
@@ -84,15 +84,34 @@ def _wait_responses_response_with_keepalive(pending_response):
             yield _responses_keepalive()
 
 
-def _responses_failed_event(message: str, code: str = "upstream_error") -> str:
+def _responses_error_event(
+    message: str,
+    code: str = "upstream_error",
+    param=None,
+    sequence_number: int = 0,
+) -> str:
+    """Standard Responses streaming ``error`` event, documented flat shape.
+
+    Deliberately not ``response.failed``: ``RetryingResponsesResponse`` treats an
+    early ``response.failed`` as a transient upstream failure that is safe to
+    replay, so using it for permanent errors makes a downstream ghc-api replay a
+    request that can never succeed (4 upstream calls for one client request).
+
+    The flat shape is what the API reference documents; the live service sends a
+    nested ``error`` object instead, which breaks SDK deserialization
+    (openai/openai-dotnet#881), so it is not imitated here.
+
+    ``sequence_number`` is 0 because this event is only ever emitted before any
+    upstream SSE event has been forwarded.
+    """
     event = {
-        "type": "response.failed",
-        "response": {
-            "status": "failed",
-            "error": {"code": code, "message": message},
-        },
+        "type": "error",
+        "code": code,
+        "message": message,
+        "param": param,
+        "sequence_number": sequence_number,
     }
-    return f"event: response.failed\ndata: {json.dumps(event)}\n\n"
+    return f"event: error\ndata: {json.dumps(event)}\n\n"
 
 
 def _complete_responses_stream_error(
@@ -261,7 +280,7 @@ def _stream_pending_responses_request(
                         request_id, active_payload, body, 504, active_request_size,
                         start_time, original_model, translated_model, user_id,
                     )
-                    yield _responses_failed_event(message, "upstream_connection_error")
+                    yield _responses_error_event(message, "upstream_connection_error")
                     return
 
                 if response.ok:
@@ -316,7 +335,7 @@ def _stream_pending_responses_request(
                     active_request_size, start_time, original_model, translated_model,
                     user_id,
                 )
-                yield _responses_failed_event(message)
+                yield _responses_error_event(message)
                 return
 
         except GeneratorExit:
@@ -333,7 +352,7 @@ def _stream_pending_responses_request(
                 start_time, original_model, translated_model, user_id,
             )
             try:
-                yield _responses_failed_event(str(exc), "proxy_error")
+                yield _responses_error_event(str(exc), "proxy_error")
             except GeneratorExit:
                 cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
                 return
@@ -1711,14 +1730,19 @@ def responses():
         conn_attempt = 0
         encrypted_content_retry_attempted = False
 
-        if use_streaming:
+        if use_streaming and state.sse_keepalive_interval > 0:
             request_size = len(json.dumps(payload))
             pending_response = _start_responses_post(headers, payload)
             # Preserve the old direct-handler path for responses that are
             # already available. Besides avoiding an unnecessary SSE comment,
             # this keeps the early-failure wrapper a strict no-op when disabled.
+            # The grace has to be long enough to cover normal upstream latency,
+            # or every error response ends up on the streaming path and loses
+            # its HTTP status; it must stay below the shortest client read
+            # timeout, or we recreate the stall this path exists to avoid.
+            grace = min(state.responses_pre_header_grace, state.sse_keepalive_interval)
             try:
-                immediate_response = pending_response.get(timeout=0.05)
+                immediate_response = pending_response.get(timeout=grace)
             except queue.Empty:
                 immediate_response = None
             except Exception as exc:

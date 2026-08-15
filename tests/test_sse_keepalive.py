@@ -11,6 +11,7 @@ import unittest
 
 import requests
 
+from ghc_api.counters import counters
 from ghc_api.sse.keepalive import (
     BackgroundResult,
     KEEPALIVE,
@@ -184,6 +185,55 @@ class KeepaliveTest(unittest.TestCase):
         pending.cancel()
 
         self.assertTrue(result.closed.wait(1))
+
+    def test_cancel_after_get_leaves_the_live_result_alone(self):
+        """Once a consumer has taken the result it owns it; a late cancel (the
+        route's cleanup path always runs) must not close a stream in use."""
+        result = _ClosableResult()
+        pending = BackgroundResult(lambda: result)
+
+        self.assertIs(pending.get(timeout=1), result)
+        started = time.monotonic()
+        pending.cancel()
+
+        self.assertLess(time.monotonic() - started, 0.05, "cancel() must never block")
+        self.assertFalse(result.closed.is_set())
+
+    def test_cancel_is_idempotent(self):
+        result = _ClosableResult()
+        pending = BackgroundResult(lambda: result)
+
+        pending.cancel()
+        pending.cancel()
+        pending.cancel()
+
+        self.assertTrue(result.closed.wait(1))
+
+    def test_counters_track_started_inflight_and_cancelled(self):
+        """In-flight upstream work started here lives outside the WSGI thread
+        pool, so these counters are the only thing that makes its occupancy
+        visible (dashboard renders unknown counter keys automatically)."""
+        counters.reset()
+        gate = threading.Event()
+        result = _ClosableResult()
+
+        pending = BackgroundResult(lambda: (gate.wait(5), result)[1], label="unittest")
+        snapshot = counters.snapshot()
+        self.assertEqual(snapshot.get("bg.unittest.started"), 1)
+        self.assertEqual(snapshot.get("bg.unittest.inflight"), 1)
+
+        pending.cancel()
+        gate.set()
+
+        self.assertTrue(result.closed.wait(1))
+        deadline = time.time() + 1
+        while time.time() < deadline and counters.snapshot().get("bg.unittest.inflight") != 0:
+            time.sleep(0.01)
+        snapshot = counters.snapshot()
+        self.assertEqual(snapshot.get("bg.unittest.inflight"), 0)
+        self.assertEqual(snapshot.get("bg.unittest.cancelled"), 1)
+        self.assertEqual(snapshot.get("bg.unittest.orphan_closed"), 1)
+        counters.reset()
 
 
 if __name__ == "__main__":

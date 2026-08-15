@@ -242,7 +242,7 @@ def _start_direct_anthropic_post(headers: Dict, payload: Dict, stream: bool):
         json=payload,
         timeout=state.upstream_read_timeout,
         stream=stream,
-    ))
+    ), label="messages")
 
 
 def _anthropic_ping_event() -> str:
@@ -1231,7 +1231,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                 json=openai_payload,
                 stream=True,
                 timeout=state.upstream_read_timeout,
-            ))
+            ), label="messages_translated")
             response = yield from _wait_anthropic_response_with_ping(pending_response)
             status_code = response.status_code
 
@@ -1257,7 +1257,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                     json=new_openai_payload,
                     stream=True,
                     timeout=state.upstream_read_timeout,
-                ))
+                ), label="messages_translated")
                 response = yield from _wait_anthropic_response_with_ping(pending_response)
                 status_code = response.status_code
 

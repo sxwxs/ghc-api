@@ -1,4 +1,5 @@
 import json
+import queue
 import threading
 import time
 import unittest
@@ -55,10 +56,17 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
         self.saved_retries = state.enable_responses_early_failure_retry
         self.saved_connection_retries = state.max_connection_retries
         self.saved_auto_remove = state.auto_remove_encrypted_content_on_parse_error
+        self.saved_keepalive = state.sse_keepalive_interval
+        self.saved_grace = state.responses_pre_header_grace
         state.models = {"data": [
             {"id": "gpt-5", "supported_endpoints": ["/responses"]},
         ]}
         state.enable_responses_early_failure_retry = False
+        # Which path a request takes is decided entirely by these two values
+        # against the upstream delay, so every test pins them explicitly rather
+        # than depending on the shipped defaults.
+        state.sse_keepalive_interval = 1
+        state.responses_pre_header_grace = 0.05
         self.cache = RequestCache()
         self.app = create_app()
 
@@ -67,6 +75,8 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
         state.enable_responses_early_failure_retry = self.saved_retries
         state.max_connection_retries = self.saved_connection_retries
         state.auto_remove_encrypted_content_on_parse_error = self.saved_auto_remove
+        state.sse_keepalive_interval = self.saved_keepalive
+        state.responses_pre_header_grace = self.saved_grace
 
     def test_stream_sends_headers_and_keepalive_before_upstream_headers(self):
         completed = json.dumps({
@@ -76,9 +86,14 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
                 "usage": {"input_tokens": 2, "output_tokens": 1},
             },
         })
+        first_chunk_seen = threading.Event()
+        released = threading.Event()
 
         def slow_post(*args, **kwargs):
-            time.sleep(0.3)
+            # Block until the client actually received the keepalive, so this
+            # asserts ordering instead of racing a sleep against a deadline.
+            first_chunk_seen.wait(5)
+            released.set()
             return _FakeStreamResponse([
                 b"event: response.completed",
                 f"data: {completed}".encode(),
@@ -96,7 +111,6 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
 
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
             with self.app.test_client() as client:
-                started = time.monotonic()
                 response = client.post(
                     "/v1/responses",
                     json={"model": "gpt-5", "stream": True, "input": []},
@@ -108,14 +122,17 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
                     if isinstance(first_chunk, bytes)
                     else first_chunk
                 )
-                first_chunk_elapsed = time.monotonic() - started
+                self.assertFalse(
+                    released.is_set(),
+                    "the first downstream chunk must be written before the upstream POST returns",
+                )
+                first_chunk_seen.set()
                 remaining = "".join(
                     chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
                     for chunk in response.response
                 )
 
         self.assertEqual(first_chunk, ": keepalive\n\n")
-        self.assertLess(first_chunk_elapsed, 0.2)
         self.assertIn("event: response.completed\n", remaining)
         self.assertIn("data: [DONE]\n\n", remaining)
         entry = next(iter(self.cache.cache.values()))
@@ -151,7 +168,8 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertEqual(response.status_code, 200)
         self.assertTrue(body.startswith(": keepalive\n\n"))
-        self.assertIn("event: response.failed\n", body)
+        self.assertIn("event: error\n", body)
+        self.assertNotIn("response.failed", body)
         self.assertIn('"code": "upstream_connection_error"', body)
         entry = next(iter(self.cache.cache.values()))
         self.assertEqual(entry["status_code"], 504)
@@ -349,6 +367,122 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
         entry = next(iter(self.cache.cache.values()))
         self.assertEqual(entry["status_code"], 499)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+
+    def test_keepalive_disabled_restores_the_blocking_path(self):
+        """sse_keepalive_interval = 0 is the documented "inject nothing" switch
+        (README) and the only runtime way to turn this behavior off, so it must
+        keep the pre-header path from running at all - including for an upstream
+        that is slow enough to trip the grace.
+        """
+        state.sse_keepalive_interval = 0
+        error_body = {"error": {"message": "bad request"}}
+
+        def slow_post(*args, **kwargs):
+            time.sleep(0.2)
+            return _FakeStreamResponse(status_code=400, text=json.dumps(error_body))
+
+        patches = [
+            mock.patch.object(openai_routes, "cache", self.cache),
+            mock.patch.object(base_module, "cache", self.cache),
+            mock.patch.object(openai_routes, "ensure_copilot_token"),
+            mock.patch.object(openai_routes, "get_copilot_headers", return_value={}),
+            mock.patch.object(openai_routes, "get_copilot_base_url", return_value="https://upstream.test"),
+            mock.patch.object(openai_routes, "log_error_request"),
+            mock.patch.object(openai_routes.requests, "post", side_effect=slow_post),
+        ]
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with self.app.test_client() as client:
+                response = client.post(
+                    "/v1/responses",
+                    json={"model": "gpt-5", "stream": True, "input": []},
+                    buffered=True,
+                )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(json.loads(body), error_body)
+        self.assertNotIn("keepalive", body)
+
+    def test_slow_upstream_error_emits_a_terminal_error_event(self):
+        """Once the grace has expired the HTTP status is gone, but the synthetic
+        event must be ``error`` and not ``response.failed``:
+        RetryingResponsesResponse replays an early ``response.failed``, so a
+        chained ghc-api would retry a permanent failure three more times.
+        """
+        error_body = {"error": {"message": "rate limited", "code": "rate_limit"}}
+
+        def slow_post(*args, **kwargs):
+            time.sleep(0.2)
+            return _FakeStreamResponse(status_code=429, text=json.dumps(error_body))
+
+        patches = [
+            mock.patch.object(openai_routes, "cache", self.cache),
+            mock.patch.object(base_module, "cache", self.cache),
+            mock.patch.object(openai_routes, "ensure_copilot_token"),
+            mock.patch.object(openai_routes, "get_copilot_headers", return_value={}),
+            mock.patch.object(openai_routes, "get_copilot_base_url", return_value="https://upstream.test"),
+            mock.patch.object(openai_routes, "log_error_request"),
+            mock.patch.object(openai_routes.requests, "post", side_effect=slow_post),
+        ]
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with self.app.test_client() as client:
+                response = client.post(
+                    "/v1/responses",
+                    json={"model": "gpt-5", "stream": True, "input": []},
+                    buffered=True,
+                )
+
+        body = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(body.startswith(": keepalive\n\n"))
+        self.assertIn("event: error\n", body)
+        self.assertNotIn("response.failed", body)
+        payload = json.loads(body.split("event: error\ndata: ", 1)[1].split("\n\n", 1)[0])
+        self.assertEqual(payload["type"], "error")
+        self.assertEqual(payload["code"], "upstream_error")
+        self.assertIn("rate limited", payload["message"])
+        self.assertIsNone(payload["param"])
+        self.assertEqual(payload["sequence_number"], 0)
+        entry = next(iter(self.cache.cache.values()))
+        self.assertEqual(entry["status_code"], 429, "the cache must keep the true status")
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+
+    def test_grace_is_capped_by_the_keepalive_interval(self):
+        """A grace longer than the keepalive interval would delay the first
+        keepalive past the interval the operator configured."""
+        state.sse_keepalive_interval = 1
+        state.responses_pre_header_grace = 5.0
+        recorded = {}
+
+        class _RecordingResult:
+            def get(self, timeout=None):
+                recorded["timeout"] = timeout
+                raise queue.Empty()
+
+            def cancel(self):
+                pass
+
+        patches = [
+            mock.patch.object(openai_routes, "cache", self.cache),
+            mock.patch.object(base_module, "cache", self.cache),
+            mock.patch.object(openai_routes, "ensure_copilot_token"),
+            mock.patch.object(openai_routes, "get_copilot_headers", return_value={}),
+            mock.patch.object(openai_routes, "get_copilot_base_url", return_value="https://upstream.test"),
+            mock.patch.object(openai_routes, "_start_responses_post", return_value=_RecordingResult()),
+            mock.patch.object(openai_routes, "_stream_pending_responses_request", return_value="streamed"),
+        ]
+
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with self.app.test_client() as client:
+                client.post(
+                    "/v1/responses",
+                    json={"model": "gpt-5", "stream": True, "input": []},
+                    buffered=True,
+                )
+
+        self.assertEqual(recorded["timeout"], 1)
 
 
 if __name__ == "__main__":
