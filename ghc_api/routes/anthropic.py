@@ -1713,10 +1713,19 @@ def handle_responses_anthropic_request(
                     stream=True,
                     timeout=state.upstream_read_timeout,
                 ), label="messages_responses")
+                # Same pre-header grace as /v1/responses: commit to a streaming
+                # response quickly instead of holding a WSGI worker silent for a
+                # whole keepalive interval, where a client disconnect is invisible
+                # because nothing has been written yet. Upstream errors that arrive
+                # inside the window still keep their real HTTP status below;
+                # ReadTimeout/ConnectionError propagate to the route-level retry
+                # loop, which is safe precisely because nothing was sent yet.
+                grace = min(
+                    state.responses_pre_header_grace,
+                    state.sse_keepalive_interval,
+                )
                 try:
-                    response = pending_response.get(
-                        timeout=state.sse_keepalive_interval
-                    )
+                    response = pending_response.get(timeout=grace)
                 except queue.Empty:
                     _log_compatibility_warnings(request_id, warnings)
                     return _stream_pending_anthropic_responses_request(

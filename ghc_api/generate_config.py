@@ -165,6 +165,15 @@ upstream_read_timeout: 1800
 # before emitting the first token. Set to 0 to disable keepalive.
 sse_keepalive_interval: 30
 
+# How long a streaming Responses request waits for upstream response headers before
+# it commits to a streaming response and starts sending keepalives. Applies to
+# /v1/responses and to /v1/messages when it is served through the Responses
+# compatibility path. Upstream errors that arrive inside this window keep their real
+# HTTP status; later ones can only be reported as an SSE error event, so keep this
+# below the shortest client read timeout. Clamped to [0, 5] seconds, and
+# sse_keepalive_interval: 0 disables the behavior entirely.
+responses_pre_header_grace: 0.5
+
 # If true, when /v1/responses gets HTTP 400 because encrypted reasoning or function
 # output content cannot be decrypted, the request is cleaned and retried exactly once:
 # reasoning/message items carrying encrypted_content are dropped, while tool output

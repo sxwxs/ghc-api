@@ -144,13 +144,15 @@ upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot
 sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
                               # this many seconds (keeps clients like Claude Code from
                               # timing out while the model "thinks"). Set 0 to disable.
-responses_pre_header_grace: 0.5 # How long /v1/responses waits for upstream response
-                              # headers before committing to a streaming response and
-                              # sending keepalives. Errors that arrive within this window
-                              # keep their real HTTP status; later ones can only be
-                              # reported as an SSE error event, so keep this below the
-                              # shortest client read timeout. Clamped to [0, 5] seconds;
-                              # sse_keepalive_interval: 0 disables the behavior entirely.
+responses_pre_header_grace: 0.5 # How long a Responses request waits for upstream
+                              # response headers before committing to a streaming
+                              # response and sending keepalives. Applies to /v1/responses
+                              # and to /v1/messages when it is served through the
+                              # Responses compatibility path. Errors that arrive within
+                              # this window keep their real HTTP status; later ones can
+                              # only be reported as an SSE error event, so keep this below
+                              # the shortest client read timeout. Clamped to [0, 5]
+                              # seconds; sse_keepalive_interval: 0 disables it entirely.
 
 # Recover from undecryptable encrypted content (disabled by default)
 auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400

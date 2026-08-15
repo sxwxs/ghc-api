@@ -905,6 +905,53 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         cached = next(iter(self.cache.cache.values()))
         self.assertEqual(cached["state"], self.cache.STATE_COMPLETED)
 
+    def test_pre_header_grace_commits_stream_before_keepalive_interval(self):
+        """The pre-header wait is bounded by responses_pre_header_grace.
+
+        With a realistic 30s keepalive interval the client must not wait 30s for
+        the first byte (and the worker must not sit in an uninterruptible wait
+        where a client disconnect is invisible because nothing was written).
+        """
+        completed = {
+            "type": "response.completed",
+            "response": self._terminal_response(),
+        }
+        upstream = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(completed, separators=(",", ":"))).encode()
+        ])
+        release_response = threading.Event()
+
+        def slow_post(*args, **kwargs):
+            release_response.wait(2)
+            return upstream
+
+        started = time.monotonic()
+        with mock.patch.object(
+            anthropic_module.state, "sse_keepalive_interval", 30
+        ), mock.patch.object(
+            anthropic_module.state, "responses_pre_header_grace", 0.02
+        ), mock.patch.object(
+            anthropic_module.requests, "post", side_effect=slow_post
+        ):
+            response = self.client.post(
+                "/v1/messages",
+                json=self._request_payload(stream=True),
+                buffered=False,
+            )
+            chunks = iter(response.response)
+            first_chunk = next(chunks).decode("utf-8")
+            elapsed = time.monotonic() - started
+            release_response.set()
+            body = first_chunk + "".join(
+                chunk.decode("utf-8") for chunk in chunks
+            )
+
+        self.assertEqual(
+            first_chunk, 'event: ping\ndata: {"type": "ping"}\n\n'
+        )
+        self.assertLess(elapsed, 5)
+        self.assertIn("event: message_stop\n", body)
+
     def test_pre_header_disconnect_marks_499_and_closes_late_response(self):
         upstream = _FakeResponse({}, lines=[])
         post_started = threading.Event()

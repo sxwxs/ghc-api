@@ -67,8 +67,7 @@ class BackgroundResult:
                 counters.incr(f"bg.{label}.inflight", -1)
                 self._done.set()
 
-        self._thread = threading.Thread(target=_runner, daemon=True)
-        self._thread.start()
+        threading.Thread(target=_runner, daemon=True).start()
 
     @staticmethod
     def _close_result(result):
