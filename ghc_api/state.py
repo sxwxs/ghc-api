@@ -67,6 +67,12 @@ class State:
         # SSE keepalive: when a stream is idle this many seconds, emit a keepalive
         # ping to the client so its read timeout does not fire. 0 disables.
         self.sse_keepalive_interval: int = 30
+        # How long /v1/responses waits for upstream response headers before it
+        # commits to a streaming response and starts sending keepalives. Errors
+        # that arrive within this window keep their real HTTP status; later ones
+        # can only be reported as an SSE ``error`` event. Must stay below the
+        # shortest client read timeout. Clamped to [0, 5] seconds on load.
+        self.responses_pre_header_grace: float = 0.5
         # When /v1/responses rejects a request because encrypted reasoning or tool
         # output content cannot be decrypted, clean the input and retry once instead
         # of surfacing the 400. Lossy by design (see remove_encrypted_content_items),

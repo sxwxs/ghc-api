@@ -16,6 +16,8 @@ comment). Upstream exceptions are re-raised in the consumer so existing
 import queue
 import threading
 
+from ..counters import counters
+
 # Yielded to the consumer when the stream has been idle for ``interval`` seconds.
 KEEPALIVE = object()
 # Internal marker: the upstream iterator finished normally.
@@ -30,22 +32,82 @@ class BackgroundResult:
     upstream call has made no progress.
     """
 
-    def __init__(self, fn):
+    def __init__(self, fn, label: str = "other"):
         self._q: "queue.Queue" = queue.Queue(maxsize=1)
+        self._lock = threading.Lock()
+        self._cancelled = False
+        self._label = label
+
+        # In-flight upstream work started here lives outside the WSGI thread
+        # pool, so a cancelled client no longer bounds it. These counters are
+        # what makes that occupancy visible (new keys render automatically in
+        # the dashboard's Proxy Activity panel).
+        counters.incr(f"bg.{label}.started")
+        counters.incr(f"bg.{label}.inflight")
 
         def _runner():
             try:
-                self._q.put((False, fn()))
-            except Exception as exc:  # propagate to the consumer thread
-                self._q.put((True, exc))
+                try:
+                    result = (False, fn())
+                except Exception as exc:  # propagate to the consumer thread
+                    result = (True, exc)
+
+                discard = False
+                with self._lock:
+                    if self._cancelled:
+                        discard = True
+                    else:
+                        self._q.put_nowait(result)
+
+                if discard:
+                    counters.incr(f"bg.{label}.orphan_closed")
+                    self._close_result(result)
+            finally:
+                counters.incr(f"bg.{label}.inflight", -1)
 
         threading.Thread(target=_runner, daemon=True).start()
+
+    @staticmethod
+    def _close_result(result):
+        is_exc, item = result
+        if is_exc:
+            return
+        close = getattr(item, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                # Cancellation is best-effort cleanup and must not mask the
+                # client disconnect or other error that initiated it.
+                pass
 
     def get(self, timeout=None):
         is_exc, item = self._q.get(timeout=timeout)
         if is_exc:
             raise item
         return item
+
+    def cancel(self):
+        """Discard and close a queued or eventual result.
+
+        Python cannot interrupt a blocking ``requests.post`` safely, but a
+        cancelled consumer must not leave the response it eventually returns
+        open. The lock makes cancellation atomic with the producer's enqueue.
+        """
+        queued_result = None
+        with self._lock:
+            if self._cancelled:
+                return
+            self._cancelled = True
+            counters.incr(f"bg.{self._label}.cancelled")
+            try:
+                queued_result = self._q.get_nowait()
+            except queue.Empty:
+                pass
+
+        if queued_result is not None:
+            counters.incr(f"bg.{self._label}.orphan_closed")
+            self._close_result(queued_result)
 
 
 def wait_result_with_keepalive(pending_result, interval):
@@ -76,7 +138,10 @@ def iter_lines_with_keepalive(response, interval):
     ``response.iter_lines()`` (byte-identical to the old behavior).
     """
     if not interval or interval <= 0:
-        yield from response.iter_lines()
+        try:
+            yield from response.iter_lines()
+        finally:
+            response.close()
         return
 
     q: "queue.Queue" = queue.Queue()

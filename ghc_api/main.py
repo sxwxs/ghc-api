@@ -231,6 +231,14 @@ def main():
             state.upstream_read_timeout = int(config['upstream_read_timeout'])
         if 'sse_keepalive_interval' in config:
             state.sse_keepalive_interval = int(config['sse_keepalive_interval'])
+        if 'responses_pre_header_grace' in config:
+            # min(max(0.0, x), 5.0) is the whole validation story: it turns a
+            # negative value or NaN into 0 (a non-blocking poll) and inf into 5,
+            # none of which reach queue.Queue.get(timeout=...) where they would
+            # raise per request or silently disable the grace. Argument order
+            # matters: max(0.0, nan) is 0.0 but max(nan, 0.0) is nan.
+            state.responses_pre_header_grace = min(
+                max(0.0, float(config['responses_pre_header_grace'])), 5.0)
         if 'auto_remove_encrypted_content_on_parse_error' in config:
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
         if 'save_request_to_file' in config:

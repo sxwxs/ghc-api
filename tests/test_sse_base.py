@@ -268,6 +268,37 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
         self.assertEqual(entry["status_code"], 502)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
 
+    def test_terminal_error_event_is_recorded_as_error(self):
+        """A chained ghc-api consumes the ``error`` event its upstream proxy
+        emits after committing a 200. Without this the failure would be filed as
+        200/completed and every success-rate metric would be wrong.
+        """
+        error = json.dumps({
+            "type": "error",
+            "code": "upstream_error",
+            "message": "rate limited",
+            "param": None,
+            "sequence_number": 0,
+        })
+        handler = OpenAIResponsesStreamHandler(
+            response=_FakeResponse([
+                b"event: error",
+                f"data: {error}".encode(),
+            ]),
+            request_id="req-error-event",
+            request_size=10,
+            start_time=0.0,
+            original_model="gpt-5",
+            translated_model="gpt-5",
+            request_body_for_cache={"model": "gpt-5"},
+        )
+
+        _collect(handler._generate())
+
+        entry = self.cache.get_request("req-error-event")
+        self.assertEqual(entry["status_code"], 502)
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+
 
 class _LazyStreamResponse:
     """A ``requests.Response`` stand-in with real streaming semantics.
@@ -411,6 +442,57 @@ class RetryingResponsesResponseTest(unittest.TestCase):
 
         retry.assert_called_once_with()
         self.assertIn(failed_line, output)
+
+    def test_does_not_retry_a_standard_error_event(self):
+        """The proxy emits ``error`` (not ``response.failed``) for upstream errors
+        it observes after committing a 200. ``error`` is terminal: replaying it
+        would turn one client request into ``max_retries + 1`` upstream calls for
+        a request that can never succeed.
+        """
+        error_line = self._event(
+            "error", code="upstream_error", message="bad tool schema",
+            param=None, sequence_number=0,
+        )
+        first = _FakeResponse([b"event: error", error_line])
+        retry = mock.Mock()
+
+        output = list(RetryingResponsesResponse(first, retry, 3, "req-error").iter_lines())
+
+        retry.assert_not_called()
+        self.assertIn(error_line, output)
+
+    def test_disconnect_while_retry_is_pending_closes_retry_response(self):
+        first = _FakeResponse([
+            self._event("response.created"),
+            self._event("response.failed", response={"error": None}),
+        ])
+        second = _FakeResponse([])
+        retry_started = threading.Event()
+        release_retry = threading.Event()
+        iteration_done = threading.Event()
+
+        def retry():
+            retry_started.set()
+            release_retry.wait(1)
+            return second
+
+        wrapper = RetryingResponsesResponse(first, retry, 1, "req-cancel-retry")
+
+        def consume():
+            list(wrapper.iter_lines())
+            iteration_done.set()
+
+        thread = threading.Thread(target=consume)
+        thread.start()
+        self.assertTrue(retry_started.wait(1))
+
+        wrapper.close()
+        release_retry.set()
+        self.assertTrue(iteration_done.wait(1))
+        thread.join(1)
+
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
 
 
 class SSEKeepaliveIntegrationTest(unittest.TestCase):

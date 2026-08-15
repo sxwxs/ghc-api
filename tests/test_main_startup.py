@@ -85,3 +85,28 @@ def test_valid_config_is_used(startup_env):
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 9999
     assert kwargs["debug"] is True
+
+
+@pytest.mark.parametrize("configured,expected", [
+    ("0.25", 0.25),
+    ("0", 0.0),
+    # The clamp exists because these three are not benign once they reach
+    # queue.Queue.get(timeout=...): a negative raises ValueError and inf raises
+    # OverflowError (turning every streaming request into a 500), while nan
+    # silently disables the timeout so the route blocks like it used to.
+    ("-1", 0.0),
+    (".nan", 0.0),
+    (".inf", 5.0),
+    ("42", 5.0),
+])
+def test_responses_pre_header_grace_is_clamped(startup_env, configured, expected):
+    tmp_path, fake_app = startup_env
+    (tmp_path / "config.yaml").write_text(
+        "address: 127.0.0.1\nport: 9999\ndebug: true\n"
+        f"responses_pre_header_grace: {configured}\n",
+        encoding="utf-8",
+    )
+
+    main_module.main()
+
+    assert state.responses_pre_header_grace == expected
