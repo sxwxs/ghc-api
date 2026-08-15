@@ -37,12 +37,13 @@ class _SlowResponse:
 class _ImmediateResponse:
     def __init__(self, lines):
         self._lines = lines
+        self.closed = False
 
     def iter_lines(self):
         yield from self._lines
 
     def close(self):
-        pass
+        self.closed = True
 
 
 class _RaisingResponse:
@@ -55,6 +56,14 @@ class _RaisingResponse:
 
     def close(self):
         pass
+
+
+class _ClosableResult:
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def close(self):
+        self.closed.set()
 
 
 class KeepaliveTest(unittest.TestCase):
@@ -84,6 +93,16 @@ class KeepaliveTest(unittest.TestCase):
         out = list(iter_lines_with_keepalive(resp, interval=0))
         self.assertEqual(out, lines)
         self.assertNotIn(KEEPALIVE, out)
+        self.assertTrue(resp.closed)
+
+    def test_interval_zero_closes_response_on_early_consumer_exit(self):
+        resp = _ImmediateResponse([b"data: a", b"data: b"])
+        stream = iter_lines_with_keepalive(resp, interval=0)
+
+        self.assertEqual(next(stream), b"data: a")
+        stream.close()
+
+        self.assertTrue(resp.closed)
 
     def test_negative_interval_is_pure_passthrough(self):
         lines = [b"data: a"]
@@ -136,6 +155,35 @@ class KeepaliveTest(unittest.TestCase):
 
         with self.assertRaises(requests.exceptions.ConnectionError):
             list(wait_result_with_keepalive(pending, interval=5))
+
+    def test_cancel_closes_eventual_background_result(self):
+        release = threading.Event()
+        result = _ClosableResult()
+
+        def delayed_result():
+            release.wait(1)
+            return result
+
+        pending = BackgroundResult(delayed_result)
+        pending.cancel()
+        release.set()
+
+        self.assertTrue(result.closed.wait(1))
+
+    def test_cancel_closes_already_queued_background_result(self):
+        result = _ClosableResult()
+        result_ready = threading.Event()
+
+        def ready_result():
+            result_ready.set()
+            return result
+
+        pending = BackgroundResult(ready_result)
+        self.assertTrue(result_ready.wait(1))
+
+        pending.cancel()
+
+        self.assertTrue(result.closed.wait(1))
 
 
 if __name__ == "__main__":

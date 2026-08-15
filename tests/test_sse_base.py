@@ -412,6 +412,39 @@ class RetryingResponsesResponseTest(unittest.TestCase):
         retry.assert_called_once_with()
         self.assertIn(failed_line, output)
 
+    def test_disconnect_while_retry_is_pending_closes_retry_response(self):
+        first = _FakeResponse([
+            self._event("response.created"),
+            self._event("response.failed", response={"error": None}),
+        ])
+        second = _FakeResponse([])
+        retry_started = threading.Event()
+        release_retry = threading.Event()
+        iteration_done = threading.Event()
+
+        def retry():
+            retry_started.set()
+            release_retry.wait(1)
+            return second
+
+        wrapper = RetryingResponsesResponse(first, retry, 1, "req-cancel-retry")
+
+        def consume():
+            list(wrapper.iter_lines())
+            iteration_done.set()
+
+        thread = threading.Thread(target=consume)
+        thread.start()
+        self.assertTrue(retry_started.wait(1))
+
+        wrapper.close()
+        release_retry.set()
+        self.assertTrue(iteration_done.wait(1))
+        thread.join(1)
+
+        self.assertTrue(first.closed)
+        self.assertTrue(second.closed)
+
 
 class SSEKeepaliveIntegrationTest(unittest.TestCase):
     """The base handler must translate an idle stream into a client keepalive.

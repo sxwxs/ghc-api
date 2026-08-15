@@ -122,6 +122,55 @@ def _complete_responses_stream_error(
     })
 
 
+def _build_responses_stream_handler(
+    response,
+    payload: Dict,
+    request_id: str,
+    request_size: int,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    original_request_body: Dict,
+    request_headers: Dict,
+    client_ip: str,
+    user_id: str,
+    enable_vision: bool,
+) -> OpenAIResponsesStreamHandler:
+    upstream_response = response
+    if state.enable_responses_early_failure_retry:
+        def retry_streaming_response():
+            ensure_copilot_token()
+            retry_headers = get_copilot_headers(enable_vision)
+            return requests.post(
+                f"{get_copilot_base_url()}/v1/responses",
+                headers=retry_headers,
+                json=payload,
+                stream=True,
+                timeout=state.upstream_read_timeout,
+            )
+
+        upstream_response = RetryingResponsesResponse(
+            response=response,
+            response_factory=retry_streaming_response,
+            max_retries=state.max_connection_retries,
+            request_id=request_id,
+        )
+
+    return OpenAIResponsesStreamHandler(
+        response=upstream_response,
+        request_id=request_id,
+        request_size=request_size,
+        start_time=start_time,
+        original_model=original_model,
+        translated_model=translated_model,
+        request_body_for_cache=payload,
+        original_request_body=original_request_body,
+        request_headers=request_headers,
+        client_ip=client_ip,
+        user_id=user_id,
+    )
+
+
 def _stream_pending_responses_request(
     pending_response,
     payload: Dict,
@@ -159,6 +208,7 @@ def _stream_pending_responses_request(
         active_payload = payload
         active_request_size = request_size
         active_pending = pending_response
+        response = None
         connection_retries = max(0, state.max_connection_retries)
         conn_attempt = 0
         encrypted_content_retry_attempted = False
@@ -215,44 +265,19 @@ def _stream_pending_responses_request(
                     return
 
                 if response.ok:
-                    upstream_response = response
-                    if state.enable_responses_early_failure_retry:
-                        def retry_streaming_response():
-                            ensure_copilot_token()
-                            retry_headers = get_copilot_headers(enable_vision)
-                            return requests.post(
-                                f"{get_copilot_base_url()}/v1/responses",
-                                headers=retry_headers,
-                                json=active_payload,
-                                stream=True,
-                                timeout=state.upstream_read_timeout,
-                            )
-
-                        upstream_response = RetryingResponsesResponse(
-                            response=response,
-                            response_factory=retry_streaming_response,
-                            max_retries=state.max_connection_retries,
-                            request_id=request_id,
-                        )
-
-                    handler = OpenAIResponsesStreamHandler(
-                        response=upstream_response,
-                        request_id=request_id,
-                        request_size=active_request_size,
-                        start_time=start_time,
-                        original_model=original_model,
-                        translated_model=translated_model,
-                        request_body_for_cache=active_payload,
-                        original_request_body=original_request_body,
-                        request_headers=request_headers,
-                        client_ip=client_ip,
-                        user_id=user_id,
+                    handler = _build_responses_stream_handler(
+                        response, active_payload, request_id, active_request_size,
+                        start_time, original_model, translated_model,
+                        original_request_body, request_headers, client_ip, user_id,
+                        enable_vision,
                     )
+                    response = None  # ownership transferred to the stream handler
                     handler._cache_seeded = True
                     yield from handler._generate()
                     return
 
                 response_text = response.text
+                response.close()
                 log_error_request(
                     "/v1/responses", active_payload, response_text,
                     response.status_code, client_ip,
@@ -277,7 +302,7 @@ def _stream_pending_responses_request(
                                 request_body=active_payload,
                                 request_size=active_request_size,
                             )
-                            response.close()
+                            response = None
                             active_pending = None
                             continue
 
@@ -312,6 +337,11 @@ def _stream_pending_responses_request(
             except GeneratorExit:
                 cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
                 return
+        finally:
+            if active_pending is not None:
+                active_pending.cancel()
+            if response is not None:
+                response.close()
 
     return Response(
         stream_with_context(generate()),
@@ -1691,78 +1721,63 @@ def responses():
                 immediate_response = pending_response.get(timeout=0.05)
             except queue.Empty:
                 immediate_response = None
-            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+            except Exception as exc:
                 immediate_response = None
 
-                def raise_immediate_connection_error(error=exc):
+                def raise_immediate_error(error=exc):
                     raise error
 
-                # ``get`` consumed the failed background result. Re-wrap the
-                # same exception so the streaming retry/504 path handles fast
-                # and slow connection failures identically.
-                pending_response = BackgroundResult(raise_immediate_connection_error)
+                # ``get`` consumed the failed background result. Re-wrap it so
+                # fast and slow failures enter the same streaming error path.
+                pending_response = BackgroundResult(raise_immediate_error)
 
             if immediate_response is not None and immediate_response.ok:
-                upstream_response = immediate_response
-                if state.enable_responses_early_failure_retry:
-                    def retry_streaming_response():
-                        ensure_copilot_token()
-                        retry_headers = get_copilot_headers(enable_vision)
-                        return requests.post(
-                            f"{get_copilot_base_url()}/v1/responses",
-                            headers=retry_headers,
-                            json=payload,
-                            stream=True,
-                            timeout=state.upstream_read_timeout,
-                        )
+                return _build_responses_stream_handler(
+                    immediate_response, payload, request_id, request_size,
+                    start_time, original_model, translated_model,
+                    original_request_body, request_headers, client_ip, user_id,
+                    enable_vision,
+                ).stream()
 
-                    upstream_response = RetryingResponsesResponse(
-                        response=immediate_response,
-                        response_factory=retry_streaming_response,
-                        max_retries=state.max_connection_retries,
-                        request_id=request_id,
-                    )
-                return OpenAIResponsesStreamHandler(
-                    response=upstream_response,
+            if immediate_response is None:
+                return _stream_pending_responses_request(
+                    pending_response=pending_response,
+                    payload=payload,
                     request_id=request_id,
                     request_size=request_size,
                     start_time=start_time,
                     original_model=original_model,
                     translated_model=translated_model,
-                    request_body_for_cache=payload,
                     original_request_body=original_request_body,
                     request_headers=request_headers,
                     client_ip=client_ip,
                     user_id=user_id,
-                ).stream()
+                    enable_vision=enable_vision,
+                )
 
-            if immediate_response is not None:
-                pending_response = BackgroundResult(lambda: immediate_response)
-            return _stream_pending_responses_request(
-                pending_response=pending_response,
-                payload=payload,
-                request_id=request_id,
-                request_size=request_size,
-                start_time=start_time,
-                original_model=original_model,
-                translated_model=translated_model,
-                original_request_body=original_request_body,
-                request_headers=request_headers,
-                client_ip=client_ip,
-                user_id=user_id,
-                enable_vision=enable_vision,
-            )
+            # An immediate non-success response has not committed downstream
+            # SSE headers. Preserve the original HTTP status/body and the
+            # existing encrypted-content retry behavior below.
+            response = immediate_response
 
         while conn_attempt <= connection_retries:
             request_size = len(json.dumps(payload))
             try:
-                response = requests.post(
-                    f"{get_copilot_base_url()}/v1/responses",
-                    headers=headers,
-                    json=payload,
-                    stream=use_streaming,
-                    timeout=state.upstream_read_timeout,
-                )
+                if response is None:
+                    response = requests.post(
+                        f"{get_copilot_base_url()}/v1/responses",
+                        headers=headers,
+                        json=payload,
+                        stream=use_streaming,
+                        timeout=state.upstream_read_timeout,
+                    )
+                if use_streaming and response.ok:
+                    return _build_responses_stream_handler(
+                        response, payload, request_id, request_size,
+                        start_time, original_model, translated_model,
+                        original_request_body, request_headers, client_ip, user_id,
+                        enable_vision,
+                    ).stream()
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
                     log_error_request("/v1/responses", payload, response.text, response.status_code, client_ip)
@@ -1785,10 +1800,12 @@ def responses():
                                 # The error body was already consumed; release the
                                 # upstream connection before issuing the retry.
                                 response.close()
+                                response = None
                                 continue
                 last_connection_error = None
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+                response = None
                 last_connection_error = e
                 log_connection_retry(request_id, "/v1/responses", conn_attempt, connection_retries, e)
                 ensure_copilot_token()  # Refresh token in case it's a token expiration issue
