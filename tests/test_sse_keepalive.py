@@ -11,6 +11,7 @@ import unittest
 
 import requests
 
+from ghc_api.counters import counters
 from ghc_api.sse.keepalive import (
     BackgroundResult,
     KEEPALIVE,
@@ -37,12 +38,13 @@ class _SlowResponse:
 class _ImmediateResponse:
     def __init__(self, lines):
         self._lines = lines
+        self.closed = False
 
     def iter_lines(self):
         yield from self._lines
 
     def close(self):
-        pass
+        self.closed = True
 
 
 class _RaisingResponse:
@@ -55,6 +57,14 @@ class _RaisingResponse:
 
     def close(self):
         pass
+
+
+class _ClosableResult:
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def close(self):
+        self.closed.set()
 
 
 class KeepaliveTest(unittest.TestCase):
@@ -84,6 +94,16 @@ class KeepaliveTest(unittest.TestCase):
         out = list(iter_lines_with_keepalive(resp, interval=0))
         self.assertEqual(out, lines)
         self.assertNotIn(KEEPALIVE, out)
+        self.assertTrue(resp.closed)
+
+    def test_interval_zero_closes_response_on_early_consumer_exit(self):
+        resp = _ImmediateResponse([b"data: a", b"data: b"])
+        stream = iter_lines_with_keepalive(resp, interval=0)
+
+        self.assertEqual(next(stream), b"data: a")
+        stream.close()
+
+        self.assertTrue(resp.closed)
 
     def test_negative_interval_is_pure_passthrough(self):
         lines = [b"data: a"]
@@ -137,33 +157,96 @@ class KeepaliveTest(unittest.TestCase):
         with self.assertRaises(requests.exceptions.ConnectionError):
             list(wait_result_with_keepalive(pending, interval=5))
 
-    def test_abandoned_background_result_closes_late_response(self):
+    def test_cancel_closes_eventual_background_result(self):
         release = threading.Event()
-        closed = threading.Event()
+        result = _ClosableResult()
 
-        class Result:
-            def close(self):
-                closed.set()
+        def delayed_result():
+            release.wait(1)
+            return result
 
-        pending = BackgroundResult(lambda: (release.wait(2), Result())[1])
-        pending.abandon()
+        pending = BackgroundResult(delayed_result)
+        pending.cancel()
         release.set()
-        self.assertTrue(closed.wait(2))
-        self.assertTrue(pending.done)
 
-    def test_abandon_closes_already_queued_response(self):
-        closed = threading.Event()
+        self.assertTrue(result.closed.wait(1))
 
-        class Result:
-            def close(self):
-                closed.set()
+    def test_cancel_closes_already_queued_background_result(self):
+        result = _ClosableResult()
+        result_ready = threading.Event()
 
-        pending = BackgroundResult(Result)
+        def ready_result():
+            result_ready.set()
+            return result
+
+        pending = BackgroundResult(ready_result)
+        self.assertTrue(result_ready.wait(1))
+
+        pending.cancel()
+
+        self.assertTrue(result.closed.wait(1))
+
+    def test_cancel_after_get_leaves_the_live_result_alone(self):
+        """Once a consumer has taken the result it owns it; a late cancel (the
+        route's cleanup path always runs) must not close a stream in use."""
+        result = _ClosableResult()
+        pending = BackgroundResult(lambda: result)
+
+        self.assertIs(pending.get(timeout=1), result)
+        started = time.monotonic()
+        pending.cancel()
+
+        self.assertLess(time.monotonic() - started, 0.05, "cancel() must never block")
+        self.assertFalse(result.closed.is_set())
+
+    def test_cancel_is_idempotent(self):
+        result = _ClosableResult()
+        pending = BackgroundResult(lambda: result)
+
+        pending.cancel()
+        pending.cancel()
+        pending.cancel()
+
+        self.assertTrue(result.closed.wait(1))
+
+    def test_counters_track_started_inflight_and_cancelled(self):
+        """In-flight upstream work started here lives outside the WSGI thread
+        pool, so these counters are the only thing that makes its occupancy
+        visible (dashboard renders unknown counter keys automatically)."""
+        counters.reset()
+        gate = threading.Event()
+        result = _ClosableResult()
+
+        pending = BackgroundResult(lambda: (gate.wait(5), result)[1], label="unittest")
+        snapshot = counters.snapshot()
+        self.assertEqual(snapshot.get("bg.unittest.started"), 1)
+        self.assertEqual(snapshot.get("bg.unittest.inflight"), 1)
+
+        pending.cancel()
+        gate.set()
+
+        self.assertTrue(result.closed.wait(1))
+        deadline = time.time() + 1
+        while time.time() < deadline and counters.snapshot().get("bg.unittest.inflight") != 0:
+            time.sleep(0.01)
+        snapshot = counters.snapshot()
+        self.assertEqual(snapshot.get("bg.unittest.inflight"), 0)
+        self.assertEqual(snapshot.get("bg.unittest.cancelled"), 1)
+        self.assertEqual(snapshot.get("bg.unittest.orphan_closed"), 1)
+        counters.reset()
+
+    def test_done_reports_background_call_completion(self):
+        gate = threading.Event()
+        pending = BackgroundResult(lambda: (gate.wait(5), "ready")[1])
+
+        self.assertFalse(pending.done)
+        gate.set()
+
         deadline = time.time() + 2
         while not pending.done and time.time() < deadline:
             time.sleep(0.001)
-        pending.abandon()
-        self.assertTrue(closed.wait(2))
+        self.assertTrue(pending.done)
+        self.assertEqual(pending.get(timeout=1), "ready")
 
 
 if __name__ == "__main__":

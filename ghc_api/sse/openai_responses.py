@@ -7,6 +7,7 @@ pre-refactor ``stream_responses`` produced.
 """
 
 import json
+import threading
 from typing import Callable, Dict, Iterator, Optional
 
 import requests
@@ -41,6 +42,8 @@ class RetryingResponsesResponse:
         self._response_factory = response_factory
         self._max_retries = max(0, max_retries)
         self._request_id = request_id
+        self._lock = threading.Lock()
+        self._closed = False
 
         # SSEStreamHandler reads these attributes before iterating. ``text`` is a
         # property on purpose: on a ``stream=True`` response ``Response.text``
@@ -52,7 +55,29 @@ class RetryingResponsesResponse:
 
     @property
     def text(self) -> str:
-        return self._response.text
+        with self._lock:
+            response = self._response
+        return response.text
+
+    def _current_response(self):
+        with self._lock:
+            if self._closed:
+                return None
+            return self._response
+
+    def _replace_response(self, expected, replacement) -> bool:
+        with self._lock:
+            if self._closed or self._response is not expected:
+                accepted = False
+            else:
+                self._response = replacement
+                accepted = True
+
+        if accepted:
+            expected.close()
+        else:
+            replacement.close()
+        return accepted
 
     @staticmethod
     def _event_type(line) -> Optional[str]:
@@ -78,13 +103,17 @@ class RetryingResponsesResponse:
         retries = 0
 
         while True:
-            response = self._response
+            response = self._current_response()
+            if response is None:
+                return
             lines = iter(response.iter_lines())
             buffered = []
             output_started = False
             early_failure = False
 
             for line in lines:
+                if self._current_response() is None:
+                    return
                 if output_started:
                     yield line
                     continue
@@ -108,8 +137,8 @@ class RetryingResponsesResponse:
                     retry_response = None
 
                 if retry_response is not None and retry_response.ok:
-                    response.close()
-                    self._response = retry_response
+                    if not self._replace_response(response, retry_response):
+                        return
                     retries += 1
                     print(
                         f"[Stream Responses] Retrying request {self._request_id} "
@@ -130,7 +159,12 @@ class RetryingResponsesResponse:
             return
 
     def close(self) -> None:
-        self._response.close()
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            response = self._response
+        response.close()
 
 
 class OpenAIResponsesStreamHandler(SSEStreamHandler):
@@ -152,5 +186,12 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
         elif event_type == "response.failed":
             # The HTTP status is already committed as 200, but request history
             # should still identify the terminal SSE failure.
+            self.error_occurred = True
+            self.status_code = 502
+        elif event_type == "error":
+            # Same for the standard Responses streaming ``error`` event, which
+            # the proxy itself emits when an upstream error arrives after the
+            # response headers were already committed. Without this a chained
+            # ghc-api would record the failure as 200/completed.
             self.error_occurred = True
             self.status_code = 502

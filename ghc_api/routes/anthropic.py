@@ -414,7 +414,7 @@ def _start_direct_anthropic_post(headers: Dict, payload: Dict, stream: bool):
         json=payload,
         timeout=state.upstream_read_timeout,
         stream=stream,
-    ))
+    ), label="messages")
 
 
 def _anthropic_ping_event() -> str:
@@ -1347,7 +1347,7 @@ def _stream_pending_anthropic_responses_request(
                             json=responses_payload,
                             stream=True,
                             timeout=state.upstream_read_timeout,
-                        ))
+                        ), label="messages_responses")
                         response = yield from _wait_anthropic_response_with_ping(
                             active_pending
                         )
@@ -1470,7 +1470,7 @@ def _stream_pending_anthropic_responses_request(
             yield f"event: error\ndata: {json.dumps(event)}\n\n"
         except GeneratorExit:
             if active_pending is not None:
-                active_pending.abandon()
+                active_pending.cancel()
             if response is not None:
                 try:
                     response.close()
@@ -1542,7 +1542,7 @@ def _stream_pending_anthropic_responses_request(
             yield f"event: error\ndata: {json.dumps(event)}\n\n"
         finally:
             if not cache_finished and response is None and active_pending is not None:
-                active_pending.abandon()
+                active_pending.cancel()
 
     result = Response(
         stream_with_context(generate()),
@@ -1712,7 +1712,7 @@ def handle_responses_anthropic_request(
                     json=responses_payload,
                     stream=True,
                     timeout=state.upstream_read_timeout,
-                ))
+                ), label="messages_responses")
                 try:
                     response = pending_response.get(
                         timeout=state.sse_keepalive_interval
@@ -2446,7 +2446,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                 json=openai_payload,
                 stream=True,
                 timeout=state.upstream_read_timeout,
-            ))
+            ), label="messages_translated")
             response = yield from _wait_anthropic_response_with_ping(pending_response)
             status_code = response.status_code
 
@@ -2472,7 +2472,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                     json=new_openai_payload,
                     stream=True,
                     timeout=state.upstream_read_timeout,
-                ))
+                ), label="messages_translated")
                 response = yield from _wait_anthropic_response_with_ping(pending_response)
                 status_code = response.status_code
 
