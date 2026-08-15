@@ -4,6 +4,7 @@ import time
 import unittest
 
 from ghc_api.anthropic_responses import (
+    MAX_JSON_NESTING_DEPTH,
     MODE_LOSSLESS_REQUIRED,
     AnthropicResponsesConversionError,
     IdentifierCodec,
@@ -41,10 +42,35 @@ class StrictJsonTests(unittest.TestCase):
                     parse_strict_json_bytes(raw)
 
     def test_deep_nesting_is_reported_as_strict_json_error(self):
-        raw = b"[" * 5000 + b"]" * 5000
-        with self.assertRaises(StrictJSONError) as raised:
-            parse_strict_json_bytes(raw)
-        self.assertIn("nesting", str(raised.exception).lower())
+        for depth in (MAX_JSON_NESTING_DEPTH + 1, 5000):
+            with self.subTest(depth=depth):
+                raw = b"[" * depth + b"]" * depth
+                with self.assertRaises(StrictJSONError) as raised:
+                    parse_strict_json_bytes(raw)
+                self.assertIn("nesting", str(raised.exception).lower())
+
+    def test_nesting_at_the_limit_is_accepted(self):
+        """The limit is a hard boundary, not an approximation: a payload one
+        level under it must still parse, so real (shallow) requests are safe."""
+        depth = MAX_JSON_NESTING_DEPTH
+        raw = b"[" * depth + b"]" * depth
+        value = parse_strict_json_bytes(raw)
+        for _ in range(depth - 1):
+            self.assertIsInstance(value, list)
+            value = value[0]
+        self.assertEqual(value, [])
+
+    def test_brackets_inside_strings_do_not_count_as_nesting(self):
+        raw = b'{"text":"' + b"[" * 5000 + b'", "escaped":"\\"[[["}'
+        value = parse_strict_json_bytes(raw)
+        self.assertEqual(value["text"], "[" * 5000)
+        self.assertEqual(value["escaped"], '"[[[')
+
+    def test_sibling_containers_do_not_accumulate_depth(self):
+        """Depth is nesting, not total bracket count: a long flat list of
+        objects (a normal long conversation) must not trip the guard."""
+        raw = b"[" + b",".join([b'{"a":[1,2]}'] * 5000) + b"]"
+        self.assertEqual(len(parse_strict_json_bytes(raw)), 5000)
 
     def test_accepts_valid_surrogate_pair_as_unicode_scalar(self):
         self.assertEqual(

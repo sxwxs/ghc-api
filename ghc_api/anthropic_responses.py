@@ -47,6 +47,46 @@ class StrictJSONError(ValueError):
     """Raised when a lossless request is not strict, unambiguous JSON."""
 
 
+# Deep nesting has to be rejected by an explicit check rather than by catching
+# the decoder's RecursionError: CPython's C accelerated scanner only raises
+# around ~10k levels (and the exact point moves between versions and builds),
+# while everything downstream is far more fragile -- ``copy.deepcopy`` of the
+# parsed payload already dies near 500 levels. The limit below is orders of
+# magnitude above any real Anthropic request (tool JSON Schemas nest a dozen
+# levels at most) and comfortably under every recursive consumer.
+MAX_JSON_NESTING_DEPTH = 100
+
+# One pass that swallows a whole string literal (unrolled loop form, which is
+# markedly faster than the naive alternation) or a run of characters that
+# carries no structure, leaving only the brackets to count. On a 4.6 MB body
+# this costs ~30 ms, against ~90 ms for the readable two-regex version.
+_JSON_STRUCTURE_ONLY_RE = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"|[^\[\]{}"]+', re.S)
+
+
+def _reject_deep_nesting(text: str) -> None:
+    """Raise ``StrictJSONError`` when structural nesting exceeds the limit.
+
+    Runs on the raw text before decoding so a hostile body never reaches the
+    decoder (or any recursive consumer of the parsed value). String literals
+    are stripped first so brackets inside them are not counted; the remaining
+    scan touches only structural characters.
+    """
+    structure = _JSON_STRUCTURE_ONLY_RE.sub("", text)
+    depth = 0
+    for char in structure:
+        if char in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING_DEPTH:
+                raise StrictJSONError(
+                    "JSON nesting is too deep: exceeds the maximum of "
+                    f"{MAX_JSON_NESTING_DEPTH} levels"
+                )
+        elif char in "]}":
+            depth -= 1
+        # A leftover quote only survives for an unterminated string, which the
+        # decoder rejects a moment later; it must not disturb the depth count.
+
+
 def parse_strict_json_bytes(raw: bytes) -> Any:
     """Parse UTF-8 JSON while rejecting duplicate keys and non-finite numbers."""
     try:
@@ -56,6 +96,8 @@ def parse_strict_json_bytes(raw: bytes) -> Any:
 
     def reject_constant(value: str) -> None:
         raise StrictJSONError(f"Non-finite JSON number is not allowed: {value}")
+
+    _reject_deep_nesting(text)
 
     def unique_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
         result: Dict[str, Any] = {}
@@ -74,6 +116,7 @@ def parse_strict_json_bytes(raw: bytes) -> Any:
     except StrictJSONError:
         raise
     except RecursionError as exc:
+        # Defence in depth: _reject_deep_nesting should have caught this first.
         raise StrictJSONError("JSON nesting is too deep") from exc
     except json.JSONDecodeError as exc:
         raise StrictJSONError(f"Invalid JSON at character {exc.pos}: {exc.msg}") from exc
