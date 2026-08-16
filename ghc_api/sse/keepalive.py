@@ -36,6 +36,7 @@ class BackgroundResult:
         self._q: "queue.Queue" = queue.Queue(maxsize=1)
         self._lock = threading.Lock()
         self._cancelled = False
+        self._done = threading.Event()
         self._label = label
 
         # In-flight upstream work started here lives outside the WSGI thread
@@ -64,6 +65,7 @@ class BackgroundResult:
                     self._close_result(result)
             finally:
                 counters.incr(f"bg.{label}.inflight", -1)
+                self._done.set()
 
         threading.Thread(target=_runner, daemon=True).start()
 
@@ -109,6 +111,11 @@ class BackgroundResult:
             counters.incr(f"bg.{self._label}.orphan_closed")
             self._close_result(queued_result)
 
+    @property
+    def done(self):
+        """True once the background call finished (delivered, failed or discarded)."""
+        return self._done.is_set()
+
 
 def wait_result_with_keepalive(pending_result, interval):
     """Return a background result; yield ``KEEPALIVE`` while it is idle.
@@ -144,19 +151,31 @@ def iter_lines_with_keepalive(response, interval):
             response.close()
         return
 
-    q: "queue.Queue" = queue.Queue()
+    # Bound producer lead so a fast or adversarial upstream cannot queue an
+    # unbounded response in memory while the downstream client is slow.
+    q: "queue.Queue" = queue.Queue(maxsize=128)
     stop = threading.Event()
+
+    def _put(item):
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _reader():
         try:
             for line in response.iter_lines():
                 if stop.is_set():
                     break
-                q.put((False, line))
+                if not _put((False, line)):
+                    break
         except Exception as exc:  # propagate to the consumer thread
-            q.put((True, exc))
+            _put((True, exc))
         finally:
-            q.put((False, _SENTINEL))
+            _put((False, _SENTINEL))
 
     threading.Thread(target=_reader, daemon=True).start()
 

@@ -49,6 +49,15 @@ class State:
         # forwarded untouched (see ghc_api/tool_call_recovery.py).
         self.enable_tool_call_recovery: bool = False
 
+        # Anthropic Messages -> OpenAI Responses compatibility. The route only
+        # selects this path for models whose Copilot metadata advertises
+        # /responses but not /messages.
+        self.anthropic_responses_compat_enabled: bool = True
+        self.anthropic_responses_wire_profile: str = "copilot_responses_lite"
+        self.anthropic_responses_model_profiles: Dict[str, str] = {
+            "gpt-5.6-sol": "copilot_responses_lite",
+        }
+
         # Copilot intermittently answers /v1/responses with HTTP 200 whose SSE body is
         # just response.created followed by response.failed, before any model output.
         # When enabled, such a stream is transparently retried (up to

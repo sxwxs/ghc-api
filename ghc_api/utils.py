@@ -167,7 +167,21 @@ def print_available_models():
 # ============================================================================
 
 # Log file for orphaned tool_result cleanup events
-TOOL_RESULT_CLEANUP_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tool_result_cleanup.jl")
+def diagnostic_log_path(filename: str) -> str:
+    """Resolve a runtime JSON Lines log under the ghc-api config directory.
+
+    Runtime output must not land in the package directory: that is read-only in
+    most installs, it puts request ids and upstream endpoints from a real
+    deployment one stray ``git add`` away from the repository, and it leaves the
+    working tree dirty after every local run. Resolved on each call so that a
+    ``GHC_API_CONFIG_DIR`` set after import is still honoured.
+    """
+    directory = get_config_dir()
+    os.makedirs(directory, exist_ok=True)
+    return os.path.join(directory, filename)
+
+
+TOOL_RESULT_CLEANUP_LOG_NAME = "tool_result_cleanup.jl"
 
 def log_tool_result_cleanup(log_entry: Dict) -> None:
     """
@@ -184,7 +198,7 @@ def log_tool_result_cleanup(log_entry: Dict) -> None:
     """
     try:
         log_entry["timestamp"] = datetime.now().isoformat()
-        with open(TOOL_RESULT_CLEANUP_LOG, "a", encoding="utf-8") as f:
+        with open(diagnostic_log_path(TOOL_RESULT_CLEANUP_LOG_NAME), "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[Tool Result Cleanup] Failed to write log: {e}")
@@ -192,7 +206,7 @@ def log_tool_result_cleanup(log_entry: Dict) -> None:
 
 
 # Log file for connection retry events
-CONNECTION_RETRY_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "connection_retry.jl")
+CONNECTION_RETRY_LOG_NAME = "connection_retry.jl"
 
 def log_connection_retry(request_id: str, endpoint: str, attempt: int, max_retries: int, error: Exception) -> None:
     """
@@ -208,7 +222,7 @@ def log_connection_retry(request_id: str, endpoint: str, attempt: int, max_retri
             "error_type": type(error).__name__,
             "error_message": str(error),
         }
-        with open(CONNECTION_RETRY_LOG, "a", encoding="utf-8") as f:
+        with open(diagnostic_log_path(CONNECTION_RETRY_LOG_NAME), "a", encoding="utf-8") as f:
             f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
     except Exception as e:
         print(f"[Connection Retry] Failed to write log: {e}")

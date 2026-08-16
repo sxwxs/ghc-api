@@ -326,6 +326,11 @@ REDACTED_HEADERS = frozenset({
     "x-apikey",
     "api-key",
     "ocp-apim-subscription-key",
+    "cookie",
+    "set-cookie",
+    "x-auth-token",
+    "x-access-token",
+    "x-github-token",
 })
 
 
@@ -337,7 +342,14 @@ def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
         return headers
     redacted = dict(headers)
     for key in list(redacted.keys()):
-        if key.lower() in REDACTED_HEADERS:
+        lower = key.lower().strip()
+        if (
+            lower in REDACTED_HEADERS
+            or lower.endswith("-access-token")
+            or lower.endswith("-auth-token")
+            or lower.endswith("-api-key")
+            or lower.endswith("-secret")
+        ):
             redacted[key] = "***REDACTED***"
     return redacted
 

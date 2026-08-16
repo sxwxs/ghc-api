@@ -28,6 +28,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Maintenance Guides
 
+- [Anthropic Messages to Responses web search compatibility](docs/decisions/ANTHROPIC_RESPONSES_WEB_SEARCH_COMPATIBILITY_DECISION.md) - why a native `web_search_call` is reported as a compatibility warning instead of a synthesised Anthropic block
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 - [Responses pre-header keepalive](docs/decisions/RESPONSES_PRE_HEADER_KEEPALIVE.md) - review notes and decisions behind the `/v1/responses` pre-header keepalive (PR #42): why upstream errors keep their HTTP status, why the synthetic event is `error`, and what is still open
 
@@ -63,7 +64,7 @@ By default, the server will start on `http://localhost:8313`.
 - `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.24`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.25`)
 - `--help`: Show help message
 
 ### Configuration
@@ -131,6 +132,24 @@ disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared
 # Optional leaked tool-call recovery (direct Anthropic /v1/messages streaming)
 enable_tool_call_recovery: false # If true, recover tool calls Copilot leaks as plain text
 
+# Anthropic Messages -> Responses compatibility (enabled by default)
+anthropic_responses_compat_enabled: true # Serve /v1/messages for models Copilot exposes
+                              # only through /responses, by translating the request and
+                              # the response. Engages only for a model that advertises
+                              # /responses and not /messages; models with native
+                              # /messages support are never routed through it. Set false
+                              # to send those models through the legacy Chat Completions
+                              # translation path instead (the pre-1.0.25 behaviour).
+                              # Anything without an exact representation in the target
+                              # protocol is converted best-effort and reported in the
+                              # X-GHC-Compatibility-Warnings response header, never
+                              # dropped silently.
+anthropic_responses_wire_profile: copilot_responses_lite # Default request dialect:
+                              # copilot_responses_lite or public_responses.
+anthropic_responses_model_profiles: # Per-model overrides of the profile above. A key
+  gpt-5.6-sol: copilot_responses_lite # ending in '*' is a prefix rule, so 'gpt-5.*'
+                              # covers a whole family; the longest matching prefix wins.
+
 # Retry /v1/responses streams that fail before any output (enabled by default)
 enable_responses_early_failure_retry: true # Transparently retry a stream that returns
                               # HTTP 200 then response.failed before any text, reasoning,
@@ -144,13 +163,15 @@ upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot
 sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
                               # this many seconds (keeps clients like Claude Code from
                               # timing out while the model "thinks"). Set 0 to disable.
-responses_pre_header_grace: 0.5 # How long /v1/responses waits for upstream response
-                              # headers before committing to a streaming response and
-                              # sending keepalives. Errors that arrive within this window
-                              # keep their real HTTP status; later ones can only be
-                              # reported as an SSE error event, so keep this below the
-                              # shortest client read timeout. Clamped to [0, 5] seconds;
-                              # sse_keepalive_interval: 0 disables the behavior entirely.
+responses_pre_header_grace: 0.5 # How long a Responses request waits for upstream
+                              # response headers before committing to a streaming
+                              # response and sending keepalives. Applies to /v1/responses
+                              # and to /v1/messages when it is served through the
+                              # Responses compatibility path. Errors that arrive within
+                              # this window keep their real HTTP status; later ones can
+                              # only be reported as an SSE error event, so keep this below
+                              # the shortest client read timeout. Clamped to [0, 5]
+                              # seconds; sse_keepalive_interval: 0 disables it entirely.
 
 # Recover from undecryptable encrypted content (disabled by default)
 auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
@@ -158,6 +179,22 @@ auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns H
                               # be decrypted, clean request.input and retry once.
                               # Lossy; see "Encrypted Content Recovery" below.
 ```
+
+### Anthropic Messages → Responses Reasoning Continuity
+
+When `/v1/messages` is routed to a Responses-only model, ghc-api carries each
+Responses reasoning item in a namespaced Anthropic `thinking` block. The
+visible reasoning summary is stored in `thinking`, while the opaque
+`encrypted_content` is encoded in `thinking.signature`. Clients such as Claude
+Code echo that assistant block on the next turn, allowing ghc-api to reconstruct
+the original Responses `reasoning` input item without a replay database,
+session identifier, or encryption key.
+
+The carrier includes its source model and wire profile. If either changes, or
+if the carrier is malformed or oversized, ghc-api keeps the visible summary but
+drops the opaque state and reports a compatibility warning. Synthetic carrier
+blocks are removed before forwarding history to a native Anthropic model so a
+forged signature never reaches `/v1/messages` upstream.
 
 ### Encrypted Content Recovery
 
@@ -181,6 +218,29 @@ exactly once per request:
 The option is **off by default** because it is lossy — the model loses that reasoning/tool
 context — and costs one extra upstream request. Every recovery is counted
 (`mod.encrypted_content_removal`) and logged.
+
+This recovery covers the OpenAI-format endpoints, where ghc-api holds the reasoning state.
+It does **not** cover the Anthropic Messages compatibility path, where the state is carried
+by the client: that path only retries a request byte-identically, so a rejected carrier is
+returned to the client with the upstream message and the conversation has to be restarted
+(or the offending `thinking` blocks dropped by the client).
+
+### Anthropic Messages Compatibility Reporting
+
+A construct with no exact representation in the target protocol is converted best-effort and
+reported in the `X-GHC-Compatibility-Warnings` response header, with the full conversion
+record kept in the request cache. Nothing is dropped silently. A request is only rejected
+locally when the translator cannot proceed at all — an unrepresentable core field, a
+`tool_choice` naming a tool that was not converted, or upstream output whose shape this
+build does not know.
+
+That last case is the operational risk to watch: an **unknown Responses output item or
+content part fails closed with 502**, because it reaches the client as content or not at
+all and no later event restates it in a known shape. An unknown *stream event* is only
+skipped with a warning, since the terminal response replays the full output array. If
+Copilot ships an additive item type before ghc-api knows about it, set
+`anthropic_responses_compat_enabled: false` (config file or `POST /api/runtime-config`) to
+fall back to the legacy Chat Completions translation path until an update lands.
 
 ### Token Management
 
@@ -403,6 +463,13 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 ### Anthropic Compatible
 
 - `POST /v1/messages` - Messages API (Anthropic format)
+
+All `/v1/messages` bodies are now parsed strictly: duplicate object keys, non-finite numbers
+(`NaN`, `Infinity`), trailing data, invalid UTF-8, and structural nesting beyond the shared
+depth limit are rejected with HTTP 400 instead of being silently normalised. This applies to
+every `/v1/messages` backend (native Anthropic, Chat Completions translation, and the
+Responses compatibility path), because an ambiguous body cannot be forwarded with a
+predictable meaning.
 
 ### Microsoft Web IQ Search
 

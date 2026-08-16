@@ -235,6 +235,19 @@ class KeepaliveTest(unittest.TestCase):
         self.assertEqual(snapshot.get("bg.unittest.orphan_closed"), 1)
         counters.reset()
 
+    def test_done_reports_background_call_completion(self):
+        gate = threading.Event()
+        pending = BackgroundResult(lambda: (gate.wait(5), "ready")[1])
+
+        self.assertFalse(pending.done)
+        gate.set()
+
+        deadline = time.time() + 2
+        while not pending.done and time.time() < deadline:
+            time.sleep(0.001)
+        self.assertTrue(pending.done)
+        self.assertEqual(pending.get(timeout=1), "ready")
+
 
 if __name__ == "__main__":
     unittest.main()

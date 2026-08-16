@@ -11,9 +11,11 @@ build/
 /upstream-proxies.yaml
 /upstream-proxies.local.yaml
 
-# Local request dumps may contain private prompts and responses.
-/opus.jl
-/gpt.jl
+# Runtime JSON Lines output: local request dumps (private prompts and
+# responses) and diagnostics such as connection_retry.jl. These belong under the
+# ghc-api config dir (see utils.diagnostic_log_path); the pattern stays as a
+# backstop for anything an older build already dropped next to the sources.
+*.jl
 
 # Generated benchmark artifacts.
 /benchmarks/results/

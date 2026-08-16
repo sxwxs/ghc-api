@@ -3,11 +3,13 @@ Anthropic-compatible API routes
 """
 
 import copy
+import hashlib
 import json
 import queue
+import threading
 import time
 import uuid
-from typing import Dict, Generator, Any
+from typing import Callable, Dict, Generator, Any, List, Optional, Tuple
 
 import requests
 from flask import Blueprint, Response, g, jsonify, request, stream_with_context
@@ -16,9 +18,29 @@ from ..api_helpers import (
     ensure_copilot_token,
     get_copilot_base_url,
     get_copilot_headers,
+    anthropic_responses_wire_profile,
+    advertises_anthropic_messages_api,
     supports_direct_anthropic_api,
+    supports_responses_api,
     supported_reasoning_efforts,
     count_tokens,
+)
+from ..anthropic_responses import (
+    AnthropicResponsesConversionError,
+    StrictJSONError,
+    anthropic_error_from_responses,
+    convert_anthropic_to_responses,
+    convert_responses_to_anthropic,
+    parse_strict_json_bytes,
+)
+from ..compat_profiles import (
+    CLAUDE_CLI_TOOL_CONTRACT_BASELINES,
+    audit_anthropic_request,
+    audit_responses_event,
+)
+from ..compat_redaction import (
+    redact_responses_response_for_cache,
+    redact_responses_value_for_cache,
 )
 from ..cache import cache
 from ..counters import counters
@@ -27,6 +49,8 @@ from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_c
 from ..sse import (
     AnthropicDirectStreamHandler,
     AnthropicDirectStreamHandlerWithRecovery,
+    AnthropicResponsesStreamHandler,
+    RetryingResponsesResponse,
 )
 from ..sse.keepalive import (
     BackgroundResult,
@@ -43,6 +67,10 @@ from ..translator import (
 )
 from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup, log_connection_retry, get_client_ip
 from ..state import state
+from ..reasoning_carrier import (
+    redact_reasoning_carriers_for_cache,
+    strip_reasoning_carriers_from_messages_payload,
+)
 from ..web_search import has_web_search_tool, is_web_search_unsupported_error, apply_web_search_fallback
 
 
@@ -51,6 +79,149 @@ def _current_user_id() -> str:
     return getattr(g, "user_id", "anonymous") or "anonymous"
 
 anthropic_bp = Blueprint('anthropic', __name__)
+
+
+def _compatibility_warning(
+    code: str,
+    path: str = "/",
+    action: str = "warning",
+    **safe_fields: Any,
+) -> Dict[str, Any]:
+    """Build a warning that cannot accidentally contain request content."""
+    warning: Dict[str, Any] = {
+        "code": str(code),
+        "path": str(path),
+        "action": str(action),
+    }
+    for key in ("profile", "cli_version", "observed_type", "fingerprint"):
+        value = safe_fields.get(key)
+        if isinstance(value, str) and value:
+            warning[key] = value
+    return warning
+
+
+def _sanitise_compatibility_warning(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return _compatibility_warning("compatibility.invalid_warning")
+    return _compatibility_warning(
+        value.get("code") or "compatibility.warning",
+        value.get("path") or "/",
+        value.get("action") or "warning",
+        profile=value.get("profile"),
+        cli_version=value.get("cli_version") or value.get("version"),
+        observed_type=value.get("observed_type"),
+        fingerprint=value.get("fingerprint"),
+    )
+
+
+def _merge_compatibility_warnings(*groups: Any) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen = set()
+    for group in groups:
+        if not group:
+            continue
+        for raw in group:
+            warning = _sanitise_compatibility_warning(raw)
+            key = tuple(sorted(warning.items()))
+            if key not in seen:
+                seen.add(key)
+                merged.append(warning)
+    return merged
+
+
+_warning_log_lock = threading.Lock()
+_warning_log_times: Dict[Tuple[str, str, str], float] = {}
+
+
+def _log_compatibility_warnings(
+    request_id: str,
+    warnings: List[Dict[str, Any]],
+) -> None:
+    """Rate-limit console noise while retaining every warning in request cache."""
+    now = time.time()
+    for warning in warnings:
+        code = str(warning.get("code") or "compatibility.warning")
+        path = str(warning.get("path") or "/")
+        profile = str(warning.get("profile") or "")
+        cli_version = str(warning.get("cli_version") or "")
+        fingerprint = str(warning.get("fingerprint") or "")
+        key = (code, path, profile + "\x00" + cli_version + "\x00" + fingerprint)
+        with _warning_log_lock:
+            last = _warning_log_times.get(key, 0.0)
+            should_log = now - last >= 300
+            if should_log:
+                _warning_log_times[key] = now
+            # Bound a long-running process even under adversarial field drift.
+            if len(_warning_log_times) > 4096:
+                oldest = sorted(_warning_log_times.items(), key=lambda item: item[1])[:1024]
+                for old_key, _ in oldest:
+                    _warning_log_times.pop(old_key, None)
+        counters.incr("compat." + code.replace(".", "_"))
+        if should_log:
+            print(
+                "WARNING [AnthropicResponsesCompat] "
+                f"code={code} request_id={request_id} path={path}"
+                + (f" profile={profile}" if profile else "")
+                + (f" cli_version={cli_version}" if cli_version else "")
+            )
+
+
+def _compatibility_header_value(warnings: List[Dict[str, Any]]) -> Optional[str]:
+    codes = sorted({str(item.get("code")) for item in warnings if item.get("code")})
+    if not codes:
+        return None
+    # This is a diagnostic hint, not the authoritative report. Keep it within
+    # conservative proxy header limits; the complete list stays in cache.
+    return ",".join(codes)[:1024]
+
+
+def _set_compatibility_headers(response: Response, warnings: List[Dict[str, Any]]) -> Response:
+    value = _compatibility_header_value(warnings)
+    if value:
+        response.headers["X-GHC-Compatibility-Warnings"] = value
+    return response
+
+
+def _extract_responses_session_id(
+    headers: Dict[str, Any], payload: Dict[str, Any]
+) -> Optional[str]:
+    lowered = {str(key).lower(): value for key, value in (headers or {}).items()}
+    for name in ("x-claude-code-session-id", "x-session-id"):
+        value = lowered.get(name)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict) and isinstance(metadata.get("user_id"), str):
+        try:
+            user_metadata = json.loads(metadata["user_id"])
+        except (TypeError, ValueError):
+            user_metadata = None
+        if isinstance(user_metadata, dict):
+            value = user_metadata.get("session_id")
+            if value is not None and str(value).strip():
+                return str(value).strip()
+    return None
+
+
+def _anthropic_json_error(
+    message: str,
+    status_code: int = 400,
+    error_type: str = "invalid_request_error",
+    warnings: Optional[List[Dict[str, Any]]] = None,
+) -> Response:
+    response = jsonify({
+        "type": "error",
+        "error": {"type": error_type, "message": str(message)},
+    })
+    response.status_code = status_code
+    return _set_compatibility_headers(response, warnings or [])
+
+
+def _upstream_response_bytes(response: requests.Response) -> bytes:
+    content = getattr(response, "content", None)
+    if isinstance(content, bytes):
+        return content
+    return str(getattr(response, "text", "") or "").encode("utf-8")
 
 
 # Fields supported by Copilot's Anthropic API endpoint.
@@ -798,17 +969,33 @@ def anthropic_count_tokens():
 def anthropic_messages():
     """Handle Anthropic messages API"""
     start_time = time.time()
-    ensure_copilot_token()
-    anthropic_payload = request.get_json()
     request_id = str(uuid.uuid4())
+
+    # Capture the exact wire body before Flask normalises JSON. Duplicate keys,
+    # non-finite numbers, invalid UTF-8 and trailing data are ambiguous and are
+    # rejected rather than silently changed by a permissive parser.
+    original_request_raw = request.get_data(cache=True)
+    try:
+        anthropic_payload = parse_strict_json_bytes(original_request_raw)
+    except StrictJSONError as exc:
+        return _anthropic_json_error(str(exc), 400)
+    if not isinstance(anthropic_payload, dict):
+        return _anthropic_json_error("Anthropic request body must be a JSON object", 400)
+
+    ensure_copilot_token()
 
     # Capture incoming request headers (auth values redacted before caching).
     request_headers = redact_auth_headers(dict(request.headers))
     client_ip = get_client_ip(request)
     user_id = _current_user_id()
 
-    # Store original request before any modifications
+    # Keep an unmodified copy for compatibility auditing, and a separate safe
+    # projection for every dashboard/cache path. Reasoning carriers are
+    # reversible and must never be persisted verbatim.
     original_request_body = copy.deepcopy(anthropic_payload)
+    cached_original_request_body = redact_reasoning_carriers_for_cache(
+        original_request_body
+    )
 
     original_model = anthropic_payload.get("model", "unknown")
 
@@ -818,29 +1005,1106 @@ def anthropic_messages():
         print(f"[Anthropic API] Model name translated: {original_model} -> {translated_model}")
         anthropic_payload = {**anthropic_payload, "model": translated_model}
 
-    # Apply system prompt filters (applies to both paths)
-    anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
-
-    # Apply tool result suffix filters (applies to both paths)
-    anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
-
-    # Translate legacy thinking.type=enabled to adaptive+effort for new-protocol
-    # models (applies to both paths; must run before apply_effort_policy so the
-    # mapped effort goes through the same capability gate as a client-supplied one).
-    anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
-
-    # Decide reasoning effort support per model (applies to both paths)
-    anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
-
-    # Check if this model supports direct Anthropic API
     use_direct_api = supports_direct_anthropic_api(translated_model)
 
     if use_direct_api:
+        anthropic_payload, removed_carriers = strip_reasoning_carriers_from_messages_payload(
+            anthropic_payload
+        )
+        if removed_carriers:
+            counters.incr("mod.responses_reasoning_carrier_strip", removed_carriers)
+            print(
+                f"[Anthropic API] Removed {removed_carriers} synthetic Responses "
+                f"reasoning carrier block(s) before native Anthropic forwarding"
+            )
+        anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
+        anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
+        anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
+        anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
         print(f"[Anthropic API] Using direct Anthropic API path for model: {translated_model}")
-        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, cached_original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+
+    if (
+        bool(getattr(state, "anthropic_responses_compat_enabled", False))
+        and supports_responses_api(translated_model)
+        and not advertises_anthropic_messages_api(translated_model)
+    ):
+        # Operator-configured content filters are endpoint-independent policy;
+        # unlike legacy thinking/effort rewrites they must also apply here.
+        anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
+        anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
+        print(f"[Anthropic API] Using Responses compatibility path for model: {translated_model}")
+        return handle_responses_anthropic_request(
+            anthropic_payload=anthropic_payload,
+            request_id=request_id,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            user_id=user_id,
+        )
+
+    # A carrier only has meaning to a Responses backend. Strip it before the
+    # legacy chat-completions translator can turn thinking into visible text.
+    anthropic_payload, removed_carriers = strip_reasoning_carriers_from_messages_payload(
+        anthropic_payload
+    )
+    if removed_carriers:
+        counters.incr("mod.responses_reasoning_carrier_strip", removed_carriers)
+        print(
+            f"[Anthropic API] Removed {removed_carriers} synthetic Responses "
+            f"reasoning carrier block(s) before OpenAI translation"
+        )
+    anthropic_payload = apply_system_prompt_filters_to_payload(anthropic_payload)
+    anthropic_payload = apply_tool_result_suffix_filter_to_payload(anthropic_payload)
+    anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
+    anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
+    print(f"[Anthropic API] Using OpenAI translation path for model: {translated_model}")
+    return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, cached_original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+
+
+def _strict_upstream_json(response: requests.Response) -> Dict[str, Any]:
+    content = getattr(response, "content", None)
+    if isinstance(content, bytes) and content:
+        value = parse_strict_json_bytes(content)
     else:
-        print(f"[Anthropic API] Using OpenAI translation path for model: {translated_model}")
-        return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+        value = response.json()
+    if not isinstance(value, dict):
+        raise StrictJSONError("Upstream Responses body must be a JSON object")
+    return value
+
+
+def _responses_request_cache_record(
+    *,
+    request_headers: Dict[str, Any],
+    client_ip: Optional[str],
+    original_request_body: Dict[str, Any],
+    original_request_raw: bytes,
+    responses_payload: Dict[str, Any],
+    response_body: Any,
+    upstream_response_body: Any,
+    status_code: int,
+    request_size: int,
+    response_size: int,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    user_id: str,
+    warnings: List[Dict[str, Any]],
+    request_report: Any,
+    response_report: Any = None,
+    compatibility_audit: Any = None,
+) -> Dict[str, Any]:
+    usage = response_body.get("usage", {}) if isinstance(response_body, dict) else {}
+    report: Dict[str, Any] = {}
+    if request_report is not None:
+        report["request"] = (
+            request_report.to_dict()
+            if hasattr(request_report, "to_dict")
+            else copy.deepcopy(request_report)
+        )
+    if response_report is not None:
+        report["response"] = response_report.to_dict()
+    cached_upstream_body = redact_responses_response_for_cache(upstream_response_body)
+    cache_limit = int(getattr(cache, "max_request_size", 0) or 0)
+    if cache_limit > 0 and response_size > cache_limit:
+        try:
+            upstream_digest_source = json.dumps(
+                upstream_response_body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except Exception:
+            upstream_digest_source = b""
+        cached_upstream_body = {
+            "_truncated": True,
+            "_size": response_size,
+            "_reason": "upstream body exceeded dashboard cache limit",
+            "_sha256": hashlib.sha256(upstream_digest_source).hexdigest(),
+        }
+    record = {
+        "request_headers": request_headers,
+        "client_ip": client_ip,
+        "original_request_body": redact_reasoning_carriers_for_cache(
+            original_request_body
+        ),
+        "request_body": redact_responses_value_for_cache(responses_payload),
+        "response_body": redact_reasoning_carriers_for_cache(response_body),
+        "upstream_response_body": cached_upstream_body,
+        "original_request_raw_sha256": hashlib.sha256(original_request_raw).hexdigest(),
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
+        "endpoint": "/v1/messages",
+        "status_code": status_code,
+        "request_size": request_size,
+        "response_size": response_size,
+        "input_tokens": int(usage.get("input_tokens") or 0),
+        "output_tokens": int(usage.get("output_tokens") or 0),
+        "cache_creation_input_tokens": int(usage.get("cache_creation_input_tokens") or 0),
+        "cache_read_input_tokens": int(usage.get("cache_read_input_tokens") or 0),
+        "duration": round(time.time() - start_time, 2),
+        "user_id": user_id,
+        "compatibility_profile": anthropic_responses_wire_profile(translated_model),
+        "compatibility_warnings": warnings,
+        "conversion_report": report,
+    }
+    if compatibility_audit is not None:
+        record["compatibility_audit"] = (
+            compatibility_audit.to_dict()
+            if hasattr(compatibility_audit, "to_dict")
+            else copy.deepcopy(compatibility_audit)
+        )
+    return record
+
+
+def _responses_transport_error(
+    *,
+    message: str,
+    status_code: int,
+    warnings: List[Dict[str, Any]],
+) -> Response:
+    error_type = "api_error"
+    if status_code == 504:
+        error_type = "timeout_error"
+    return _anthropic_json_error(message, status_code, error_type, warnings)
+
+
+def _cache_responses_local_failure(
+    *,
+    request_id: str,
+    message: str,
+    status_code: int,
+    request_headers: Dict[str, Any],
+    client_ip: Optional[str],
+    original_request_body: Dict[str, Any],
+    original_request_raw: bytes,
+    responses_payload: Optional[Dict[str, Any]],
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    user_id: str,
+    warnings: List[Dict[str, Any]],
+    request_report: Any = None,
+    response_report: Any = None,
+    compatibility_audit: Any = None,
+    upstream_response_body: Any = None,
+    response_size: int = 0,
+) -> None:
+    error_type = "invalid_request_error" if status_code == 400 else "api_error"
+    body = {
+        "type": "error",
+        "error": {"type": error_type, "message": str(message)},
+    }
+    cache.add_request(request_id, _responses_request_cache_record(
+        request_headers=request_headers,
+        client_ip=client_ip,
+        original_request_body=original_request_body,
+        original_request_raw=original_request_raw,
+        responses_payload=responses_payload or {},
+        response_body=body,
+        upstream_response_body=upstream_response_body,
+        status_code=status_code,
+        request_size=len(original_request_raw),
+        response_size=response_size,
+        start_time=start_time,
+        original_model=original_model,
+        translated_model=translated_model,
+        user_id=user_id,
+        warnings=warnings,
+        request_report=request_report,
+        response_report=response_report,
+        compatibility_audit=compatibility_audit,
+    ))
+
+
+def _maybe_wrap_responses_early_failure_retry(
+    response: requests.Response,
+    *,
+    response_factory: Callable[[], requests.Response],
+    max_retries: int,
+    request_id: str,
+) -> Any:
+    if not bool(getattr(state, "enable_responses_early_failure_retry", False)):
+        return response
+    return RetryingResponsesResponse(
+        response=response,
+        response_factory=response_factory,
+        max_retries=max_retries,
+        request_id=request_id,
+    )
+
+
+def _make_anthropic_responses_stream_handler(
+    *,
+    response: requests.Response,
+    request_id: str,
+    request_size: int,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    responses_payload: Dict[str, Any],
+    original_request_body: Dict[str, Any],
+    request_headers: Dict[str, Any],
+    client_ip: Optional[str],
+    user_id: str,
+    conversion: Any,
+    warnings: List[Dict[str, Any]],
+    request_audit: Any,
+) -> AnthropicResponsesStreamHandler:
+    return AnthropicResponsesStreamHandler(
+        response=response,
+        request_id=request_id,
+        request_size=request_size,
+        start_time=start_time,
+        original_model=original_model,
+        translated_model=translated_model,
+        request_body_for_cache=redact_responses_value_for_cache(responses_payload),
+        original_request_body=redact_reasoning_carriers_for_cache(
+            original_request_body
+        ),
+        request_headers=request_headers,
+        client_ip=client_ip,
+        user_id=user_id,
+        conversion=conversion,
+        compatibility_warnings=warnings,
+        compatibility_audit=request_audit.to_dict(),
+        max_raw_capture_bytes=min(
+            16 * 1024 * 1024,
+            max(
+                1024,
+                int(getattr(cache, "max_request_size", 0) or 1024 * 1024),
+            ),
+        ),
+    )
+
+
+def _stream_pending_anthropic_responses_request(
+    pending_response: BackgroundResult,
+    *,
+    build_request_headers: Callable[[], Dict[str, str]],
+    early_failure_response_factory: Callable[[], requests.Response],
+    initial_conn_attempt: int,
+    connection_retries: int,
+    request_id: str,
+    request_size: int,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    responses_payload: Dict[str, Any],
+    original_request_body: Dict[str, Any],
+    original_request_raw: bytes,
+    request_headers: Dict[str, Any],
+    client_ip: Optional[str],
+    user_id: str,
+    conversion: Any,
+    warnings: List[Dict[str, Any]],
+    request_audit: Any,
+) -> Response:
+    """Commit an Anthropic SSE response while upstream headers are pending.
+
+    Once the first keepalive is emitted the HTTP response is committed, so any
+    configured connection retries must continue inside this generator rather
+    than returning to the route-level retry loop.
+    """
+    cache.start_request(request_id, {
+        "request_headers": request_headers,
+        "client_ip": client_ip,
+        "original_request_body": redact_reasoning_carriers_for_cache(
+            original_request_body
+        ),
+        "request_body": redact_responses_value_for_cache(responses_payload),
+        "model": original_model,
+        "translated_model": translated_model if translated_model != original_model else None,
+        "endpoint": "/v1/messages",
+        "request_size": request_size,
+        "user_id": user_id,
+    })
+    cache.update_request_state(request_id, cache.STATE_SENDING)
+
+    def generate() -> Generator[str, None, None]:
+        cache_finished = False
+        response: Optional[requests.Response] = None
+        active_pending: Optional[BackgroundResult] = pending_response
+        last_connection_error: Optional[Exception] = None
+        try:
+            for active_conn_attempt in range(
+                initial_conn_attempt, connection_retries + 1
+            ):
+                try:
+                    if active_pending is None:
+                        # A retry, so rebuild the headers: the token may have
+                        # just been replaced by ensure_copilot_token() below,
+                        # and each attempt needs its own X-Request-Id.
+                        retry_headers = build_request_headers()
+                        active_pending = BackgroundResult(lambda: requests.post(
+                            f"{get_copilot_base_url()}/v1/responses",
+                            headers=retry_headers,
+                            json=responses_payload,
+                            stream=True,
+                            timeout=state.upstream_read_timeout,
+                        ), label="messages_responses")
+                        response = yield from _wait_anthropic_response_with_ping(
+                            active_pending
+                        )
+                    else:
+                        response = yield from _wait_anthropic_response_with_ping(
+                            active_pending, emit_initial_ping=True
+                        )
+                    active_pending = None
+                    last_connection_error = None
+                    break
+                except (
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.ConnectionError,
+                ) as exc:
+                    active_pending = None
+                    last_connection_error = exc
+                    log_connection_retry(
+                        request_id,
+                        "/v1/messages (responses)",
+                        active_conn_attempt,
+                        connection_retries,
+                        exc,
+                    )
+                    ensure_copilot_token()
+                    if active_conn_attempt < connection_retries:
+                        time.sleep(min(2 ** active_conn_attempt, 8))
+
+            if last_connection_error is not None or response is None:
+                raise last_connection_error or requests.exceptions.ConnectionError(
+                    "Upstream Responses request returned no response"
+                )
+
+            if not response.ok:
+                try:
+                    upstream_error = _strict_upstream_json(response)
+                except Exception:
+                    upstream_error = {"message": "Upstream Responses API returned a non-JSON error"}
+                error = anthropic_error_from_responses(upstream_error, response.status_code)
+                yield _anthropic_error_event(error, response.status_code)
+                cache.add_request(request_id, _responses_request_cache_record(
+                    request_headers=request_headers,
+                    client_ip=client_ip,
+                    original_request_body=original_request_body,
+                    original_request_raw=original_request_raw,
+                    responses_payload=responses_payload,
+                    response_body=error,
+                    upstream_response_body=upstream_error,
+                    status_code=response.status_code,
+                    request_size=request_size,
+                    response_size=len(getattr(response, "text", "").encode("utf-8")),
+                    start_time=start_time,
+                    original_model=original_model,
+                    translated_model=translated_model,
+                    user_id=user_id,
+                    warnings=warnings,
+                    request_report=conversion.report,
+                    compatibility_audit=request_audit,
+                ))
+                cache_finished = True
+                response.close()
+                return
+            upstream_response = _maybe_wrap_responses_early_failure_retry(
+                response,
+                response_factory=early_failure_response_factory,
+                max_retries=connection_retries,
+                request_id=request_id,
+            )
+            handler = _make_anthropic_responses_stream_handler(
+                response=upstream_response,
+                request_id=request_id,
+                request_size=request_size,
+                start_time=start_time,
+                original_model=original_model,
+                translated_model=translated_model,
+                responses_payload=responses_payload,
+                original_request_body=original_request_body,
+                request_headers=request_headers,
+                client_ip=client_ip,
+                user_id=user_id,
+                conversion=conversion,
+                warnings=warnings,
+                request_audit=request_audit,
+            )
+            handler._cache_seeded = True
+            yield from handler._generate()
+            cache_finished = True
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+            failure_warnings = _merge_compatibility_warnings(
+                warnings,
+                [_compatibility_warning("responses.connection_failed", "/", "error")],
+            )
+            event = {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": f"Upstream Responses connection failed ({type(exc).__name__})",
+                },
+            }
+            cache.add_request(request_id, _responses_request_cache_record(
+                request_headers=request_headers,
+                client_ip=client_ip,
+                original_request_body=original_request_body,
+                original_request_raw=original_request_raw,
+                responses_payload=responses_payload,
+                response_body=event,
+                upstream_response_body=None,
+                status_code=504,
+                request_size=request_size,
+                response_size=0,
+                start_time=start_time,
+                original_model=original_model,
+                translated_model=translated_model,
+                user_id=user_id,
+                warnings=failure_warnings,
+                request_report=conversion.report,
+                compatibility_audit=request_audit,
+            ))
+            cache_finished = True
+            yield f"event: error\ndata: {json.dumps(event)}\n\n"
+        except GeneratorExit:
+            if active_pending is not None:
+                active_pending.cancel()
+            if response is not None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+            disconnect_warnings = _merge_compatibility_warnings(
+                warnings,
+                [_compatibility_warning("responses.client_disconnected", "/", "error")],
+            )
+            cache.add_request(request_id, _responses_request_cache_record(
+                request_headers=request_headers,
+                client_ip=client_ip,
+                original_request_body=original_request_body,
+                original_request_raw=original_request_raw,
+                responses_payload=responses_payload,
+                response_body={
+                    "type": "error",
+                    "error": {
+                        "type": "api_error",
+                        "message": "Client disconnected before upstream headers arrived",
+                    },
+                },
+                upstream_response_body=None,
+                status_code=499,
+                request_size=request_size,
+                response_size=0,
+                start_time=start_time,
+                original_model=original_model,
+                translated_model=translated_model,
+                user_id=user_id,
+                warnings=disconnect_warnings,
+                request_report=conversion.report,
+                compatibility_audit=request_audit,
+            ))
+            cache_finished = True
+            return
+        except Exception:
+            failure_warnings = _merge_compatibility_warnings(
+                warnings,
+                [_compatibility_warning("responses.pre_header_failed", "/", "error")],
+            )
+            event = {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Upstream Responses request failed before headers arrived",
+                },
+            }
+            cache.add_request(request_id, _responses_request_cache_record(
+                request_headers=request_headers,
+                client_ip=client_ip,
+                original_request_body=original_request_body,
+                original_request_raw=original_request_raw,
+                responses_payload=responses_payload,
+                response_body=event,
+                upstream_response_body=None,
+                status_code=502,
+                request_size=request_size,
+                response_size=0,
+                start_time=start_time,
+                original_model=original_model,
+                translated_model=translated_model,
+                user_id=user_id,
+                warnings=failure_warnings,
+                request_report=conversion.report,
+                compatibility_audit=request_audit,
+            ))
+            cache_finished = True
+            yield f"event: error\ndata: {json.dumps(event)}\n\n"
+        finally:
+            if not cache_finished and response is None and active_pending is not None:
+                active_pending.cancel()
+
+    result = Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+    return _set_compatibility_headers(result, warnings)
+
+
+def handle_responses_anthropic_request(
+    anthropic_payload: Dict,
+    request_id: str,
+    start_time: float,
+    original_model: str,
+    translated_model: str,
+    original_request_body: Dict = None,
+    original_request_raw: bytes = b"",
+    request_headers: Dict = None,
+    client_ip: str = None,
+    user_id: str = "anonymous",
+) -> Response:
+    """Handle Anthropic Messages directly through the Responses API.
+
+    This path never uses the Chat Completions translator and never retries a
+    protocol error with fields removed. Only byte-identical connection retries
+    are permitted.
+    """
+    request_headers = request_headers or {}
+    original_request_body = original_request_body or copy.deepcopy(anthropic_payload)
+    wire_profile = anthropic_responses_wire_profile(translated_model)
+    request_audit = audit_anthropic_request(
+        request_headers,
+        original_request_body,
+        baseline_manifest={"profiles": CLAUDE_CLI_TOOL_CONTRACT_BASELINES},
+    )
+    warnings: List[Dict[str, Any]] = _merge_compatibility_warnings(
+        request_audit.warnings
+    )
+    if request_audit.should_fail:
+        _log_compatibility_warnings(request_id, warnings)
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message="Anthropic request shape is not supported by the active compatibility profile",
+            status_code=400,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=None,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            compatibility_audit=request_audit,
+        )
+        return _anthropic_json_error(
+            "Anthropic request shape is not supported by the active compatibility profile",
+            400,
+            warnings=warnings,
+        )
+
+    session_id = _extract_responses_session_id(request_headers, anthropic_payload)
+    try:
+        conversion = convert_anthropic_to_responses(
+            anthropic_payload,
+            wire_profile=wire_profile,
+            session_id=session_id,
+            tenant_id=user_id,
+        )
+    except AnthropicResponsesConversionError as exc:
+        conversion_warnings = _merge_compatibility_warnings(
+            warnings, exc.report.warnings
+        )
+        _log_compatibility_warnings(request_id, conversion_warnings)
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message=str(exc),
+            status_code=400,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=None,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=conversion_warnings,
+            request_report=exc.report,
+            compatibility_audit=request_audit,
+        )
+        return _anthropic_json_error(str(exc), 400, warnings=conversion_warnings)
+    except (TypeError, ValueError) as exc:
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message=str(exc),
+            status_code=400,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=None,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            compatibility_audit=request_audit,
+        )
+        return _anthropic_json_error(str(exc), 400, warnings=warnings)
+
+    warnings = _merge_compatibility_warnings(warnings, conversion.report.warnings)
+    responses_payload = conversion.payload
+    # The size of what the client sent, not of what conversion produced. The
+    # cache uses request_size to decide whether to drop original_request_body
+    # (cache.py:_truncate_oversize_bodies), and conversion can shrink a body by
+    # orders of magnitude -- an unknown top-level key or a thinking block is
+    # accounted for in the report and then not carried upstream. Measuring the
+    # converted payload would let a 1 MB body be retained under a 219-byte
+    # accounting, once per cached entry.
+    request_size = len(original_request_raw)
+    enable_vision = any(
+        isinstance(message, dict)
+        and isinstance(message.get("content"), list)
+        and any(
+            isinstance(part, dict) and part.get("type") in ("image", "document")
+            for part in message.get("content", [])
+        )
+        for message in anthropic_payload.get("messages", [])
+    )
+    is_agent_call = any(
+        isinstance(message, dict) and message.get("role") == "assistant"
+        for message in anthropic_payload.get("messages", [])
+    )
+    initiator = "agent" if is_agent_call else "user"
+
+    def build_request_headers() -> Dict[str, str]:
+        """Build headers for one attempt.
+
+        get_copilot_headers() bakes in the current state.copilot_token and a
+        fresh X-Request-Id, so a dict built once and reused across retries would
+        re-send a token that ensure_copilot_token() has just replaced -- turning
+        a recoverable retry into a 401 -- and would repeat one request id across
+        attempts, defeating upstream correlation and deduplication.
+        """
+        attempt_headers = get_copilot_headers(enable_vision)
+        attempt_headers["X-Initiator"] = initiator
+        return attempt_headers
+
+    def retry_early_failed_stream() -> requests.Response:
+        ensure_copilot_token()
+        return requests.post(
+            f"{get_copilot_base_url()}/v1/responses",
+            headers=build_request_headers(),
+            json=responses_payload,
+            stream=True,
+            timeout=state.upstream_read_timeout,
+        )
+
+    connection_retries = int(getattr(state, "max_connection_retries", 0))
+    response = None
+    last_connection_error = None
+    for conn_attempt in range(connection_retries + 1):
+        headers = build_request_headers()
+        try:
+            if (
+                responses_payload.get("stream")
+                and state.sse_keepalive_interval > 0
+            ):
+                pending_response = BackgroundResult(lambda: requests.post(
+                    f"{get_copilot_base_url()}/v1/responses",
+                    headers=headers,
+                    json=responses_payload,
+                    stream=True,
+                    timeout=state.upstream_read_timeout,
+                ), label="messages_responses")
+                # Same pre-header grace as /v1/responses: commit to a streaming
+                # response quickly instead of holding a WSGI worker silent for a
+                # whole keepalive interval, where a client disconnect is invisible
+                # because nothing has been written yet. Upstream errors that arrive
+                # inside the window still keep their real HTTP status below;
+                # ReadTimeout/ConnectionError propagate to the route-level retry
+                # loop, which is safe precisely because nothing was sent yet.
+                grace = min(
+                    state.responses_pre_header_grace,
+                    state.sse_keepalive_interval,
+                )
+                try:
+                    response = pending_response.get(timeout=grace)
+                except queue.Empty:
+                    _log_compatibility_warnings(request_id, warnings)
+                    return _stream_pending_anthropic_responses_request(
+                        pending_response,
+                        build_request_headers=build_request_headers,
+                        early_failure_response_factory=retry_early_failed_stream,
+                        initial_conn_attempt=conn_attempt,
+                        connection_retries=connection_retries,
+                        request_id=request_id,
+                        request_size=request_size,
+                        start_time=start_time,
+                        original_model=original_model,
+                        translated_model=translated_model,
+                        responses_payload=responses_payload,
+                        original_request_body=original_request_body,
+                        original_request_raw=original_request_raw,
+                        request_headers=request_headers,
+                        client_ip=client_ip,
+                        user_id=user_id,
+                        conversion=conversion,
+                        warnings=warnings,
+                        request_audit=request_audit,
+                    )
+            else:
+                response = requests.post(
+                    f"{get_copilot_base_url()}/v1/responses",
+                    headers=headers,
+                    json=responses_payload,
+                    stream=bool(responses_payload.get("stream")),
+                    timeout=state.upstream_read_timeout,
+                )
+            last_connection_error = None
+            break
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+            last_connection_error = exc
+            log_connection_retry(
+                request_id,
+                "/v1/messages (responses)",
+                conn_attempt,
+                connection_retries,
+                exc,
+            )
+            ensure_copilot_token()
+            if conn_attempt < connection_retries:
+                time.sleep(min(2 ** conn_attempt, 8))
+
+    if last_connection_error is not None or response is None:
+        warnings = _merge_compatibility_warnings(
+            warnings,
+            [_compatibility_warning("responses.connection_failed", "/", "error")],
+        )
+        connection_error_body = {
+            "type": "error",
+            "error": {
+                "type": "timeout_error",
+                "message": (
+                    "Upstream Responses connection failed after "
+                    f"{connection_retries + 1} attempt(s)"
+                ),
+            },
+        }
+        cache.add_request(request_id, _responses_request_cache_record(
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            response_body=connection_error_body,
+            upstream_response_body=None,
+            status_code=504,
+            request_size=request_size,
+            response_size=0,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit=request_audit,
+        ))
+        _log_compatibility_warnings(request_id, warnings)
+        return _responses_transport_error(
+            message=(
+                "Upstream Responses connection failed after "
+                f"{connection_retries + 1} attempt(s)"
+            ),
+            status_code=504,
+            warnings=warnings,
+        )
+
+    if not response.ok:
+        try:
+            upstream_error = _strict_upstream_json(response)
+        except Exception:
+            upstream_error = {"message": "Upstream Responses API returned a non-JSON error"}
+        anthropic_error = anthropic_error_from_responses(
+            upstream_error, response.status_code
+        )
+        response_size = len(getattr(response, "text", "").encode("utf-8"))
+        cache.add_request(request_id, _responses_request_cache_record(
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            response_body=anthropic_error,
+            upstream_response_body=upstream_error,
+            status_code=response.status_code,
+            request_size=request_size,
+            response_size=response_size,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit=request_audit,
+        ))
+        _log_compatibility_warnings(request_id, warnings)
+        result = jsonify(anthropic_error)
+        result.status_code = response.status_code
+        return _set_compatibility_headers(result, warnings)
+
+    if responses_payload.get("stream"):
+        upstream_response = _maybe_wrap_responses_early_failure_retry(
+            response,
+            response_factory=retry_early_failed_stream,
+            max_retries=connection_retries,
+            request_id=request_id,
+        )
+        handler = _make_anthropic_responses_stream_handler(
+            response=upstream_response,
+            request_id=request_id,
+            request_size=request_size,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            responses_payload=responses_payload,
+            original_request_body=original_request_body,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            user_id=user_id,
+            conversion=conversion,
+            warnings=warnings,
+            request_audit=request_audit,
+        )
+        _log_compatibility_warnings(request_id, warnings)
+        return _set_compatibility_headers(handler.stream(), warnings)
+
+    try:
+        upstream_response = _strict_upstream_json(response)
+    except Exception:
+        warnings = _merge_compatibility_warnings(
+            warnings,
+            [_compatibility_warning("responses.malformed_json_body", "/response", "error")],
+        )
+        error_body = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "Upstream Responses API returned malformed JSON",
+            },
+        }
+        cache.add_request(request_id, _responses_request_cache_record(
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            response_body=error_body,
+            upstream_response_body={"raw_sha256": hashlib.sha256(
+                _upstream_response_bytes(response)
+            ).hexdigest()},
+            status_code=502,
+            request_size=request_size,
+            response_size=len(_upstream_response_bytes(response)),
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit=request_audit,
+        ))
+        _log_compatibility_warnings(request_id, warnings)
+        return _responses_transport_error(
+            message="Upstream Responses API returned malformed JSON",
+            status_code=502,
+            warnings=warnings,
+        )
+
+    response_status = str(upstream_response.get("status") or "")
+    terminal_event_types = {
+        "completed": "response.completed",
+        "incomplete": "response.incomplete",
+        "failed": "response.failed",
+    }
+    response_event_type = terminal_event_types.get(response_status)
+    if response_event_type is None:
+        # A status this build does not know is not recoverable the way an
+        # unknown *stream* event is: this body is the terminal answer, and the
+        # status is what says whether the output is complete, truncated, or
+        # failed. Reject rather than guess.
+        warnings = _merge_compatibility_warnings(
+            warnings,
+            [_compatibility_warning(
+                "responses.unknown_response_status", "/status", "error"
+            )],
+        )
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message="Unsupported Responses response status",
+            status_code=502,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit={"request": request_audit.to_dict()},
+            upstream_response_body=upstream_response,
+            response_size=len(getattr(response, "text", "").encode("utf-8")),
+        )
+        _log_compatibility_warnings(request_id, warnings)
+        return _anthropic_json_error(
+            "Unsupported Responses response shape", 502, "api_error", warnings
+        )
+    response_audit = audit_responses_event(
+        {
+            "type": response_event_type,
+            # Non-stream bodies have no SSE sequence number. Supplying a local
+            # sentinel lets the shared event-shape auditor validate the actual
+            # terminal response without reporting a false missing-field drift.
+            "sequence_number": 0,
+            "response": upstream_response,
+        },
+    )
+    warnings = _merge_compatibility_warnings(warnings, response_audit.warnings)
+    combined_audit = {
+        "request": request_audit.to_dict(),
+        "response": response_audit.to_dict(),
+    }
+    if response_audit.should_fail:
+        anthropic_error = {
+            "type": "error",
+            "error": {
+                "type": "api_error",
+                "message": "Unsupported Responses response shape",
+            },
+        }
+        cache.add_request(request_id, _responses_request_cache_record(
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            response_body=anthropic_error,
+            upstream_response_body=upstream_response,
+            status_code=502,
+            request_size=request_size,
+            response_size=len(getattr(response, "text", "").encode("utf-8")),
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit=combined_audit,
+        ))
+        _log_compatibility_warnings(request_id, warnings)
+        result = jsonify(anthropic_error)
+        result.status_code = 502
+        return _set_compatibility_headers(result, warnings)
+
+    if upstream_response.get("status") == "failed" or upstream_response.get("error"):
+        anthropic_error = anthropic_error_from_responses(
+            upstream_response.get("error") or upstream_response, 500
+        )
+        cache.add_request(request_id, _responses_request_cache_record(
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            response_body=anthropic_error,
+            upstream_response_body=upstream_response,
+            status_code=500,
+            request_size=request_size,
+            response_size=len(getattr(response, "text", "").encode("utf-8")),
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit=combined_audit,
+        ))
+        result = jsonify(anthropic_error)
+        result.status_code = 500
+        return _set_compatibility_headers(result, warnings)
+
+    try:
+        translated = convert_responses_to_anthropic(
+            upstream_response,
+            original_model=original_model,
+            reasoning_model=translated_model,
+            wire_profile=wire_profile,
+            name_codec=conversion.name_codec,
+            call_id_codec=conversion.call_id_codec,
+            stop_sequences=conversion.stop_sequences,
+        )
+    except AnthropicResponsesConversionError as exc:
+        warnings = _merge_compatibility_warnings(warnings, exc.report.warnings)
+        _log_compatibility_warnings(request_id, warnings)
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message=str(exc),
+            status_code=502,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            response_report=exc.report,
+            compatibility_audit=combined_audit,
+            upstream_response_body=upstream_response,
+            response_size=len(getattr(response, "text", "").encode("utf-8")),
+        )
+        return _responses_transport_error(
+            message=str(exc), status_code=502, warnings=warnings
+        )
+
+    warnings = _merge_compatibility_warnings(
+        warnings, translated.report.warnings
+    )
+
+    anthropic_response = translated.response
+    cache.add_request(request_id, _responses_request_cache_record(
+        request_headers=request_headers,
+        client_ip=client_ip,
+        original_request_body=original_request_body,
+        original_request_raw=original_request_raw,
+        responses_payload=responses_payload,
+        response_body=anthropic_response,
+        upstream_response_body=upstream_response,
+        status_code=response.status_code,
+        request_size=request_size,
+        response_size=len(getattr(response, "text", "").encode("utf-8")),
+        start_time=start_time,
+        original_model=original_model,
+        translated_model=translated_model,
+        user_id=user_id,
+        warnings=warnings,
+        request_report=conversion.report,
+        response_report=translated.report,
+        compatibility_audit=combined_audit,
+    ))
+    _log_compatibility_warnings(request_id, warnings)
+    return _set_compatibility_headers(jsonify(anthropic_response), warnings)
 
 
 def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, start_time: float,

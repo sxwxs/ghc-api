@@ -68,6 +68,8 @@ class RequestCache:
             placeholder = {"_truncated": True, "_size": entry["response_size"], "_reason": f"response body exceeded cache_max_request_size ({limit} bytes)"}
             if entry.get("raw_events") is not None:
                 entry["raw_events"] = [json.dumps(placeholder)]
+                if entry.get("response_body") is not None:
+                    entry["response_body"] = placeholder
             else:
                 entry["response_body"] = placeholder
 
@@ -142,7 +144,7 @@ class RequestCache:
                         entry["duration"] = max(0, self._current_timestamp() - started)
 
     def complete_request(self, request_id: str, data: Dict) -> None:
-        """Complete a request with response data and update statistics"""
+        """Finalize a request attempt and update statistics, including errors."""
         entry_snapshot = None
         with self.lock:
             if request_id in self.cache:
@@ -158,7 +160,14 @@ class RequestCache:
                     entry["request_body"] = data.get("request_body")
                 if "raw_events" in data:
                     entry["raw_events"] = data.get("raw_events")
-                    entry["response_body"] = None
+                    # Translation handlers may provide both the authoritative
+                    # raw upstream events and a client-facing terminal
+                    # projection. Preserve the latter when explicitly supplied;
+                    # ordinary passthrough SSE handlers still omit it.
+                    entry["response_body"] = (
+                        data.get("response_body")
+                        if "response_body" in data else None
+                    )
                 else:
                     entry["response_body"] = data.get("response_body")
                 entry["status_code"] = data.get("status_code", 200)
@@ -199,7 +208,10 @@ class RequestCache:
                     "request_headers": data.get("request_headers"),
                     "original_request_body": data.get("original_request_body"),
                     "request_body": data.get("request_body"),
-                    "response_body": data.get("response_body") if "raw_events" not in data else None,
+                    "response_body": (
+                        data.get("response_body")
+                        if "response_body" in data else None
+                    ),
                     "raw_events": data.get("raw_events"),
                     "model": data.get("model", "unknown"),
                     "translated_model": data.get("translated_model"),

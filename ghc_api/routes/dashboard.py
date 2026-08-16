@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 from flask import Blueprint, Response, jsonify, render_template, request
 
+from ..anthropic_responses import WIRE_PROFILES
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support, model_mappings
@@ -69,6 +70,9 @@ def _runtime_config() -> Dict[str, Any]:
         "log_webiq_requests": state.log_webiq_requests,
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
+        "anthropic_responses_compat_enabled": state.anthropic_responses_compat_enabled,
+        "anthropic_responses_wire_profile": state.anthropic_responses_wire_profile,
+        "anthropic_responses_model_profiles": state.anthropic_responses_model_profiles,
         "model_mappings": {
             "exact": model_mappings.exact_mappings,
             "prefix": model_mappings.prefix_mappings,
@@ -111,6 +115,38 @@ def _validate_endpoint_support(value: Any, field_name: str) -> tuple[List[str], 
     exact = _validate_string_list(value.get("exact", []), f"{field_name}.exact")
     prefix = _validate_string_list(value.get("prefix", []), f"{field_name}.prefix")
     return exact, prefix
+
+
+def _validate_bool(value: Any, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"'{field_name}' must be a boolean")
+    return value
+
+
+def _validate_string(value: Any, field_name: str, *, allow_empty: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"'{field_name}' must be a string")
+    if not allow_empty and not value.strip():
+        raise ValueError(f"'{field_name}' must not be empty")
+    return value
+
+
+
+def _validate_wire_profile(value: Any, field_name: str) -> str:
+    profile = _validate_string(value, field_name, allow_empty=False)
+    if profile not in WIRE_PROFILES:
+        choices = ", ".join(sorted(WIRE_PROFILES))
+        raise ValueError(f"'{field_name}' must be one of: {choices}")
+    return profile
+
+
+def _validate_model_profiles(value: Any) -> Dict[str, str]:
+    profiles = _validate_mapping(value, "anthropic_responses_model_profiles")
+    for model, profile in profiles.items():
+        if not model.strip():
+            raise ValueError("'anthropic_responses_model_profiles' model names must not be empty")
+        _validate_wire_profile(profile, f"anthropic_responses_model_profiles.{model}")
+    return dict(profiles)
 
 
 @dashboard_bp.route("/", methods=["GET"])
@@ -188,6 +224,9 @@ def api_runtime_config_update():
         "save_request_to_file",
         "log_webiq_requests",
         "disable_onedrive_access",
+        "anthropic_responses_compat_enabled",
+        "anthropic_responses_wire_profile",
+        "anthropic_responses_model_profiles",
         "model_mappings",
         "chat_completions_model_support",
     }
@@ -267,6 +306,23 @@ def api_runtime_config_update():
             if not isinstance(disable_onedrive, bool):
                 raise ValueError("'disable_onedrive_access' must be a boolean")
             state.disable_onedrive_access = disable_onedrive
+
+        if "anthropic_responses_compat_enabled" in payload:
+            state.anthropic_responses_compat_enabled = _validate_bool(
+                payload["anthropic_responses_compat_enabled"],
+                "anthropic_responses_compat_enabled",
+            )
+
+        if "anthropic_responses_wire_profile" in payload:
+            state.anthropic_responses_wire_profile = _validate_wire_profile(
+                payload["anthropic_responses_wire_profile"],
+                "anthropic_responses_wire_profile",
+            )
+
+        if "anthropic_responses_model_profiles" in payload:
+            state.anthropic_responses_model_profiles = _validate_model_profiles(
+                payload["anthropic_responses_model_profiles"]
+            )
 
         if "model_mappings" in payload:
             mappings = payload["model_mappings"]

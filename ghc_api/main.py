@@ -16,8 +16,8 @@ import tempfile
 import traceback
 import yaml
 
-from . import __version__
-from . import webiq
+from . import __version__, webiq
+from .anthropic_responses import WIRE_PROFILES
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
 from .config import (
@@ -43,6 +43,60 @@ def load_config(config_path: str) -> dict:
     """Load configuration from YAML file"""
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.safe_load(f) or {}
+
+
+def _config_bool(value, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{name} must be a boolean")
+    return value
+
+
+def apply_anthropic_responses_config(config: dict) -> None:
+    """Validate and apply the Responses-backed Messages settings."""
+    deprecated = sorted(
+        key for key in config
+        if str(key).startswith('anthropic_responses_replay_')
+    )
+    if deprecated:
+        print(
+            "WARNING: anthropic_responses_replay_* settings are deprecated "
+            "and ignored. Reasoning is now carried statelessly in "
+            "thinking.signature. Remove: " + ", ".join(deprecated)
+        )
+    if 'anthropic_responses_compat_mode' in config:
+        print(
+            "WARNING: anthropic_responses_compat_mode is removed and ignored. "
+            "Constructs without an exact Responses representation are always "
+            "reported in the X-GHC-Compatibility-Warnings header instead of "
+            "failing the request."
+        )
+    if 'anthropic_responses_compat_enabled' in config:
+        state.anthropic_responses_compat_enabled = _config_bool(
+            config['anthropic_responses_compat_enabled'],
+            'anthropic_responses_compat_enabled',
+        )
+    if 'anthropic_responses_wire_profile' in config:
+        profile = config['anthropic_responses_wire_profile']
+        if not isinstance(profile, str) or profile not in WIRE_PROFILES:
+            raise ValueError(
+                "anthropic_responses_wire_profile must be a registered wire profile"
+            )
+        state.anthropic_responses_wire_profile = profile
+    if 'anthropic_responses_model_profiles' in config:
+        profiles = config['anthropic_responses_model_profiles']
+        if not isinstance(profiles, dict):
+            raise ValueError(
+                "anthropic_responses_model_profiles must be a string-to-string mapping"
+            )
+        for model, profile in profiles.items():
+            if (
+                not isinstance(model, str) or not model.strip()
+                or not isinstance(profile, str) or profile not in WIRE_PROFILES
+            ):
+                raise ValueError(
+                    "anthropic_responses_model_profiles contains an invalid model/profile"
+                )
+        state.anthropic_responses_model_profiles = dict(profiles)
 
 
 def apply_upstream_config(config: dict) -> None:
@@ -247,6 +301,7 @@ def main():
             state.disable_onedrive_access = bool(config['disable_onedrive_access'])
         if 'enable_tool_call_recovery' in config:
             state.enable_tool_call_recovery = bool(config['enable_tool_call_recovery'])
+        apply_anthropic_responses_config(config)
         if 'enable_responses_early_failure_retry' in config:
             state.enable_responses_early_failure_retry = bool(config['enable_responses_early_failure_retry'])
         if 'session_flush_interval' in config:
@@ -307,7 +362,9 @@ def main():
     except Exception as e:
         # Do not start with a half-applied config: some settings (enable_auth,
         # model_mappings, port) would silently differ from what the file asks for,
-        # which is worse than not starting at all.
+        # which is worse than not starting at all. Also ensure a caller that catches
+        # SystemExit cannot use a partially applied Anthropic compatibility policy.
+        state.anthropic_responses_compat_enabled = False
         print(f"Error loading config file ({config_path}): {e!r}", file=sys.stderr)
         traceback.print_exc()
         print(

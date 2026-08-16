@@ -165,6 +165,15 @@ upstream_read_timeout: 1800
 # before emitting the first token. Set to 0 to disable keepalive.
 sse_keepalive_interval: 30
 
+# How long a streaming Responses request waits for upstream response headers before
+# it commits to a streaming response and starts sending keepalives. Applies to
+# /v1/responses and to /v1/messages when it is served through the Responses
+# compatibility path. Upstream errors that arrive inside this window keep their real
+# HTTP status; later ones can only be reported as an SSE error event, so keep this
+# below the shortest client read timeout. Clamped to [0, 5] seconds, and
+# sse_keepalive_interval: 0 disables the behavior entirely.
+responses_pre_header_grace: 0.5
+
 # If true, when /v1/responses gets HTTP 400 because encrypted reasoning or function
 # output content cannot be decrypted, the request is cleaned and retried exactly once:
 # reasoning/message items carrying encrypted_content are dropped, while tool output
@@ -184,6 +193,27 @@ disable_onedrive_access: true
 # of structured tool_use blocks on the direct Anthropic streaming path (/v1/messages).
 # Disabled by default; when off the upstream stream is forwarded untouched.
 enable_tool_call_recovery: false
+
+# Anthropic Messages -> OpenAI Responses Compatibility
+# ----------------------------------------------------
+# Allows Claude Code and other Anthropic /messages clients to use models that
+# Copilot exposes only through /responses. Conversion is selected only for a
+# Responses-only model; native /messages support remains preferred.
+#
+# Anything that has no exact representation in the target protocol is converted
+# on a best-effort basis and reported in the X-GHC-Compatibility-Warnings
+# response header (and in the request cache), never dropped silently.
+anthropic_responses_compat_enabled: true
+
+# Default Responses request dialect, plus optional per-model overrides.
+# Supported profiles: public_responses, copilot_responses_lite.
+anthropic_responses_wire_profile: copilot_responses_lite
+anthropic_responses_model_profiles:
+  gpt-5.6-sol: copilot_responses_lite
+
+# Responses reasoning is carried statelessly in namespaced Anthropic
+# thinking.signature envelopes. No replay database, session identity, or
+# encryption key is required.
 
 # If true, transparently retry a /v1/responses stream that returns HTTP 200 but emits
 # response.failed before any model output (text, reasoning, or tool call). Retries stop
