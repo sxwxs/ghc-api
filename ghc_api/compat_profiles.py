@@ -1666,13 +1666,19 @@ def audit_responses_event(
 
     event_type = event.get("type", _MISSING)
     if not isinstance(event_type, str) or event_type not in KNOWN_RESPONSES_EVENT_TYPES:
+        # Unlike an unknown item or content part, an unknown *event* is
+        # recoverable: the Responses terminal event carries the complete output
+        # array, and the stream translator hydrates from it, so a skipped event
+        # costs incremental delivery rather than model output. Copilot's
+        # /responses is an evolving upstream; rejecting every additive event
+        # would take the whole Anthropic compatibility path down on someone
+        # else's deploy. ``lossless_required`` still refuses.
         collector.add(
             "responses.unknown_event",
             "/events/type",
             _json_type(event_type),
             ("string",),
             evidence={"event_type": None if event_type is _MISSING else event_type},
-            fail_always=True,
         )
     else:
         _require_fields(

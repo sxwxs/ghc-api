@@ -1072,7 +1072,23 @@ class ResponsesAnthropicEventTranslator:
             self.error_status_code = 502
             self.message_stopped = True
             return [("error", error)]
-        return self._protocol_error("responses.unknown_event", f"/events/{event_type or 'missing'}")
+        # An event type this build does not know. Skipping it is not the same
+        # as losing its payload: the terminal response.completed/.incomplete
+        # carries the full output array and _hydrate_terminal merges it, so any
+        # model output the skipped event previewed is still delivered -- at the
+        # end of the stream rather than incrementally. Anything that would
+        # actually corrupt or drop output still fails closed elsewhere: an
+        # unknown item type or content part is rejected by the auditor and by
+        # convert_responses_to_anthropic, a conflicting item index trips
+        # item_type_mutation, and a stream with no terminal event trips
+        # stream_ended_without_terminal. lossless_required rejects via the
+        # auditor before reaching here.
+        self._warn(
+            "responses.unknown_event_skipped",
+            f"/events/{event_type or 'missing'}",
+            "approximation",
+        )
+        return self._drain()
 
     def finalize_interrupted(self) -> List[Tuple[str, Dict[str, Any]]]:
         if self.message_stopped:

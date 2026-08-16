@@ -680,6 +680,10 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         post.assert_called_once()
 
     def test_nonstream_unknown_status_fails_closed(self):
+        """Unlike an unknown stream event, an unknown status has no terminal
+        event left to reconcile against: it is what says whether the output is
+        complete, truncated, or failed. It must stay a hard 502 in both modes.
+        """
         upstream_body = {**self._terminal_response(), "status": "future-status-private"}
         with mock.patch.object(
             anthropic_module.requests,
@@ -692,6 +696,14 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.get_json()["type"], "error")
         self.assertNotIn("future-status-private", response.get_data(as_text=True))
+        cached = next(iter(self.cache.cache.values()))
+        self.assertEqual(cached["status_code"], 502)
+        warning_codes = {item["code"] for item in cached["compatibility_warnings"]}
+        self.assertIn("responses.unknown_response_status", warning_codes)
+        self.assertNotIn(
+            "future-status-private",
+            json.dumps(cached["compatibility_warnings"], ensure_ascii=False),
+        )
 
     def test_stream_uses_anthropic_sse_and_keeps_raw_responses_events_in_cache(self):
         terminal = self._terminal_response()
@@ -997,11 +1009,71 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             self.assertTrue(upstream.closed)
             post.assert_called_once()
 
-    def test_stream_unknown_responses_event_emits_safe_anthropic_error_and_is_audited(self):
+    def test_stream_unknown_responses_event_is_skipped_and_output_still_arrives(self):
+        """An additive upstream event must not take the whole path down.
+
+        The terminal event carries the full output array, so a skipped event
+        costs incremental delivery, not model output. The approximation is still
+        surfaced as a compatibility warning, and no upstream value leaks.
+        """
         secret = "DO-NOT-LEAK-unknown-stream-fixture"
         upstream_event = {
             "type": "response.future_private_event",
             "private_value": secret,
+        }
+        terminal = {
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": {
+                "id": "resp_unknown_event",
+                "model": "gpt-5.6-sol",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "still delivered"}],
+                }],
+                "usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        }
+        upstream = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(event, separators=(",", ":"))).encode()
+            for event in (upstream_event, terminal)
+        ])
+        with mock.patch.object(anthropic_module.requests, "post", return_value=upstream):
+            response = self.client.post(
+                "/v1/messages", json=self._request_payload(stream=True)
+            )
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("event: error\n", body)
+        self.assertIn("still delivered", body)
+        self.assertIn("event: message_stop\n", body)
+        self.assertNotIn("response.future_private_event", body)
+        self.assertNotIn(secret, body)
+        cached = next(iter(self.cache.cache.values()))
+        self.assertEqual(cached["status_code"], 200)
+        self.assertFalse(any(secret in item for item in cached["raw_events"]))
+        warning_codes = {
+            item["code"] for item in cached["compatibility_warnings"]
+        }
+        self.assertIn("responses.unknown_event", warning_codes)
+        self.assertIn("responses.unknown_event_skipped", warning_codes)
+        self.assertNotIn(
+            secret,
+            json.dumps(cached["compatibility_warnings"], ensure_ascii=False),
+        )
+
+    def test_stream_unknown_responses_item_type_still_fails_closed(self):
+        """An unknown *item* has no second chance: it reaches the client as
+        content or not at all, so it must remain a hard protocol error."""
+        secret = "DO-NOT-LEAK-unknown-item-fixture"
+        upstream_event = {
+            "type": "response.output_item.added",
+            "sequence_number": 1,
+            "output_index": 0,
+            "item": {"type": "private_future_item", "private_value": secret},
         }
         upstream = _FakeResponse({}, lines=[
             ("data: " + json.dumps(upstream_event, separators=(",", ":"))).encode()
@@ -1012,22 +1084,16 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             )
             body = response.get_data(as_text=True)
 
-        # Headers are already committed for an SSE stream, so protocol drift is
-        # reported as an Anthropic error event and retained in the cache audit.
         self.assertEqual(response.status_code, 200)
         self.assertIn("event: error\n", body)
-        self.assertIn('"type":"error"', body)
-        self.assertNotIn("response.future_private_event", body)
         self.assertNotIn(secret, body)
         cached = next(iter(self.cache.cache.values()))
         self.assertEqual(cached["status_code"], 502)
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
-        self.assertFalse(any(secret in item for item in cached["raw_events"]))
-        self.assertTrue(any("drifted Responses event" in item for item in cached["raw_events"]))
         warning_codes = {
             item["code"] for item in cached["compatibility_warnings"]
         }
-        self.assertIn("responses.unknown_event", warning_codes)
+        self.assertIn("responses.unknown_item", warning_codes)
         self.assertNotIn(
             secret,
             json.dumps(cached["compatibility_warnings"], ensure_ascii=False),

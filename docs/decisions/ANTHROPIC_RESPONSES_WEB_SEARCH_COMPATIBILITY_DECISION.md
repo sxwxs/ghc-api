@@ -231,3 +231,28 @@ The final answers must remain unchanged, lifecycle events must not be double-cou
 ## Evidence handling
 
 The original request dump is private diagnostic evidence and must not be committed. Any future regression fixture must be synthetic and sanitized while preserving only the relevant event shapes, lifecycle ordering, rotating IDs, annotations, and terminal usage.
+
+## Fail-closed boundary for upstream protocol drift
+
+Copilot's `/v1/responses` is an evolving upstream that adds event types, output
+item types, and content part types without notice. The compatibility path must
+not turn every additive change into an outage, and must not silently drop model
+output either. The boundary is drawn by asking whether the drifted shape has a
+second chance to be reconciled:
+
+| Drift | Compatibility mode | Reason |
+| --- | --- | --- |
+| Unknown SSE **event type** | warn and skip (`responses.unknown_event_skipped`) | `response.completed` / `response.incomplete` carry the complete `output` array and `_hydrate_terminal` merges it, so the payload is still delivered -- at the end of the stream instead of incrementally |
+| Unknown **output item type** | reject (502) | It reaches the client as content or not at all; there is no later event that restates it in a known shape |
+| Unknown **content part type** | reject (502) | Same as above, one level down |
+| Unknown **response status** (non-stream) | reject (502) | The body is already terminal, and the status is what distinguishes complete from truncated from failed |
+| Stream ends with no terminal event | reject (502) | Terminal reconciliation never ran, so skipped events were never recovered |
+
+`lossless_required` rejects all of the above, including the skippable event.
+
+Skipping an event cannot silently corrupt output: if a skipped event introduced
+an output index whose type conflicts with what later events or the terminal
+response say, `_merge_item` reports `responses.item_type_mutation` (and the
+equivalent checks for call ids, tool names, and arguments), which is fatal.
+Relaxing the event discriminator also does not relax its payload -- an unknown
+event carrying an unknown item is still rejected by the item auditor.

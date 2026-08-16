@@ -8,6 +8,7 @@ run before any of that, for every endpoint.
 """
 
 import json
+import time
 import unittest
 from unittest import mock
 
@@ -54,10 +55,32 @@ class JsonGuardUnitTests(unittest.TestCase):
         self.assertFalse(exceeds_max_nesting(body))
 
     def test_unterminated_string_does_not_confuse_the_depth_count(self):
-        """A stray quote leaves the scan out of sync with reality; the decoder
-        rejects the body a moment later, so the guard must not mis-report."""
+        """An unterminated literal swallows everything after it, so the depth
+        stops growing there.
+
+        That is safe because the decoder reads left to right: it can only
+        recurse into containers opened *before* the stray quote, which the scan
+        has already counted, and it then rejects the body as malformed. Depth
+        that opens before the quote is still caught.
+        """
         self.assertFalse(exceeds_max_nesting(b'{"text":"[[[['))
-        self.assertTrue(exceeds_max_nesting(b'{"text":"unterminated' + _nest(500).encode()))
+        self.assertFalse(exceeds_max_nesting(b'{"text":"unterminated' + _nest(500).encode()))
+        self.assertTrue(exceeds_max_nesting(_nest(500).encode() + b'{"text":"unterminated'))
+
+    def test_escaped_quotes_do_not_end_a_string(self):
+        body = json.dumps({"text": 'he said "[[[" and left', "trailing": "a\\\\"})
+        self.assertFalse(exceeds_max_nesting(body.encode()))
+        # A literal closed by an escaped-backslash pair really is closed.
+        self.assertTrue(exceeds_max_nesting(b'"a\\\\"' + _nest(500).encode()))
+
+    def test_scan_is_linear_in_the_body_size(self):
+        """Regression: matching string literals with a regex made a 150 KB body
+        of unterminated-looking escapes cost ~30 s of CPU, holding the GIL, on
+        every endpoint and before authentication."""
+        hostile = b'"' + b'a\\"' * 50000
+        start = time.monotonic()
+        self.assertFalse(exceeds_max_nesting(hostile))
+        self.assertLess(time.monotonic() - start, 1.0)
 
     def test_custom_limit_is_honoured(self):
         self.assertTrue(exceeds_max_nesting(_nest(5).encode(), limit=4))

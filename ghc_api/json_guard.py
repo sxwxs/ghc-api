@@ -11,6 +11,15 @@ hostile body -- a few KB of ``[[[[...`` -- turns into an unhandled
 
 The limit is checked on the raw bytes before anything recursive touches the
 value, so it is deterministic and independent of the interpreter's stack.
+
+The scan must stay linear in the body size. It runs before authentication can
+help (``state.enable_auth`` is off by default, and unprotected paths accept JSON
+too), so any super-linear behaviour here is a cheaper denial of service than the
+``RecursionError`` this guard exists to prevent. That rules out matching string
+literals with a regex: every ``"`` that opens an unterminated literal costs a
+full-length failed match, and re-scanning from the next byte makes the whole
+thing quadratic. Instead the structural bytes are visited once, in order, with
+the in-string flag carried explicitly.
 """
 
 import re
@@ -19,34 +28,57 @@ import re
 # levels at most) and comfortably under every recursive consumer above.
 MAX_JSON_NESTING_DEPTH = 100
 
-# One pass that swallows a whole string literal (unrolled loop form, which is
-# markedly faster than the naive alternation) or a run of bytes that carries no
-# structure, leaving only the brackets to count. On a 4.6 MB body this costs
-# ~20 ms, against ~90 ms for the readable two-regex version. Matching bytes
-# rather than text keeps multi-byte UTF-8 out of the way for free: its bytes are
-# never structural.
-_STRUCTURE_ONLY_RE = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*"|[^\[\]{}"]+', re.S)
+# Only these bytes can change the depth or the in-string state. Everything else
+# -- including every byte of a multi-byte UTF-8 sequence, which is never
+# structural -- is skipped by the regex engine in C.
+_STRUCTURAL_RE = re.compile(rb'["\[\]{}]')
+
+_QUOTE = 0x22
+_BACKSLASH = 0x5C
+_OPENERS = (0x5B, 0x7B)  # [ {
 
 
 def exceeds_max_nesting(raw, limit: int = MAX_JSON_NESTING_DEPTH) -> bool:
     """Return True when ``raw`` nests containers deeper than ``limit``.
 
     ``raw`` is an undecoded request body (``bytes``, or ``str`` for callers that
-    already decoded it). String literals are stripped first so brackets inside
-    them do not count as structure; only the remaining brackets are scanned.
+    already decoded it). Brackets inside string literals are not structure, so
+    the scan tracks whether it is inside one.
+
+    An unterminated literal makes everything after it look like string content
+    and the reported depth stops growing. That is safe rather than merely
+    tolerable: the decoder reads left to right, so it can only recurse into
+    containers that open *before* the unterminated literal -- exactly the ones
+    already counted -- and it then rejects the body outright.
     """
     if isinstance(raw, str):
         raw = raw.encode("utf-8", errors="surrogatepass")
 
-    structure = _STRUCTURE_ONLY_RE.sub(b"", raw)
     depth = 0
-    for byte in structure:
-        if byte in b"[{":
+    in_string = False
+    for match in _STRUCTURAL_RE.finditer(raw):
+        index = match.start()
+        byte = raw[index]
+        if byte == _QUOTE:
+            if not in_string:
+                in_string = True
+                continue
+            # A closing quote, unless an odd number of backslashes escapes it.
+            # Each run of backslashes is consumed by at most one quote, so the
+            # walk back stays linear over the whole body.
+            probe = index - 1
+            backslashes = 0
+            while probe >= 0 and raw[probe] == _BACKSLASH:
+                backslashes += 1
+                probe -= 1
+            if backslashes % 2 == 0:
+                in_string = False
+        elif in_string:
+            continue
+        elif byte in _OPENERS:
             depth += 1
             if depth > limit:
                 return True
-        elif byte in b"]}":
+        else:
             depth -= 1
-        # A leftover quote only survives for an unterminated string, which the
-        # decoder rejects a moment later; it must not disturb the depth count.
     return False

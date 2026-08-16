@@ -715,11 +715,49 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertEqual(text, "terminal")
         self.assertEqual(event_types(output)[-2:], ["message_delta", "message_stop"])
 
-    def test_unknown_event_fails_closed(self):
+    def test_unknown_event_is_skipped_and_terminal_hydration_recovers_output(self):
+        """A skipped event costs incremental delivery, not model output: the
+        terminal event carries the full output array."""
         translator = self.translator()
-        output = translator.process("response.future_content.delta", {"type": "response.future_content.delta"})
+        output = translator.process(
+            "response.future_content.delta", {"type": "response.future_content.delta"}
+        )
+        self.assertEqual(event_types(output), [])
+        self.assertFalse(translator.protocol_failed)
+        self.assertEqual(
+            translator.compatibility_warnings[0]["code"],
+            "responses.unknown_event_skipped",
+        )
+        self.assertEqual(translator.compatibility_warnings[0]["action"], "approximation")
+
+        output = translator.process("response.completed", {"response": {
+            "id": "resp", "model": "gpt", "status": "completed",
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "recovered"},
+            ]}],
+            "usage": {},
+        }})
+        text = "".join(
+            event["delta"]["text"]
+            for name, event in output
+            if name == "content_block_delta"
+        )
+        self.assertEqual(text, "recovered")
+        self.assertEqual(event_types(output)[-2:], ["message_delta", "message_stop"])
+        self.assertFalse(translator.protocol_failed)
+
+    def test_unknown_event_without_a_terminal_event_still_fails_closed(self):
+        translator = self.translator()
+        translator.process(
+            "response.future_content.delta", {"type": "response.future_content.delta"}
+        )
+        output = translator.finalize_interrupted()
         self.assertEqual(event_types(output), ["error"])
-        self.assertEqual(translator.compatibility_warnings[0]["code"], "responses.unknown_event")
+        self.assertTrue(translator.protocol_failed)
+        self.assertIn(
+            "responses.stream_ended_without_terminal",
+            {warning["code"] for warning in translator.compatibility_warnings},
+        )
 
     def test_failed_response_emits_anthropic_error(self):
         translator = self.translator()

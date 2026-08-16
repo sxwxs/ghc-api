@@ -1665,9 +1665,14 @@ def handle_responses_anthropic_request(
 
     warnings = _merge_compatibility_warnings(warnings, conversion.report.warnings)
     responses_payload = conversion.payload
-    request_size = len(json.dumps(
-        responses_payload, ensure_ascii=False, separators=(",", ":")
-    ).encode("utf-8"))
+    # The size of what the client sent, not of what conversion produced. The
+    # cache uses request_size to decide whether to drop original_request_body
+    # (cache.py:_truncate_oversize_bodies), and conversion can shrink a body by
+    # orders of magnitude -- an unknown top-level key or a thinking block is
+    # accounted for in the report and then not carried upstream. Measuring the
+    # converted payload would let a 1 MB body be retained under a 219-byte
+    # accounting, once per cached entry.
+    request_size = len(original_request_raw)
     enable_vision = any(
         isinstance(message, dict)
         and isinstance(message.get("content"), list)
@@ -1920,11 +1925,46 @@ def handle_responses_anthropic_request(
         )
 
     response_status = str(upstream_response.get("status") or "")
-    response_event_type = {
+    terminal_event_types = {
         "completed": "response.completed",
         "incomplete": "response.incomplete",
         "failed": "response.failed",
-    }.get(response_status, "response.unknown_status")
+    }
+    response_event_type = terminal_event_types.get(response_status)
+    if response_event_type is None:
+        # A status this build does not know is not recoverable the way an
+        # unknown *stream* event is: this body is the terminal answer, and the
+        # status is what says whether the output is complete, truncated, or
+        # failed. Reject rather than guess, in both modes.
+        warnings = _merge_compatibility_warnings(
+            warnings,
+            [_compatibility_warning(
+                "responses.unknown_response_status", "/status", "error"
+            )],
+        )
+        _cache_responses_local_failure(
+            request_id=request_id,
+            message="Unsupported Responses response status",
+            status_code=502,
+            request_headers=request_headers,
+            client_ip=client_ip,
+            original_request_body=original_request_body,
+            original_request_raw=original_request_raw,
+            responses_payload=responses_payload,
+            start_time=start_time,
+            original_model=original_model,
+            translated_model=translated_model,
+            user_id=user_id,
+            warnings=warnings,
+            request_report=conversion.report,
+            compatibility_audit={"request": request_audit.to_dict()},
+            upstream_response_body=upstream_response,
+            response_size=len(getattr(response, "text", "").encode("utf-8")),
+        )
+        _log_compatibility_warnings(request_id, warnings)
+        return _anthropic_json_error(
+            "Unsupported Responses response shape", 502, "api_error", warnings
+        )
     response_audit = audit_responses_event(
         {
             "type": response_event_type,

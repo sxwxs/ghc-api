@@ -816,18 +816,41 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                     item, mode=MODE_LOSSLESS_REQUIRED
                 ).should_fail)
 
-    def test_unknown_event_fails_closed_in_both_modes_without_value_leak(self):
-        for mode in (MODE_COMPATIBILITY, MODE_LOSSLESS_REQUIRED):
+    def test_unknown_event_warns_in_compatibility_and_rejects_in_lossless(self):
+        """An unknown event is recoverable (the terminal event carries the full
+        output array), unlike an unknown item or content part. It stays a
+        warning in compatibility mode and a rejection in lossless_required, and
+        it never leaks an upstream value either way."""
+        expected = {
+            MODE_COMPATIBILITY: "warn",
+            MODE_LOSSLESS_REQUIRED: "reject",
+        }
+        for mode, action in expected.items():
             audit = audit_responses_event(
                 {"type": "response.private_future.delta", "delta": "SECRET"}, mode=mode
             )
             with self.subTest(mode=mode):
-                self.assertTrue(audit.should_fail)
+                self.assertEqual(audit.should_fail, action == "reject")
                 self.assertEqual(audit.warnings[0]["code"], "responses.unknown_event")
-                self.assertEqual(audit.warnings[0]["action"], "reject")
+                self.assertEqual(audit.warnings[0]["action"], action)
                 serialized = json.dumps(audit.warnings, sort_keys=True)
                 self.assertNotIn("response.private_future.delta", serialized)
                 self.assertNotIn("SECRET", serialized)
+
+    def test_unknown_event_carrying_an_unknown_item_still_fails_closed(self):
+        """Relaxing the event discriminator must not relax its payload."""
+        audit = audit_responses_event(
+            {
+                "type": "response.private_future.delta",
+                "output_index": 0,
+                "item": {"type": "private_future_item", "body": "SECRET"},
+            },
+            mode=MODE_COMPATIBILITY,
+        )
+        self.assertTrue(audit.should_fail)
+        codes = {warning["code"] for warning in audit.warnings}
+        self.assertIn("responses.unknown_item", codes)
+        self.assertNotIn("SECRET", json.dumps(audit.warnings, sort_keys=True))
 
     def test_unknown_item_fails_closed_directly_and_inside_terminal_event(self):
         direct = audit_responses_item({"type": "private_future_item", "body": "SECRET"})
