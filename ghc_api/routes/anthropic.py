@@ -1289,7 +1289,7 @@ def _make_anthropic_responses_stream_handler(
 def _stream_pending_anthropic_responses_request(
     pending_response: BackgroundResult,
     *,
-    headers: Dict[str, Any],
+    build_request_headers: Callable[[], Dict[str, str]],
     early_failure_response_factory: Callable[[], requests.Response],
     initial_conn_attempt: int,
     connection_retries: int,
@@ -1341,9 +1341,13 @@ def _stream_pending_anthropic_responses_request(
             ):
                 try:
                     if active_pending is None:
+                        # A retry, so rebuild the headers: the token may have
+                        # just been replaced by ensure_copilot_token() below,
+                        # and each attempt needs its own X-Request-Id.
+                        retry_headers = build_request_headers()
                         active_pending = BackgroundResult(lambda: requests.post(
                             f"{get_copilot_base_url()}/v1/responses",
-                            headers=headers,
+                            headers=retry_headers,
                             json=responses_payload,
                             stream=True,
                             timeout=state.upstream_read_timeout,
@@ -1682,21 +1686,30 @@ def handle_responses_anthropic_request(
         )
         for message in anthropic_payload.get("messages", [])
     )
-    headers = get_copilot_headers(enable_vision)
     is_agent_call = any(
         isinstance(message, dict) and message.get("role") == "assistant"
         for message in anthropic_payload.get("messages", [])
     )
     initiator = "agent" if is_agent_call else "user"
-    headers["X-Initiator"] = initiator
+
+    def build_request_headers() -> Dict[str, str]:
+        """Build headers for one attempt.
+
+        get_copilot_headers() bakes in the current state.copilot_token and a
+        fresh X-Request-Id, so a dict built once and reused across retries would
+        re-send a token that ensure_copilot_token() has just replaced -- turning
+        a recoverable retry into a 401 -- and would repeat one request id across
+        attempts, defeating upstream correlation and deduplication.
+        """
+        attempt_headers = get_copilot_headers(enable_vision)
+        attempt_headers["X-Initiator"] = initiator
+        return attempt_headers
 
     def retry_early_failed_stream() -> requests.Response:
         ensure_copilot_token()
-        retry_headers = get_copilot_headers(enable_vision)
-        retry_headers["X-Initiator"] = initiator
         return requests.post(
             f"{get_copilot_base_url()}/v1/responses",
-            headers=retry_headers,
+            headers=build_request_headers(),
             json=responses_payload,
             stream=True,
             timeout=state.upstream_read_timeout,
@@ -1706,6 +1719,7 @@ def handle_responses_anthropic_request(
     response = None
     last_connection_error = None
     for conn_attempt in range(connection_retries + 1):
+        headers = build_request_headers()
         try:
             if (
                 responses_payload.get("stream")
@@ -1735,7 +1749,7 @@ def handle_responses_anthropic_request(
                     _log_compatibility_warnings(request_id, warnings)
                     return _stream_pending_anthropic_responses_request(
                         pending_response,
-                        headers=headers,
+                        build_request_headers=build_request_headers,
                         early_failure_response_factory=retry_early_failed_stream,
                         initial_conn_attempt=conn_attempt,
                         connection_retries=connection_retries,

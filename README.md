@@ -131,6 +131,25 @@ disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared
 # Optional leaked tool-call recovery (direct Anthropic /v1/messages streaming)
 enable_tool_call_recovery: false # If true, recover tool calls Copilot leaks as plain text
 
+# Anthropic Messages -> Responses compatibility (enabled by default)
+anthropic_responses_compat_enabled: true # Serve /v1/messages for models Copilot exposes
+                              # only through /responses, by translating the request and
+                              # the response. Engages only for a model that advertises
+                              # /responses and not /messages; models with native
+                              # /messages support are never routed through it. Set false
+                              # to answer those models with an error instead.
+anthropic_responses_compat_mode: compatibility # compatibility | lossless_required.
+                              # compatibility continues when an exact representation is
+                              # unavailable and reports every approximation in the
+                              # X-GHC-Compatibility-Warnings response header;
+                              # lossless_required rejects such a request or response
+                              # (400/502) instead of approximating.
+anthropic_responses_wire_profile: copilot_responses_lite # Default request dialect:
+                              # copilot_responses_lite or public_responses.
+anthropic_responses_model_profiles: # Per-model overrides of the profile above. A key
+  gpt-5.6-sol: copilot_responses_lite # ending in '*' is a prefix rule, so 'gpt-5.*'
+                              # covers a whole family; the longest matching prefix wins.
+
 # Retry /v1/responses streams that fail before any output (enabled by default)
 enable_responses_early_failure_retry: true # Transparently retry a stream that returns
                               # HTTP 200 then response.failed before any text, reasoning,

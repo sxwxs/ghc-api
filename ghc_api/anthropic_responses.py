@@ -1821,13 +1821,19 @@ def convert_responses_to_anthropic(
                             report,
                         )
                     # Custom tools accept grammar-defined free-form text while
-                    # Anthropic tool inputs must be objects.  Preserve the raw
-                    # string in the same reversible envelope used by SSE.
+                    # Anthropic tool inputs must be objects.  Wrap the raw
+                    # string in the same envelope used by SSE.  The wrapper is
+                    # readable by a client but is not restored on the way back:
+                    # a replayed turn becomes a function_call carrying
+                    # {"input": ...}, because the Anthropic tool_use block has
+                    # nowhere to record that it began as a custom_tool_call.
+                    # Nothing we send upstream declares a custom tool, so this
+                    # only matters if Copilot originates one.
                     parsed_arguments = {"input": raw_arguments}
                     report.mark(
                         argument_path,
                         PRESERVATION_APPROXIMATION,
-                        detail="Custom tool input wrapped in a reversible Anthropic object",
+                        detail="Custom tool input wrapped in an Anthropic object; a replayed turn is sent back as a function_call",
                         subtree=True,
                     )
                 content.append({"type": "tool_use", "id": original_id, "name": original_name, "input": parsed_arguments})

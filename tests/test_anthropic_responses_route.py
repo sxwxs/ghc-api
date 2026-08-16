@@ -840,6 +840,104 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertNotIn("event: error\n", body)
         self.assertNotIn("transient failure", body)
 
+    def test_connection_retry_rebuilds_headers_after_token_refresh(self):
+        """A retry must not re-send the token the refresh just replaced.
+
+        get_copilot_headers() bakes in state.copilot_token and a fresh
+        X-Request-Id, so reusing one dict across attempts would 401 on exactly
+        the case the retry exists for, and would repeat one request id upstream.
+        """
+        completed = {
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": self._terminal_response(),
+        }
+        second = _FakeResponse(self._terminal_response())
+        tokens = iter(("stale-token", "refreshed-token"))
+        request_ids = iter(("request-id-1", "request-id-2"))
+
+        def fresh_headers(*args, **kwargs):
+            return {
+                "Authorization": f"Bearer {next(tokens)}",
+                "X-Request-Id": next(request_ids),
+            }
+
+        posts = [
+            anthropic_module.requests.exceptions.ConnectionError("transport reset"),
+            second,
+        ]
+        with mock.patch.object(
+            anthropic_module.state, "max_connection_retries", 1
+        ), mock.patch.object(
+            anthropic_module, "get_copilot_headers", side_effect=fresh_headers
+        ), mock.patch.object(
+            anthropic_module.requests, "post", side_effect=posts
+        ) as post:
+            response = self.client.post(
+                "/v1/messages", json=self._request_payload(stream=False)
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(post.call_count, 2)
+        sent = [call.kwargs["headers"] for call in post.call_args_list]
+        self.assertEqual(
+            [header["Authorization"] for header in sent],
+            ["Bearer stale-token", "Bearer refreshed-token"],
+        )
+        self.assertEqual(
+            [header["X-Request-Id"] for header in sent],
+            ["request-id-1", "request-id-2"],
+        )
+        self.assertEqual({header["X-Initiator"] for header in sent}, {"user"})
+
+    def test_connection_retry_after_keepalive_commit_rebuilds_headers_too(self):
+        """Same requirement on the retry loop that runs after the response has
+        already been committed to streaming."""
+        completed = {
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": self._terminal_response(),
+        }
+        second = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(completed, separators=(",", ":"))).encode()
+        ])
+        tokens = iter(("stale-token", "refreshed-token"))
+
+        def fresh_headers(*args, **kwargs):
+            return {"Authorization": f"Bearer {next(tokens)}"}
+
+        def slow_then_fail(*args, **kwargs):
+            if post.call_count == 1:
+                time.sleep(0.15)
+                raise anthropic_module.requests.exceptions.ConnectionError(
+                    "transport reset"
+                )
+            return second
+
+        with mock.patch.object(
+            anthropic_module.state, "max_connection_retries", 1
+        ), mock.patch.object(
+            anthropic_module.state, "sse_keepalive_interval", 0.05
+        ), mock.patch.object(
+            anthropic_module.state, "responses_pre_header_grace", 0.05
+        ), mock.patch.object(
+            anthropic_module, "get_copilot_headers", side_effect=fresh_headers
+        ), mock.patch.object(
+            anthropic_module.requests, "post", side_effect=slow_then_fail
+        ) as post:
+            response = self.client.post(
+                "/v1/messages", json=self._request_payload(stream=True)
+            )
+            body = response.get_data(as_text=True)
+
+        self.assertEqual(post.call_count, 2)
+        self.assertIn("event: message_stop\n", body)
+        sent = [call.kwargs["headers"] for call in post.call_args_list]
+        self.assertEqual(
+            [header["Authorization"] for header in sent],
+            ["Bearer stale-token", "Bearer refreshed-token"],
+        )
+
     def test_stream_slow_upstream_headers_emit_anthropic_ping_before_completion(self):
         completed = {
             "type": "response.completed",
