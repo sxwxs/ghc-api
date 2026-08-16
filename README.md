@@ -30,6 +30,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 - [Anthropic Messages to Responses web search compatibility](docs/decisions/ANTHROPIC_RESPONSES_WEB_SEARCH_COMPATIBILITY_DECISION.md) - why a native `web_search_call` is reported as a compatibility warning instead of a synthesised Anthropic block
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
+- [Responses pre-header keepalive](docs/decisions/RESPONSES_PRE_HEADER_KEEPALIVE.md) - review notes and decisions behind the `/v1/responses` pre-header keepalive (PR #42): why upstream errors keep their HTTP status, why the synthetic event is `error`, and what is still open
 
 ## Installation
 
