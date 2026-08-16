@@ -28,7 +28,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Maintenance Guides
 
-- [Anthropic Messages to Responses compatibility warning runbook](ANTHROPIC_RESPONSES_WARNING_RUNBOOK.md)
+- [Anthropic Messages to Responses web search compatibility](docs/decisions/ANTHROPIC_RESPONSES_WEB_SEARCH_COMPATIBILITY_DECISION.md) - why a native `web_search_call` is reported as a compatibility warning instead of a synthesised Anthropic block
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 
 ## Installation
@@ -137,13 +137,12 @@ anthropic_responses_compat_enabled: true # Serve /v1/messages for models Copilot
                               # the response. Engages only for a model that advertises
                               # /responses and not /messages; models with native
                               # /messages support are never routed through it. Set false
-                              # to answer those models with an error instead.
-anthropic_responses_compat_mode: compatibility # compatibility | lossless_required.
-                              # compatibility continues when an exact representation is
-                              # unavailable and reports every approximation in the
-                              # X-GHC-Compatibility-Warnings response header;
-                              # lossless_required rejects such a request or response
-                              # (400/502) instead of approximating.
+                              # to send those models through the legacy Chat Completions
+                              # translation path instead (the pre-1.0.25 behaviour).
+                              # Anything without an exact representation in the target
+                              # protocol is converted best-effort and reported in the
+                              # X-GHC-Compatibility-Warnings response header, never
+                              # dropped silently.
 anthropic_responses_wire_profile: copilot_responses_lite # Default request dialect:
                               # copilot_responses_lite or public_responses.
 anthropic_responses_model_profiles: # Per-model overrides of the profile above. A key
@@ -218,6 +217,29 @@ exactly once per request:
 The option is **off by default** because it is lossy — the model loses that reasoning/tool
 context — and costs one extra upstream request. Every recovery is counted
 (`mod.encrypted_content_removal`) and logged.
+
+This recovery covers the OpenAI-format endpoints, where ghc-api holds the reasoning state.
+It does **not** cover the Anthropic Messages compatibility path, where the state is carried
+by the client: that path only retries a request byte-identically, so a rejected carrier is
+returned to the client with the upstream message and the conversation has to be restarted
+(or the offending `thinking` blocks dropped by the client).
+
+### Anthropic Messages Compatibility Reporting
+
+A construct with no exact representation in the target protocol is converted best-effort and
+reported in the `X-GHC-Compatibility-Warnings` response header, with the full conversion
+record kept in the request cache. Nothing is dropped silently. A request is only rejected
+locally when the translator cannot proceed at all — an unrepresentable core field, a
+`tool_choice` naming a tool that was not converted, or upstream output whose shape this
+build does not know.
+
+That last case is the operational risk to watch: an **unknown Responses output item or
+content part fails closed with 502**, because it reaches the client as content or not at
+all and no later event restates it in a known shape. An unknown *stream event* is only
+skipped with a warning, since the terminal response replays the full output array. If
+Copilot ships an additive item type before ghc-api knows about it, set
+`anthropic_responses_compat_enabled: false` (config file or `POST /api/runtime-config`) to
+fall back to the legacy Chat Completions translation path until an update lands.
 
 ### Token Management
 
@@ -440,6 +462,13 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 ### Anthropic Compatible
 
 - `POST /v1/messages` - Messages API (Anthropic format)
+
+All `/v1/messages` bodies are now parsed strictly: duplicate object keys, non-finite numbers
+(`NaN`, `Infinity`), trailing data, invalid UTF-8, and structural nesting beyond the shared
+depth limit are rejected with HTTP 400 instead of being silently normalised. This applies to
+every `/v1/messages` backend (native Anthropic, Chat Completions translation, and the
+Responses compatibility path), because an ambiguous body cannot be forwarded with a
+predictable meaning.
 
 ### Microsoft Web IQ Search
 

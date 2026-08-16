@@ -275,7 +275,7 @@ class AnthropicResponsesDumpFixturesTest(unittest.TestCase):
         )
         output = []
         for event in document["events"]:
-            audit = audit_responses_event(event, mode="compatibility")
+            audit = audit_responses_event(event)
             self.assertEqual(audit.warnings, [], event["type"])
             output.extend(translator.process(event["type"], event))
 

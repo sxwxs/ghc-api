@@ -31,13 +31,9 @@ PRESERVATION_SIDECAR = "sidecar"
 PRESERVATION_APPROXIMATION = "approximation"
 PRESERVATION_UNSUPPORTED = "unsupported"
 
-MODE_COMPATIBILITY = "compatibility"
-MODE_LOSSLESS_REQUIRED = "lossless_required"
-VALID_MODES = {MODE_COMPATIBILITY, MODE_LOSSLESS_REQUIRED}
-
 
 class AnthropicResponsesConversionError(ValueError):
-    """Raised when lossless mode encounters an unrepresentable source field."""
+    """Raised when a source field cannot be converted at all."""
 
     def __init__(self, message: str, report: "ConversionReport") -> None:
         super().__init__(message)
@@ -45,7 +41,7 @@ class AnthropicResponsesConversionError(ValueError):
 
 
 class StrictJSONError(ValueError):
-    """Raised when a lossless request is not strict, unambiguous JSON."""
+    """Raised when a request body is not strict, unambiguous JSON."""
 
 
 # Deep nesting has to be rejected by an explicit check rather than by catching
@@ -183,8 +179,9 @@ class ConversionReport:
     """Audit trail for one direction of a protocol conversion.
 
     ``sidecar`` is a historical disposition name meaning that a source field
-    is not represented on the client wire. Compatibility mode records it
-    silently; ``lossless_required`` rejects it.
+    is not represented on the client wire; it is recorded here rather than
+    silently dropped.  ``approximation`` and ``unsupported`` additionally
+    raise a client-visible compatibility warning.
     """
 
     direction: str
@@ -256,30 +253,8 @@ class ConversionReport:
                     detail="No registered conversion rule for this source path",
                 )
 
-    def require_mode(self, mode: str) -> None:
-        if mode not in VALID_MODES:
-            raise ValueError(f"Unknown Anthropic/Responses compatibility mode: {mode}")
-        if mode != MODE_LOSSLESS_REQUIRED:
-            return
-        lossy = [
-            record for record in self.records
-            if record.disposition in (
-                PRESERVATION_APPROXIMATION,
-                PRESERVATION_UNSUPPORTED,
-                PRESERVATION_SIDECAR,
-            )
-        ]
-        if lossy:
-            paths = ", ".join(record.source_path for record in lossy[:5])
-            if len(lossy) > 5:
-                paths += f", ... ({len(lossy)} total)"
-            raise AnthropicResponsesConversionError(
-                f"Request cannot be represented losslessly: {paths}", self
-            )
-
-    def finalize(self, source: Any, mode: str) -> None:
+    def finalize(self, source: Any) -> None:
         self.account_unknown_paths(source)
-        self.require_mode(mode)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -592,6 +567,7 @@ def _append_message_items(
     name_codec: IdentifierCodec,
     call_id_codec: IdentifierCodec,
     target_model: str,
+    called_tool_ids: Set[str],
 ) -> None:
     base = f"/messages/{message_index}"
     role = message.get("role")
@@ -650,6 +626,7 @@ def _append_message_items(
             flush_message()
             original_name = str(block.get("name") or "")
             original_id = str(block.get("id") or "")
+            called_tool_ids.add(original_id)
             encoded_name = name_codec.encode(original_name, "name")
             encoded_id = call_id_codec.encode(original_id, "call")
             arguments = block.get("input", {})
@@ -672,8 +649,24 @@ def _append_message_items(
             if "cache_control" in block:
                 report.mark(_join_pointer(path, "cache_control"), PRESERVATION_SIDECAR, detail="tool_use cache marker has no verified target", subtree=True)
         elif block_type == "tool_result":
-            flush_message()
             original_id = str(block.get("tool_use_id") or "")
+            if original_id not in called_tool_ids:
+                # A tool_result whose tool_use is not in this request (history
+                # truncation, compaction, a client-side edit) makes the whole
+                # upstream call fail with "No tool call found for function call
+                # output".  The converter sees the entire conversation, so the
+                # pairing is decided here instead of by an upstream round trip:
+                # the block is dropped and reported.  The other direction (a
+                # tool_use with no result) is left untouched -- synthesising an
+                # output would invent a tool answer the model never produced.
+                report.mark(
+                    path,
+                    PRESERVATION_APPROXIMATION,
+                    detail="tool_result has no paired tool_use in this request and was dropped",
+                    subtree=True,
+                )
+                continue
+            flush_message()
             encoded_id = call_id_codec.encode(original_id, "call")
             output = _convert_tool_result_output(block, report, path, profile)
             input_items.append({"type": "function_call_output", "call_id": encoded_id, "output": output})
@@ -1016,15 +1009,34 @@ def _convert_tools(
         target: Dict[str, Any] = {
             "type": "function",
             "name": encoded_name,
-            "description": str(tool.get("description") or ""),
             "parameters": copy.deepcopy(tool.get("input_schema") or {"type": "object", "properties": {}}),
             "strict": strict,
         }
+        description = tool.get("description")
+        if isinstance(description, str) and description.strip():
+            target["description"] = description
+        elif "description" in tool:
+            # Copilot's /responses rejects a tool whose description is present
+            # but empty, so a blank (or non-string) one gets a deterministic
+            # stand-in instead of being forwarded as "".  A description that
+            # is absent stays absent: the target schema treats it as optional,
+            # which is exactly what the Anthropic tool declared.
+            target["description"] = f"Tool: {original_name}."
         function_tools.append(target)
         target_base = f"/tools/{len(function_tools)-1}"
         report.mark(path + "/name", PRESERVATION_EXACT if encoded_name == original_name else PRESERVATION_SEMANTIC, target_base + "/name")
         if "description" in tool:
-            report.mark(path + "/description", PRESERVATION_EXACT, target_base + "/description")
+            report.mark(
+                path + "/description",
+                PRESERVATION_EXACT
+                if target.get("description") == description
+                else PRESERVATION_APPROXIMATION,
+                target_base + "/description",
+                detail=(
+                    None if target.get("description") == description
+                    else "Blank tool description replaced: the Responses endpoint rejects an empty description"
+                ),
+            )
         if "input_schema" in tool:
             report.mark(path + "/input_schema", PRESERVATION_EXACT, target_base + "/parameters", subtree=True)
         if "strict" in tool:
@@ -1104,7 +1116,6 @@ def convert_anthropic_to_responses(
     payload: Dict[str, Any],
     *,
     wire_profile: str = "copilot_responses_lite",
-    mode: str = MODE_COMPATIBILITY,
     session_id: Optional[str] = None,
     tenant_id: Optional[str] = None,
 ) -> AnthropicToResponsesResult:
@@ -1165,6 +1176,9 @@ def convert_anthropic_to_responses(
 
     messages = payload.get("messages")
     messages_error: Optional[str] = None
+    # tool_use ids seen so far, so an unpaired tool_result can be detected
+    # locally instead of by an upstream rejection.
+    called_tool_ids: Set[str] = set()
     if isinstance(messages, list):
         for message_index, message in enumerate(messages):
             path = f"/messages/{message_index}"
@@ -1180,6 +1194,7 @@ def convert_anthropic_to_responses(
                 name_codec,
                 call_id_codec,
                 model,
+                called_tool_ids,
             )
     elif "messages" in payload:
         messages_error = "Anthropic request field 'messages' must be an array"
@@ -1352,10 +1367,11 @@ def convert_anthropic_to_responses(
     if profile.default_text_verbosity:
         responses.setdefault("text", {}).setdefault("verbosity", profile.default_text_verbosity)
 
-    report.finalize(payload, mode)
-    # Compatibility mode may continue past unknown optional extensions, but a
-    # missing/malformed core collection cannot be converted or safely iterated
-    # by the route.  Reject it before any upstream request in every mode.
+    report.finalize(payload)
+    # The converter continues past unknown optional extensions and reports
+    # them as warnings, but a missing/malformed core collection cannot be
+    # converted or safely iterated by the route.  Reject it before any
+    # upstream request.
     if messages_error is not None:
         raise AnthropicResponsesConversionError(messages_error, report)
     return AnthropicToResponsesResult(
@@ -1659,7 +1675,6 @@ def convert_responses_to_anthropic(
     name_codec: Optional[IdentifierCodec] = None,
     call_id_codec: Optional[IdentifierCodec] = None,
     stop_sequences: Optional[Sequence[str]] = None,
-    mode: str = MODE_COMPATIBILITY,
 ) -> ResponsesToAnthropicResult:
     """Convert a terminal Responses object/event into an Anthropic message."""
     if not isinstance(response_value, dict):
@@ -1973,7 +1988,7 @@ def convert_responses_to_anthropic(
     for key in _KNOWN_RESPONSE_SIDECAR_FIELDS:
         if key in response:
             report.mark("/" + _pointer_escape(key), PRESERVATION_SIDECAR, detail="Responses metadata retained in conversion diagnostics", subtree=True)
-    report.finalize(response, mode)
+    report.finalize(response)
     return ResponsesToAnthropicResult(
         response=anthropic,
         report=report,

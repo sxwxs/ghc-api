@@ -183,7 +183,7 @@ We may revisit the mapping when all of the following are available:
 3. Streaming, terminal response, cache, and replay projections can be made equivalent.
 4. Stable profile-aware identity and content-index rules are implemented.
 5. Query redaction and retention behavior is reviewed and covered by tests.
-6. The approximation is explicitly represented in the conversion report and remains rejected by `lossless_required` mode.
+6. The approximation is explicitly represented in the conversion report and surfaced as a client-visible compatibility warning.
 7. The change can be scoped behind a compatibility capability or feature flag so it can be disabled without affecting standard profiles.
 
 ## Required tests for a future implementation
@@ -240,15 +240,13 @@ not turn every additive change into an outage, and must not silently drop model
 output either. The boundary is drawn by asking whether the drifted shape has a
 second chance to be reconciled:
 
-| Drift | Compatibility mode | Reason |
+| Drift | Behaviour | Reason |
 | --- | --- | --- |
 | Unknown SSE **event type** | warn and skip (`responses.unknown_event_skipped`) | `response.completed` / `response.incomplete` carry the complete `output` array and `_hydrate_terminal` merges it, so the payload is still delivered -- at the end of the stream instead of incrementally |
 | Unknown **output item type** | reject (502) | It reaches the client as content or not at all; there is no later event that restates it in a known shape |
 | Unknown **content part type** | reject (502) | Same as above, one level down |
 | Unknown **response status** (non-stream) | reject (502) | The body is already terminal, and the status is what distinguishes complete from truncated from failed |
 | Stream ends with no terminal event | reject (502) | Terminal reconciliation never ran, so skipped events were never recovered |
-
-`lossless_required` rejects all of the above, including the skippable event.
 
 Skipping an event cannot silently corrupt output: if a skipped event introduced
 an output index whose type conflicts with what later events or the terminal

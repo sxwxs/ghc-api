@@ -200,13 +200,10 @@ enable_tool_call_recovery: false
 # Copilot exposes only through /responses. Conversion is selected only for a
 # Responses-only model; native /messages support remains preferred.
 #
-# Modes:
-#   - compatibility: continue when an exact representation is unavailable and
-#                    surface a compatibility warning for every approximation.
-#   - lossless_required: reject request or response conversion whenever an
-#                        accepted field cannot be represented without loss.
+# Anything that has no exact representation in the target protocol is converted
+# on a best-effort basis and reported in the X-GHC-Compatibility-Warnings
+# response header (and in the request cache), never dropped silently.
 anthropic_responses_compat_enabled: true
-anthropic_responses_compat_mode: compatibility
 
 # Default Responses request dialect, plus optional per-model overrides.
 # Supported profiles: public_responses, copilot_responses_lite.

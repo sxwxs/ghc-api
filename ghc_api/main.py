@@ -17,7 +17,7 @@ import traceback
 import yaml
 
 from . import __version__, webiq
-from .anthropic_responses import VALID_MODES, WIRE_PROFILES
+from .anthropic_responses import WIRE_PROFILES
 from .api_helpers import resolve_ghe_endpoints
 from .app import create_app, initialize_app
 from .config import (
@@ -63,18 +63,18 @@ def apply_anthropic_responses_config(config: dict) -> None:
             "and ignored. Reasoning is now carried statelessly in "
             "thinking.signature. Remove: " + ", ".join(deprecated)
         )
+    if 'anthropic_responses_compat_mode' in config:
+        print(
+            "WARNING: anthropic_responses_compat_mode is removed and ignored. "
+            "Constructs without an exact Responses representation are always "
+            "reported in the X-GHC-Compatibility-Warnings header instead of "
+            "failing the request."
+        )
     if 'anthropic_responses_compat_enabled' in config:
         state.anthropic_responses_compat_enabled = _config_bool(
             config['anthropic_responses_compat_enabled'],
             'anthropic_responses_compat_enabled',
         )
-    if 'anthropic_responses_compat_mode' in config:
-        mode = config['anthropic_responses_compat_mode']
-        if not isinstance(mode, str) or mode not in VALID_MODES:
-            raise ValueError(
-                "anthropic_responses_compat_mode must be compatibility or lossless_required"
-            )
-        state.anthropic_responses_compat_mode = mode
     if 'anthropic_responses_wire_profile' in config:
         profile = config['anthropic_responses_wire_profile']
         if not isinstance(profile, str) or profile not in WIRE_PROFILES:

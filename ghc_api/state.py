@@ -53,7 +53,6 @@ class State:
         # selects this path for models whose Copilot metadata advertises
         # /responses but not /messages.
         self.anthropic_responses_compat_enabled: bool = True
-        self.anthropic_responses_compat_mode: str = "compatibility"
         self.anthropic_responses_wire_profile: str = "copilot_responses_lite"
         self.anthropic_responses_model_profiles: Dict[str, str] = {
             "gpt-5.6-sol": "copilot_responses_lite",

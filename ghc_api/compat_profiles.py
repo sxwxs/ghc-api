@@ -25,10 +25,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 
-MODE_COMPATIBILITY = "compatibility"
-MODE_LOSSLESS_REQUIRED = "lossless_required"
-VALID_MODES = frozenset((MODE_COMPATIBILITY, MODE_LOSSLESS_REQUIRED))
-
 KNOWN_CLAUDE_CLI_VERSIONS = frozenset(("2.1.197", "2.1.207"))
 
 # SHA-256 fingerprints of all 29 built-in tool contracts observed in each
@@ -711,7 +707,6 @@ class CompatibilityProfile:
 class CompatibilityAudit:
     """Structured result returned to routes, logs, and request-cache code."""
 
-    mode: str
     profile: CompatibilityProfile
     warnings: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -725,7 +720,6 @@ class CompatibilityAudit:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "mode": self.mode,
             "profile": self.profile.to_dict(),
             "warnings": copy.deepcopy(self.warnings),
             "should_fail": self.should_fail,
@@ -736,10 +730,7 @@ class CompatibilityAudit:
 class _WarningCollector:
     """Build value-free warnings and deduplicate them in insertion order."""
 
-    def __init__(self, mode: str, version: Optional[str]) -> None:
-        if mode not in VALID_MODES:
-            raise ValueError("Unknown compatibility mode: %s" % mode)
-        self.mode = mode
+    def __init__(self, version: Optional[str]) -> None:
         self.version = version or "unknown"
         self.warnings: List[Dict[str, Any]] = []
         self._seen: Set[str] = set()
@@ -752,13 +743,13 @@ class _WarningCollector:
         expected_types: Sequence[str],
         *,
         evidence: Any = None,
-        fail_in_lossless: bool = True,
         fail_always: bool = False,
         fingerprint: Optional[str] = None,
     ) -> None:
-        action = "reject" if fail_always or (
-            fail_in_lossless and self.mode == MODE_LOSSLESS_REQUIRED
-        ) else "warn"
+        # Only a construct the translator cannot process at all rejects a
+        # request.  Everything else is reported to the client through the
+        # compatibility warning header and stays visible in the request cache.
+        action = "reject" if fail_always else "warn"
         expected = tuple(sorted(set(str(item) for item in expected_types)))
         if fingerprint is None:
             # Evidence is hashed but never copied into the warning.  For type
@@ -1427,20 +1418,16 @@ def audit_anthropic_request(
     headers: Any,
     payload: Any,
     *,
-    mode: str = MODE_COMPATIBILITY,
     baseline_manifest: Any = None,
 ) -> CompatibilityAudit:
     """Audit one Anthropic Messages request against the Claude Code profile.
 
-    Unknown Claude CLI versions always warn but do not by themselves reject a
-    request.  In ``lossless_required`` mode unknown protocol fields, beta
-    tokens, content blocks, edits, or contracts set ``should_fail``.  The
-    ``compatibility`` mode records those as warnings and lets the conversion
-    report make its own preservation decision.
+    Unknown protocol fields, beta tokens, content blocks, edits, or tool
+    contracts are reported as warnings and forwarded to the client in the
+    compatibility warning header; the conversion report then makes its own
+    preservation decision.  Only a construct the translator cannot process at
+    all sets ``should_fail``.
     """
-
-    if mode not in VALID_MODES:
-        raise ValueError("Unknown compatibility mode: %s" % mode)
 
     user_agent = _header_value(headers, "user-agent")
     cli_version = _parse_cli_version(user_agent)
@@ -1453,7 +1440,7 @@ def audit_anthropic_request(
     raw_betas = _header_value(headers, "anthropic-beta")
     betas = normalize_anthropic_betas(raw_betas)
     profile = _make_anthropic_profile(cli_version, anthropic_version, betas)
-    collector = _WarningCollector(mode, cli_version)
+    collector = _WarningCollector(cli_version)
 
     if not hasattr(headers, "items") or not callable(getattr(headers, "items", None)):
         collector.add("headers.invalid_type", "/headers", _json_type(headers), ("object",))
@@ -1464,7 +1451,6 @@ def audit_anthropic_request(
             _json_type(user_agent),
             ("string",),
             evidence={"cli_version": cli_version},
-            fail_in_lossless=False,
         )
 
     if raw_anthropic_version is _MISSING:
@@ -1508,18 +1494,17 @@ def audit_anthropic_request(
         )
     if not unknown_betas and tuple(betas) not in KNOWN_ANTHROPIC_BETA_SETS:
         # A previously unseen subset introduces no unrepresentable input by
-        # itself, but beta-set drift should remain visible for every mode.
+        # itself, but beta-set drift should remain visible.
         collector.add(
             "anthropic.beta_set_unknown",
             "/headers/anthropic-beta",
             "missing" if not betas else "string",
             ("string",),
             evidence={"normalised_beta_set": betas},
-            fail_in_lossless=False,
         )
 
     _audit_request_payload(payload, collector, baseline_manifest, cli_version)
-    return CompatibilityAudit(mode=mode, profile=profile, warnings=collector.warnings)
+    return CompatibilityAudit(profile=profile, warnings=collector.warnings)
 
 
 def _audit_responses_item_into(
@@ -1632,28 +1617,25 @@ def _audit_responses_item_into(
 def audit_responses_item(
     item: Any,
     *,
-    mode: str = MODE_COMPATIBILITY,
     path: str = "/output/0",
 ) -> CompatibilityAudit:
     """Audit a Responses input/output item discriminator.
 
-    Unknown items are lifecycle-unsafe and therefore fail closed in both
-    modes.  No item payload values are included in the warning.
+    Unknown items are lifecycle-unsafe and therefore fail closed.  No item
+    payload values are included in the warning.
     """
 
-    collector = _WarningCollector(mode, "responses-v1")
+    collector = _WarningCollector("responses-v1")
     _audit_responses_item_into(item, path, collector)
-    return CompatibilityAudit(mode=mode, profile=_responses_profile(), warnings=collector.warnings)
+    return CompatibilityAudit(profile=_responses_profile(), warnings=collector.warnings)
 
 
 def audit_responses_event(
     event: Any,
-    *,
-    mode: str = MODE_COMPATIBILITY,
 ) -> CompatibilityAudit:
     """Audit a Responses SSE event and any directly embedded output items."""
 
-    collector = _WarningCollector(mode, "responses-v1")
+    collector = _WarningCollector("responses-v1")
     if not isinstance(event, Mapping):
         collector.add(
             "responses.invalid_event_type",
@@ -1662,7 +1644,7 @@ def audit_responses_event(
             ("object",),
             fail_always=True,
         )
-        return CompatibilityAudit(mode=mode, profile=_responses_profile(), warnings=collector.warnings)
+        return CompatibilityAudit(profile=_responses_profile(), warnings=collector.warnings)
 
     event_type = event.get("type", _MISSING)
     if not isinstance(event_type, str) or event_type not in KNOWN_RESPONSES_EVENT_TYPES:
@@ -1672,7 +1654,7 @@ def audit_responses_event(
         # costs incremental delivery rather than model output. Copilot's
         # /responses is an evolving upstream; rejecting every additive event
         # would take the whole Anthropic compatibility path down on someone
-        # else's deploy. ``lossless_required`` still refuses.
+        # else's deploy.
         collector.add(
             "responses.unknown_event",
             "/events/type",
@@ -1750,7 +1732,7 @@ def audit_responses_event(
                 collector,
                 "responses.unknown_content_field",
             )
-    return CompatibilityAudit(mode=mode, profile=_responses_profile(), warnings=collector.warnings)
+    return CompatibilityAudit(profile=_responses_profile(), warnings=collector.warnings)
 
 
 # Descriptive aliases for callers that use the client/protocol name first.
@@ -1760,8 +1742,6 @@ audit_response_item = audit_responses_item
 
 
 __all__ = [
-    "MODE_COMPATIBILITY",
-    "MODE_LOSSLESS_REQUIRED",
     "KNOWN_CLAUDE_CLI_VERSIONS",
     "CLAUDE_CLI_TOOL_CONTRACT_BASELINES",
     "KNOWN_ANTHROPIC_VERSION",

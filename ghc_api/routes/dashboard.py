@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 
 from flask import Blueprint, Response, jsonify, render_template, request
 
-from ..anthropic_responses import VALID_MODES, WIRE_PROFILES
+from ..anthropic_responses import WIRE_PROFILES
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support, model_mappings
@@ -71,7 +71,6 @@ def _runtime_config() -> Dict[str, Any]:
         "disable_onedrive_access": state.disable_onedrive_access,
         "enable_auth": state.enable_auth,
         "anthropic_responses_compat_enabled": state.anthropic_responses_compat_enabled,
-        "anthropic_responses_compat_mode": state.anthropic_responses_compat_mode,
         "anthropic_responses_wire_profile": state.anthropic_responses_wire_profile,
         "anthropic_responses_model_profiles": state.anthropic_responses_model_profiles,
         "model_mappings": {
@@ -226,7 +225,6 @@ def api_runtime_config_update():
         "log_webiq_requests",
         "disable_onedrive_access",
         "anthropic_responses_compat_enabled",
-        "anthropic_responses_compat_mode",
         "anthropic_responses_wire_profile",
         "anthropic_responses_model_profiles",
         "model_mappings",
@@ -314,17 +312,6 @@ def api_runtime_config_update():
                 payload["anthropic_responses_compat_enabled"],
                 "anthropic_responses_compat_enabled",
             )
-
-        if "anthropic_responses_compat_mode" in payload:
-            mode = _validate_string(
-                payload["anthropic_responses_compat_mode"],
-                "anthropic_responses_compat_mode",
-                allow_empty=False,
-            )
-            if mode not in VALID_MODES:
-                choices = ", ".join(sorted(VALID_MODES))
-                raise ValueError(f"'anthropic_responses_compat_mode' must be one of: {choices}")
-            state.anthropic_responses_compat_mode = mode
 
         if "anthropic_responses_wire_profile" in payload:
             state.anthropic_responses_wire_profile = _validate_wire_profile(

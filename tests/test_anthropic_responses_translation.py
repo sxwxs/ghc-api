@@ -5,7 +5,6 @@ import unittest
 
 from ghc_api.anthropic_responses import (
     MAX_JSON_NESTING_DEPTH,
-    MODE_LOSSLESS_REQUIRED,
     AnthropicResponsesConversionError,
     IdentifierCodec,
     StrictJSONError,
@@ -298,12 +297,6 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                     and record.disposition == "approximation"
                     for record in result.report.records
                 ))
-        with self.assertRaises(AnthropicResponsesConversionError):
-            convert_anthropic_to_responses(
-                payload,
-                wire_profile="copilot_responses_lite",
-                mode=MODE_LOSSLESS_REQUIRED,
-                )
         malformed = copy.deepcopy(payload)
         malformed["tools"][0]["input_schema"] = {"type": "object"}
         with self.assertRaises(AnthropicResponsesConversionError):
@@ -496,34 +489,116 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
     def test_tool_result_error_is_explicit_approximation(self):
         payload = {
             "model": "gpt-test",
-            "messages": [{"role": "user", "content": [{
-                "type": "tool_result", "tool_use_id": "call_1", "content": "failed", "is_error": True,
-            }]}],
+            "messages": [
+                {"role": "assistant", "content": [{
+                    "type": "tool_use", "id": "call_1", "name": "run", "input": {},
+                }]},
+                {"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": "call_1", "content": "failed", "is_error": True,
+                }]},
+            ],
         }
         result = convert_anthropic_to_responses(payload)
         self.assertTrue(any(w["path"].endswith("/is_error") for w in result.report.warnings))
-        envelope = json.loads(result.payload["input"][0]["output"])
+        envelope = json.loads(result.payload["input"][1]["output"])
         self.assertEqual(envelope, {
             "ghc_anthropic_tool_result": {
                 "is_error": True,
                 "content": "failed",
             }
         })
-        with self.assertRaises(AnthropicResponsesConversionError):
-            convert_anthropic_to_responses(payload, mode=MODE_LOSSLESS_REQUIRED)
 
-    def test_lossless_mode_rejects_unknown_and_top_k(self):
+    def test_orphaned_tool_result_is_dropped_locally_with_a_warning(self):
+        """A tool_result whose tool_use is not in the request would make the
+        whole upstream call fail.  The converter sees the entire history, so it
+        is dropped here and reported, instead of costing a round trip and a
+        permanently stuck conversation."""
+        payload = {
+            "model": "gpt-test",
+            "messages": [
+                {"role": "assistant", "content": [{
+                    "type": "tool_use", "id": "call_live", "name": "run", "input": {},
+                }]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "call_live", "content": "kept"},
+                    {"type": "tool_result", "tool_use_id": "call_truncated", "content": "STALE-OUTPUT"},
+                    {"type": "text", "text": "carry on"},
+                ]},
+            ],
+        }
+        result = convert_anthropic_to_responses(payload)
+        call_ids = [
+            item["call_id"] for item in result.payload["input"]
+            if item["type"] == "function_call_output"
+        ]
+        self.assertEqual(call_ids, ["call_live"])
+        self.assertNotIn("STALE-OUTPUT", json.dumps(result.payload))
+        # The surrounding turn is unaffected.
+        self.assertIn("carry on", json.dumps(result.payload))
+        warning = next(
+            item for item in result.report.warnings
+            if item["path"] == "/messages/1/content/1"
+        )
+        self.assertEqual(warning["action"], "approximation")
+        self.assertEqual(result.report.unaccounted_paths, [])
+
+    def test_tool_description_is_never_forwarded_as_an_empty_string(self):
+        """Copilot's /responses rejects a tool whose description is present but
+        empty; a description-less Anthropic tool is legal and must stay legal."""
+        def declared(tool):
+            payload = {
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [tool],
+            }
+            result = convert_anthropic_to_responses(payload)
+            forwarded = next(
+                item for item in result.payload["input"]
+                if item.get("type") == "additional_tools"
+            )["tools"][0]
+            return forwarded, result.report
+
+        schema = {"type": "object", "properties": {}}
+        forwarded, report = declared({"name": "mcp__x__do", "input_schema": schema})
+        self.assertNotIn("description", forwarded)
+        self.assertEqual(report.warnings, [])
+
+        for blank in ("", "   "):
+            with self.subTest(blank=blank):
+                forwarded, report = declared(
+                    {"name": "do", "description": blank, "input_schema": schema}
+                )
+                self.assertEqual(forwarded["description"], "Tool: do.")
+                self.assertEqual(
+                    [item["path"] for item in report.warnings], ["/tools/0/description"]
+                )
+
+        forwarded, report = declared(
+            {"name": "do", "description": "Run it", "input_schema": schema}
+        )
+        self.assertEqual(forwarded["description"], "Run it")
+        self.assertEqual(report.warnings, [])
+
+    def test_unknown_field_and_top_k_are_reported_as_warnings(self):
         payload = {
             "model": "gpt-test",
             "messages": [{"role": "user", "content": "hello"}],
             "top_k": 12,
             "future_field": {"new": True},
         }
-        with self.assertRaises(AnthropicResponsesConversionError) as raised:
-            convert_anthropic_to_responses(payload, mode=MODE_LOSSLESS_REQUIRED)
-        paths = {record.source_path for record in raised.exception.report.records}
-        self.assertIn("/top_k", paths)
-        self.assertIn("/future_field/new", paths)
+        result = convert_anthropic_to_responses(payload)
+        # Neither field reaches the wire, and neither is dropped silently.
+        self.assertNotIn("top_k", result.payload)
+        self.assertNotIn("future_field", result.payload)
+        records = {
+            record.source_path: record.disposition
+            for record in result.report.records
+        }
+        self.assertEqual(records.get("/top_k"), "unsupported")
+        self.assertEqual(records.get("/future_field/new"), "unsupported")
+        warned = {warning["path"] for warning in result.report.warnings}
+        self.assertIn("/top_k", warned)
+        self.assertIn("/future_field/new", warned)
 
     def test_large_conversion_report_scales_linearly(self):
         payload = {
@@ -572,7 +647,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         self.assertEqual(hashed_first.decode(first_encoded), unsafe)
         self.assertEqual(hashed_first.decode(colliding_literal), generated)
 
-    def test_lossless_mode_rejects_fields_not_represented_on_client_wire(self):
+    def test_fields_not_represented_on_client_wire_stay_out_of_the_report(self):
         payload = {
             "model": "gpt-test",
             "messages": [{
@@ -588,22 +663,21 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
                 }],
             }],
         }
-        with self.assertRaises(AnthropicResponsesConversionError) as raised:
-            convert_anthropic_to_responses(
-                payload,
-                wire_profile="public_responses",
-                mode=MODE_LOSSLESS_REQUIRED,
-            )
-        self.assertEqual(raised.exception.report.warnings, [])
-        self.assertNotIn(
-            "PRIVATE-TITLE-SENTINEL",
-            json.dumps(raised.exception.report.to_dict()),
-        )
-        compatible = convert_anthropic_to_responses(
+        result = convert_anthropic_to_responses(
             payload,
             wire_profile="public_responses",
         )
-        self.assertEqual(compatible.report.warnings, [])
+        # The title has no Responses equivalent: it is accounted for as a
+        # sidecar record, but its value never enters the report.
+        self.assertEqual(result.report.warnings, [])
+        self.assertIn(
+            "/messages/0/content/0/title",
+            {record.source_path for record in result.report.records},
+        )
+        self.assertNotIn(
+            "PRIVATE-TITLE-SENTINEL",
+            json.dumps(result.report.to_dict()),
+        )
 
     def test_metadata_json_types_are_accounted_in_sidecar(self):
         base = {
@@ -716,7 +790,7 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
             {record.source_path for record in raised.exception.report.records},
         )
 
-    def test_lossless_usage_extension_requires_sidecar(self):
+    def test_usage_extension_is_accounted_as_sidecar(self):
         response = {
             "id": "resp_usage",
             "model": "gpt-test",
@@ -728,12 +802,19 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
                 "total_tokens": 3,
             },
         }
-        with self.assertRaises(AnthropicResponsesConversionError):
-            convert_responses_to_anthropic(
-                response,
-                original_model="claude",
-                mode=MODE_LOSSLESS_REQUIRED,
-            )
+        result = convert_responses_to_anthropic(
+            response,
+            original_model="claude",
+        )
+        self.assertEqual(result.response["usage"]["input_tokens"], 1)
+        self.assertEqual(result.response["usage"]["output_tokens"], 2)
+        # total_tokens is derivable and has no Anthropic field: recorded, not
+        # dropped, and not a client-visible warning.
+        self.assertIn(
+            "/usage/total_tokens",
+            {record.source_path for record in result.report.records},
+        )
+        self.assertEqual(result.report.warnings, [])
 
     def test_nonstream_stop_sequence(self):
         response = self.terminal_response()
@@ -953,12 +1034,6 @@ class AnthropicResponsesResponseTranslationTests(unittest.TestCase):
             warning["path"] == "/output/0/input"
             for warning in result.report.warnings
         ))
-        with self.assertRaises(AnthropicResponsesConversionError):
-            convert_responses_to_anthropic(
-                response,
-                original_model="claude",
-                mode=MODE_LOSSLESS_REQUIRED,
-            )
 
     def test_error_mapping(self):
         mapped = anthropic_error_from_responses({"error": {"message": "bad", "code": "x"}}, 429)

@@ -413,7 +413,6 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             name: getattr(state, name)
             for name in (
                 "anthropic_responses_compat_enabled",
-                "anthropic_responses_compat_mode",
                 "anthropic_responses_wire_profile",
                 "enable_auth",
                 "max_connection_retries",
@@ -423,7 +422,6 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             )
         }
         state.anthropic_responses_compat_enabled = True
-        state.anthropic_responses_compat_mode = "compatibility"
         state.anthropic_responses_wire_profile = "copilot_responses_lite"
         state.enable_auth = False
         state.max_connection_retries = 0
@@ -624,6 +622,70 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         cached = next(iter(self.cache.cache.values()))
         self.assertNotIn("private query", json.dumps(cached["upstream_response_body"]))
 
+    def test_description_less_tool_is_not_forwarded_with_an_empty_description(self):
+        payload = self._request_payload(stream=False)
+        payload["tools"] = [
+            {"name": "mcp__srv__run", "input_schema": {"type": "object"}},
+            {"name": "blank", "description": " ", "input_schema": {"type": "object"}},
+        ]
+        with mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=_FakeResponse(self._terminal_response()),
+        ) as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=payload,
+                headers={"user-agent": "claude-cli/2.1.207"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = post.call_args.kwargs["json"]
+        tools = next(
+            item for item in forwarded["input"]
+            if item.get("type") == "additional_tools"
+        )["tools"]
+        self.assertNotIn("description", tools[0])
+        self.assertEqual(tools[1]["description"], "Tool: blank.")
+        self.assertNotIn('"description": ""', json.dumps(forwarded))
+
+    def test_orphaned_tool_result_never_reaches_upstream(self):
+        payload = self._request_payload(stream=False)
+        payload["messages"] = [
+            {"role": "user", "content": "run it"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_live", "name": "Bash", "input": {}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_live", "content": "ok"},
+                {"type": "tool_result", "tool_use_id": "toolu_truncated", "content": "stale"},
+            ]},
+        ]
+        with mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=_FakeResponse(self._terminal_response()),
+        ) as post:
+            response = self.client.post(
+                "/v1/messages",
+                json=payload,
+                headers={"user-agent": "claude-cli/2.1.207"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        forwarded = post.call_args.kwargs["json"]
+        self.assertEqual(
+            [
+                item["call_id"] for item in forwarded["input"]
+                if item.get("type") == "function_call_output"
+            ],
+            ["toolu_live"],
+        )
+        self.assertIn(
+            "conversion.approximation",
+            response.headers.get("X-GHC-Compatibility-Warnings", ""),
+        )
+
     def test_malformed_json_schema_is_rejected_before_upstream(self):
         payload = self._request_payload(stream=False)
         payload["output_config"] = {
@@ -639,8 +701,12 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         post.assert_not_called()
         self.assertIn("object schema", response.get_json()["error"]["message"])
 
-    def test_lossless_mode_rejects_unrepresented_response_fields(self):
-        anthropic_module.state.anthropic_responses_compat_mode = "lossless_required"
+    def test_response_metadata_without_a_client_field_is_not_an_error(self):
+        """A native web_search_call has no Anthropic representation, and a
+        Responses envelope (status/created_at/item ids) has no client field at
+        all.  Neither may fail the answer: the message is delivered and the
+        approximation is reported in the warning header.
+        """
         upstream_body = self._terminal_response()
         upstream_body["output"] = [
             {
@@ -675,14 +741,52 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                     ))),
                 },
             )
-        self.assertEqual(response.status_code, 502)
-        self.assertIn("cannot be represented losslessly", response.get_data(as_text=True))
         post.assert_called_once()
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(
+            body["content"], [{"type": "text", "text": "hello back"}]
+        )
+        # The search is not invented as an Anthropic block, but it is on record.
+        cached = next(iter(self.cache.cache.values()))
+        self.assertTrue(any(
+            record["source_path"] == "/output/0"
+            and record["disposition"] == "sidecar"
+            for record in cached["conversion_report"]["response"]["records"]
+        ))
+
+    def test_clean_response_round_trips_without_warnings(self):
+        with mock.patch.object(
+            anthropic_module.requests,
+            "post",
+            return_value=_FakeResponse(self._terminal_response()),
+        ):
+            response = self.client.post(
+                "/v1/messages",
+                json=self._request_payload(stream=False),
+                headers={
+                    "User-Agent": "claude-cli/2.1.207 (fixture)",
+                    "Anthropic-Version": "2023-06-01",
+                    "Anthropic-Beta": ",".join(sorted((
+                        "claude-code-20250219",
+                        "context-1m-2025-08-07",
+                        "context-management-2025-06-27",
+                        "effort-2025-11-24",
+                        "interleaved-thinking-2025-05-14",
+                        "mid-conversation-system-2026-04-07",
+                        "prompt-caching-scope-2026-01-05",
+                        "redact-thinking-2026-02-12",
+                        "thinking-token-count-2026-05-13",
+                    ))),
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.headers.get("X-GHC-Compatibility-Warnings"))
 
     def test_nonstream_unknown_status_fails_closed(self):
         """Unlike an unknown stream event, an unknown status has no terminal
         event left to reconcile against: it is what says whether the output is
-        complete, truncated, or failed. It must stay a hard 502 in both modes.
+        complete, truncated, or failed. It must stay a hard 502.
         """
         upstream_body = {**self._terminal_response(), "status": "future-status-private"}
         with mock.patch.object(
@@ -1333,9 +1437,8 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             json.dumps(cached["compatibility_warnings"], ensure_ascii=False),
         )
 
-    def test_lossless_mode_rejects_unknown_beta_before_upstream_request(self):
+    def test_unknown_beta_warns_but_still_serves_the_request(self):
         unknown_beta = "future-private-beta-fixture-value"
-        anthropic_module.state.anthropic_responses_compat_mode = "lossless_required"
         with mock.patch.object(
             anthropic_module.requests,
             "post",
@@ -1351,8 +1454,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.get_json()["error"]["type"], "invalid_request_error")
+        self.assertEqual(response.status_code, 200)
         self.assertIn(
             "anthropic.beta_unknown",
             response.headers.get("X-GHC-Compatibility-Warnings", ""),
@@ -1362,7 +1464,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             unknown_beta,
             response.headers.get("X-GHC-Compatibility-Warnings", ""),
         )
-        post.assert_not_called()
+        post.assert_called_once()
 
     def test_completed_reasoning_is_carried_by_client_and_restored_next_turn(self):
         opaque_reasoning = "opaque-encrypted-fixture"

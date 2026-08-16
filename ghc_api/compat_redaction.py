@@ -94,7 +94,7 @@ def redact_responses_value_for_cache(value: Any) -> Any:
 def redact_responses_event_for_cache(event: Any) -> Any:
     """Return a safe dashboard projection for one upstream SSE event."""
 
-    audit = audit_responses_event(event, mode="compatibility")
+    audit = audit_responses_event(event)
     if audit.warnings:
         event_type = event.get("type") if isinstance(event, dict) else None
         result = redacted_value(event, "unknown, invalid, or drifted Responses event")
@@ -137,7 +137,7 @@ def redact_responses_event_for_cache(event: Any) -> Any:
 
 
 def redact_responses_item_for_cache(item: Any) -> Any:
-    audit = audit_responses_item(item, mode="compatibility")
+    audit = audit_responses_item(item)
     if audit.warnings:
         return redacted_value(item, "unknown, invalid, or drifted Responses item")
     return redact_responses_value_for_cache(item)

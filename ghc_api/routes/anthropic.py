@@ -26,7 +26,6 @@ from ..api_helpers import (
     count_tokens,
 )
 from ..anthropic_responses import (
-    MODE_COMPATIBILITY,
     AnthropicResponsesConversionError,
     StrictJSONError,
     anthropic_error_from_responses,
@@ -1256,7 +1255,6 @@ def _make_anthropic_responses_stream_handler(
     conversion: Any,
     warnings: List[Dict[str, Any]],
     request_audit: Any,
-    mode: str,
 ) -> AnthropicResponsesStreamHandler:
     return AnthropicResponsesStreamHandler(
         response=response,
@@ -1275,7 +1273,6 @@ def _make_anthropic_responses_stream_handler(
         conversion=conversion,
         compatibility_warnings=warnings,
         compatibility_audit=request_audit.to_dict(),
-        mode=mode,
         max_raw_capture_bytes=min(
             16 * 1024 * 1024,
             max(
@@ -1307,7 +1304,6 @@ def _stream_pending_anthropic_responses_request(
     conversion: Any,
     warnings: List[Dict[str, Any]],
     request_audit: Any,
-    mode: str,
 ) -> Response:
     """Commit an Anthropic SSE response while upstream headers are pending.
 
@@ -1434,7 +1430,6 @@ def _stream_pending_anthropic_responses_request(
                 conversion=conversion,
                 warnings=warnings,
                 request_audit=request_audit,
-                mode=mode,
             )
             handler._cache_seeded = True
             yield from handler._generate()
@@ -1579,14 +1574,10 @@ def handle_responses_anthropic_request(
     """
     request_headers = request_headers or {}
     original_request_body = original_request_body or copy.deepcopy(anthropic_payload)
-    mode = str(getattr(
-        state, "anthropic_responses_compat_mode", MODE_COMPATIBILITY
-    ))
     wire_profile = anthropic_responses_wire_profile(translated_model)
     request_audit = audit_anthropic_request(
         request_headers,
         original_request_body,
-        mode=mode,
         baseline_manifest={"profiles": CLAUDE_CLI_TOOL_CONTRACT_BASELINES},
     )
     warnings: List[Dict[str, Any]] = _merge_compatibility_warnings(
@@ -1621,7 +1612,6 @@ def handle_responses_anthropic_request(
         conversion = convert_anthropic_to_responses(
             anthropic_payload,
             wire_profile=wire_profile,
-            mode=mode,
             session_id=session_id,
             tenant_id=user_id,
         )
@@ -1767,7 +1757,6 @@ def handle_responses_anthropic_request(
                         conversion=conversion,
                         warnings=warnings,
                         request_audit=request_audit,
-                        mode=mode,
                     )
             else:
                 response = requests.post(
@@ -1891,7 +1880,6 @@ def handle_responses_anthropic_request(
             conversion=conversion,
             warnings=warnings,
             request_audit=request_audit,
-            mode=mode,
         )
         _log_compatibility_warnings(request_id, warnings)
         return _set_compatibility_headers(handler.stream(), warnings)
@@ -1949,7 +1937,7 @@ def handle_responses_anthropic_request(
         # A status this build does not know is not recoverable the way an
         # unknown *stream* event is: this body is the terminal answer, and the
         # status is what says whether the output is complete, truncated, or
-        # failed. Reject rather than guess, in both modes.
+        # failed. Reject rather than guess.
         warnings = _merge_compatibility_warnings(
             warnings,
             [_compatibility_warning(
@@ -1988,7 +1976,6 @@ def handle_responses_anthropic_request(
             "sequence_number": 0,
             "response": upstream_response,
         },
-        mode=mode,
     )
     warnings = _merge_compatibility_warnings(warnings, response_audit.warnings)
     combined_audit = {
@@ -2063,7 +2050,6 @@ def handle_responses_anthropic_request(
             name_codec=conversion.name_codec,
             call_id_codec=conversion.call_id_codec,
             stop_sequences=conversion.stop_sequences,
-            mode=mode,
         )
     except AnthropicResponsesConversionError as exc:
         warnings = _merge_compatibility_warnings(warnings, exc.report.warnings)

@@ -6,8 +6,6 @@ from flask import Flask, request
 
 from ghc_api.compat_profiles import (
     KNOWN_ANTHROPIC_BETAS,
-    MODE_COMPATIBILITY,
-    MODE_LOSSLESS_REQUIRED,
     audit_anthropic_request,
     audit_responses_event,
     audit_responses_item,
@@ -252,35 +250,31 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         self.assertEqual(audit.warnings, [])
 
     def test_unknown_cli_version_always_warns_but_never_fails_by_itself(self):
-        for mode in (MODE_COMPATIBILITY, MODE_LOSSLESS_REQUIRED):
-            audit = audit_anthropic_request(known_headers("2.2.0"), known_payload(), mode=mode)
-            warning = next(item for item in audit.warnings if item["code"] == "claude_cli.unknown_version")
-            with self.subTest(mode=mode):
-                self.assertEqual(warning["version"], "2.2.0")
-                self.assertEqual(warning["action"], "warn")
-                self.assertFalse(audit.should_fail)
+        audit = audit_anthropic_request(known_headers("2.2.0"), known_payload())
+        warning = next(item for item in audit.warnings if item["code"] == "claude_cli.unknown_version")
+        self.assertEqual(warning["version"], "2.2.0")
+        self.assertEqual(warning["action"], "warn")
+        self.assertFalse(audit.should_fail)
 
-    def test_unknown_beta_and_anthropic_version_are_mode_aware(self):
+    def test_unknown_beta_and_anthropic_version_warn_without_values(self):
         headers = known_headers()
         headers["Anthropic-Version"] = "2099-01-01"
         headers["Anthropic-Beta"] += ",future-private-beta"
-        compatibility = audit_anthropic_request(headers, known_payload(), mode=MODE_COMPATIBILITY)
-        lossless = audit_anthropic_request(headers, known_payload(), mode=MODE_LOSSLESS_REQUIRED)
+        audit = audit_anthropic_request(headers, known_payload())
 
         expected_codes = {"anthropic.version_unknown", "anthropic.beta_unknown"}
-        self.assertTrue(expected_codes.issubset({item["code"] for item in compatibility.warnings}))
-        self.assertFalse(compatibility.should_fail)
-        self.assertTrue(lossless.should_fail)
+        self.assertTrue(expected_codes.issubset({item["code"] for item in audit.warnings}))
+        self.assertFalse(audit.should_fail)
         self.assertTrue(
             all(
-                item["action"] == "reject"
-                for item in lossless.warnings
+                item["action"] == "warn"
+                for item in audit.warnings
                 if item["code"] in expected_codes
             )
         )
         # Header protocol values influence only the fingerprint/profile.  The
         # warning itself must not disclose a newly introduced beta name.
-        warning_json = json.dumps(lossless.warnings, sort_keys=True)
+        warning_json = json.dumps(audit.warnings, sort_keys=True)
         self.assertNotIn("future-private-beta", warning_json)
         self.assertNotIn("2099-01-01", warning_json)
 
@@ -292,29 +286,25 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         self.assertEqual(audit_anthropic_request(headers, known_payload()).warnings, [])
 
         headers["Anthropic-Beta"] = "claude-code-20250219"
-        audit = audit_anthropic_request(headers, known_payload(), mode=MODE_LOSSLESS_REQUIRED)
+        audit = audit_anthropic_request(headers, known_payload())
         warning = next(
             item for item in audit.warnings if item["code"] == "anthropic.beta_set_unknown"
         )
         self.assertEqual(warning["action"], "warn")
         self.assertFalse(audit.should_fail)
 
-    def test_unknown_fields_types_and_enums_are_structured_and_mode_aware(self):
+    def test_unknown_fields_types_and_enums_are_structured_and_value_free(self):
         payload = known_payload()
         payload["future_option"] = "DO-NOT-LOG-this-body-value"
         payload["max_tokens"] = "32000"
         payload["thinking"] = {"type": "future-thinking-kind"}
 
         compatibility = audit_anthropic_request(known_headers(), payload)
-        lossless = audit_anthropic_request(
-            known_headers(), payload, mode=MODE_LOSSLESS_REQUIRED
-        )
         codes = {item["code"] for item in compatibility.warnings}
         self.assertIn("request.unknown_field", codes)
         self.assertIn("request.invalid_type", codes)
         self.assertIn("request.unknown_enum", codes)
         self.assertFalse(compatibility.should_fail)
-        self.assertTrue(lossless.should_fail)
 
         required_warning_fields = {
             "code", "path", "types", "observed_type", "expected_types",
@@ -327,7 +317,7 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         self.assertNotIn("DO-NOT-LOG", serialized)
         self.assertNotIn("future-thinking-kind", serialized)
 
-    def test_missing_top_level_required_fields_warn_or_reject_without_values(self):
+    def test_missing_top_level_required_fields_warn_without_values(self):
         for field in ("model", "messages", "max_tokens"):
             payload = known_payload()
             removed = payload.pop(field)
@@ -337,23 +327,11 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
                 if item["code"] == "request.missing_required_field"
                 and item["path"] == "/" + field
             )
-            with self.subTest(field=field, mode=MODE_COMPATIBILITY):
+            with self.subTest(field=field):
                 self.assertEqual(warning["observed_type"], "missing")
                 self.assertEqual(warning["action"], "warn")
                 self.assertFalse(compatibility.should_fail)
                 self.assertNotIn(str(removed), json.dumps(compatibility.warnings))
-
-            lossless = audit_anthropic_request(
-                known_headers(), payload, mode=MODE_LOSSLESS_REQUIRED
-            )
-            with self.subTest(field=field, mode=MODE_LOSSLESS_REQUIRED):
-                self.assertTrue(lossless.should_fail)
-                self.assertTrue(any(
-                    item["code"] == "request.missing_required_field"
-                    and item["path"] == "/" + field
-                    and item["action"] == "reject"
-                    for item in lossless.warnings
-                ))
 
     def test_missing_tool_and_content_fields_are_discriminator_aware(self):
         private = "PRIVATE-REQUIRED-VALUE"
@@ -377,14 +355,11 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
                 item for item in compatibility.warnings
                 if item["code"] == "content_block.missing_required_field"
             ]
-            with self.subTest(block=block["type"], mode=MODE_COMPATIBILITY):
+            with self.subTest(block=block["type"]):
                 self.assertEqual({item["path"] for item in warnings}, expected_paths)
                 self.assertTrue(all(item["action"] == "warn" for item in warnings))
                 self.assertNotIn(private, json.dumps(compatibility.warnings))
-            lossless = audit_anthropic_request(
-                known_headers(), payload, mode=MODE_LOSSLESS_REQUIRED
-            )
-            self.assertTrue(lossless.should_fail)
+                self.assertFalse(compatibility.should_fail)
 
         payload = known_payload()
         payload["tools"] = [{"description": private}]
@@ -399,9 +374,6 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         )
         self.assertFalse(compatibility.should_fail)
         self.assertNotIn(private, json.dumps(compatibility.warnings))
-        self.assertTrue(audit_anthropic_request(
-            known_headers(), payload, mode=MODE_LOSSLESS_REQUIRED
-        ).should_fail)
 
     def test_missing_source_fields_are_reported_without_source_values(self):
         private = "PRIVATE-REQUIRED-VALUE"
@@ -429,9 +401,6 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
                 self.assertEqual({item["path"] for item in warnings}, expected)
                 self.assertFalse(compatibility.should_fail)
                 self.assertNotIn(private, json.dumps(compatibility.warnings))
-                self.assertTrue(audit_anthropic_request(
-                    known_headers(), payload, mode=MODE_LOSSLESS_REQUIRED
-                ).should_fail)
 
     def test_suspicious_unknown_field_key_is_redacted_from_warning_path(self):
         identity = "user@example.invalid"
@@ -442,7 +411,7 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         self.assertNotIn(identity, serialized)
         self.assertEqual(audit.warnings[0]["path"], "/<redacted-key>")
 
-    def test_unknown_content_block_and_context_edit_fail_lossless(self):
+    def test_unknown_content_block_and_context_edit_warn_without_values(self):
         payload = known_payload()
         payload["messages"][0]["content"].append(
             {"type": "future_private_block", "private_body": "never log me"}
@@ -451,15 +420,11 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
             "edits": [{"type": "future_private_edit", "keep": "all"}]
         }
         compatibility = audit_anthropic_request(known_headers(), payload)
-        lossless = audit_anthropic_request(
-            known_headers(), payload, mode=MODE_LOSSLESS_REQUIRED
-        )
         codes = {item["code"] for item in compatibility.warnings}
         self.assertIn("content_block.unknown_type", codes)
         self.assertIn("context_edit.unknown_type", codes)
         self.assertFalse(compatibility.should_fail)
-        self.assertTrue(lossless.should_fail)
-        serialized = json.dumps(lossless.warnings, sort_keys=True)
+        serialized = json.dumps(compatibility.warnings, sort_keys=True)
         self.assertNotIn("future_private_block", serialized)
         self.assertNotIn("future_private_edit", serialized)
         self.assertNotIn("never log me", serialized)
@@ -647,13 +612,6 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         self.assertEqual(warning["path"], "/tools/0")
         self.assertEqual(warning["action"], "warn")
         self.assertNotIn("PRIVATE CONTRACT CHANGE", json.dumps(compatibility.warnings))
-        lossless = audit_anthropic_request(
-            known_headers(),
-            payload,
-            mode=MODE_LOSSLESS_REQUIRED,
-            baseline_manifest=baseline,
-        )
-        self.assertTrue(lossless.should_fail)
 
     def test_warning_order_and_deduplication_are_stable(self):
         headers_a = known_headers()
@@ -677,10 +635,6 @@ class ClaudeCompatibilityProfileTests(unittest.TestCase):
         encoded = json.dumps(result, sort_keys=True)
         self.assertIn('"allowed": true', encoded)
         self.assertIn('"profile"', encoded)
-
-    def test_invalid_mode_is_rejected(self):
-        with self.assertRaises(ValueError):
-            audit_anthropic_request(known_headers(), known_payload(), mode="strict")
 
 
 class ResponsesCompatibilityAuditTests(unittest.TestCase):
@@ -706,7 +660,7 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
             "item": item,
         }
         self.assertEqual(
-            audit_responses_event(event, mode=MODE_LOSSLESS_REQUIRED).warnings,
+            audit_responses_event(event).warnings,
             [],
         )
 
@@ -720,7 +674,6 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                 expected_path = "/events/" + field
                 with self.subTest(
                     event_type=event_type, field=field,
-                    mode=MODE_COMPATIBILITY,
                 ):
                     warning = next(
                         item for item in compatibility.warnings
@@ -731,22 +684,6 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                     self.assertEqual(warning["action"], "warn")
                     self.assertFalse(compatibility.should_fail)
                     self.assertNotIn(private, json.dumps(compatibility.warnings))
-
-                lossless = audit_responses_event(
-                    event, mode=MODE_LOSSLESS_REQUIRED
-                )
-                with self.subTest(
-                    event_type=event_type, field=field,
-                    mode=MODE_LOSSLESS_REQUIRED,
-                ):
-                    self.assertTrue(lossless.should_fail)
-                    self.assertTrue(any(
-                        item["code"] == "responses.missing_event_field"
-                        and item["path"] == expected_path
-                        and item["action"] == "reject"
-                        for item in lossless.warnings
-                    ))
-                    self.assertNotIn(private, json.dumps(lossless.warnings))
 
     def test_every_item_type_reports_each_missing_required_field(self):
         private = "PRIVATE-REQUIRED-VALUE"
@@ -761,7 +698,6 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                 expected_path = "/output/0/" + field
                 with self.subTest(
                     item_type=item_type, field=field,
-                    mode=MODE_COMPATIBILITY,
                 ):
                     warning = next(
                         value for value in compatibility.warnings
@@ -772,22 +708,6 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                     self.assertEqual(warning["action"], "warn")
                     self.assertFalse(compatibility.should_fail)
                     self.assertNotIn(private, json.dumps(compatibility.warnings))
-
-                lossless = audit_responses_item(
-                    item, mode=MODE_LOSSLESS_REQUIRED
-                )
-                with self.subTest(
-                    item_type=item_type, field=field,
-                    mode=MODE_LOSSLESS_REQUIRED,
-                ):
-                    self.assertTrue(lossless.should_fail)
-                    self.assertTrue(any(
-                        value["code"] == "responses.missing_item_field"
-                        and value["path"] == expected_path
-                        and value["action"] == "reject"
-                        for value in lossless.warnings
-                    ))
-                    self.assertNotIn(private, json.dumps(lossless.warnings))
 
     def test_response_content_parts_require_their_payload_field(self):
         parts = {
@@ -812,30 +732,20 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                 )
                 self.assertEqual(warning["path"], expected_path)
                 self.assertFalse(compatibility.should_fail)
-                self.assertTrue(audit_responses_item(
-                    item, mode=MODE_LOSSLESS_REQUIRED
-                ).should_fail)
 
-    def test_unknown_event_warns_in_compatibility_and_rejects_in_lossless(self):
+    def test_unknown_event_warns_and_never_leaks_its_payload(self):
         """An unknown event is recoverable (the terminal event carries the full
         output array), unlike an unknown item or content part. It stays a
-        warning in compatibility mode and a rejection in lossless_required, and
-        it never leaks an upstream value either way."""
-        expected = {
-            MODE_COMPATIBILITY: "warn",
-            MODE_LOSSLESS_REQUIRED: "reject",
-        }
-        for mode, action in expected.items():
-            audit = audit_responses_event(
-                {"type": "response.private_future.delta", "delta": "SECRET"}, mode=mode
-            )
-            with self.subTest(mode=mode):
-                self.assertEqual(audit.should_fail, action == "reject")
-                self.assertEqual(audit.warnings[0]["code"], "responses.unknown_event")
-                self.assertEqual(audit.warnings[0]["action"], action)
-                serialized = json.dumps(audit.warnings, sort_keys=True)
-                self.assertNotIn("response.private_future.delta", serialized)
-                self.assertNotIn("SECRET", serialized)
+        warning, and it never leaks an upstream value."""
+        audit = audit_responses_event(
+            {"type": "response.private_future.delta", "delta": "SECRET"}
+        )
+        self.assertFalse(audit.should_fail)
+        self.assertEqual(audit.warnings[0]["code"], "responses.unknown_event")
+        self.assertEqual(audit.warnings[0]["action"], "warn")
+        serialized = json.dumps(audit.warnings, sort_keys=True)
+        self.assertNotIn("response.private_future.delta", serialized)
+        self.assertNotIn("SECRET", serialized)
 
     def test_unknown_event_carrying_an_unknown_item_still_fails_closed(self):
         """Relaxing the event discriminator must not relax its payload."""
@@ -845,7 +755,6 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
                 "output_index": 0,
                 "item": {"type": "private_future_item", "body": "SECRET"},
             },
-            mode=MODE_COMPATIBILITY,
         )
         self.assertTrue(audit.should_fail)
         codes = {warning["code"] for warning in audit.warnings}
@@ -896,9 +805,7 @@ class ResponsesCompatibilityAuditTests(unittest.TestCase):
             compatibility = audit_function(value)
             self.assertFalse(compatibility.should_fail)
             self.assertIn(code, {warning["code"] for warning in compatibility.warnings})
-            lossless = audit_function(value, mode=MODE_LOSSLESS_REQUIRED)
-            self.assertTrue(lossless.should_fail)
-            self.assertNotIn(secret, json.dumps(lossless.warnings))
+            self.assertNotIn(secret, json.dumps(compatibility.warnings))
 
 
 class NormalizationTests(unittest.TestCase):

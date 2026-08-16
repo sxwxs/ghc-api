@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from ..anthropic_responses import (
-    MODE_COMPATIBILITY,
     AnthropicToResponsesResult,
     ConversionReport,
     IdentifierCodec,
@@ -140,14 +139,12 @@ class ResponsesAnthropicEventTranslator:
         name_codec: Optional[IdentifierCodec] = None,
         call_id_codec: Optional[IdentifierCodec] = None,
         stop_sequences: Optional[Sequence[str]] = None,
-        mode: str = MODE_COMPATIBILITY,
     ) -> None:
         self.original_model = original_model
         self.reasoning_model = reasoning_model
         self.name_codec = name_codec or IdentifierCodec()
         self.call_id_codec = call_id_codec or IdentifierCodec()
         self.stop_sequences = list(stop_sequences or [])
-        self.mode = mode
         self.wire_profile = wire_profile
         self.stable_item_ids = wire_profile != "copilot_responses_lite"
 
@@ -719,7 +716,6 @@ class ResponsesAnthropicEventTranslator:
                 name_codec=self.name_codec,
                 call_id_codec=self.call_id_codec,
                 stop_sequences=self.stop_sequences,
-                mode=self.mode,
             )
         except Exception as exc:
             events.extend(self._protocol_error("responses.terminal_conversion_failed", "/response"))
@@ -1081,8 +1077,7 @@ class ResponsesAnthropicEventTranslator:
         # unknown item type or content part is rejected by the auditor and by
         # convert_responses_to_anthropic, a conflicting item index trips
         # item_type_mutation, and a stream with no terminal event trips
-        # stream_ended_without_terminal. lossless_required rejects via the
-        # auditor before reaching here.
+        # stream_ended_without_terminal.
         self._warn(
             "responses.unknown_event_skipped",
             f"/events/{event_type or 'missing'}",
@@ -1111,7 +1106,6 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         conversion: AnthropicToResponsesResult,
         compatibility_warnings: Optional[List[Dict[str, Any]]] = None,
         compatibility_audit: Optional[Dict[str, Any]] = None,
-        mode: str = MODE_COMPATIBILITY,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -1123,11 +1117,9 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
             name_codec=conversion.name_codec,
             call_id_codec=conversion.call_id_codec,
             stop_sequences=conversion.stop_sequences,
-            mode=mode,
         )
         self._compatibility_warnings = list(compatibility_warnings or [])
         self._compatibility_audit = copy.deepcopy(compatibility_audit)
-        self._mode = mode
 
     def keepalive_event(self) -> str:
         return 'event: ping\ndata: {"type":"ping"}\n\n'
@@ -1184,7 +1176,7 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         audit_value = event
         if event_type and not payload_type:
             audit_value = {**event, "type": event_type}
-        audit = audit_responses_event(audit_value, mode=self._mode)
+        audit = audit_responses_event(audit_value)
         for warning in audit.warnings:
             if warning not in self.translator.compatibility_warnings:
                 self.translator.compatibility_warnings.append(warning)
