@@ -563,30 +563,83 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         self.assertEqual(event_types(output)[-1], "message_stop")
 
     def test_terminal_response_identity_and_status_must_match_created_event(self):
-        cases = (
-            ({
-                "id": "resp_other", "model": "gpt", "status": "completed",
-                "output": [], "usage": {},
-            }, "responses.terminal_response_id_mismatch"),
-            ({
-                "id": "resp", "model": "gpt", "status": "failed",
-                "error": {"message": "failed"}, "output": [], "usage": {},
-            }, "responses.terminal_status_mismatch"),
+        # The id comparison is only meaningful where ids are stable.
+        public = ResponsesAnthropicEventTranslator(
+            original_model="claude-opus-4.8",
+            reasoning_model="gpt-5.6-sol",
+            wire_profile="public_responses",
         )
-        for terminal, expected_code in cases:
-            translator = self.translator()
-            output = translator.process(
-                "response.created", {"response": {"id": "resp", "model": "gpt"}}
-            )
-            output += translator.process(
-                "response.completed", {"response": terminal}
-            )
-            with self.subTest(code=expected_code):
-                self.assertEqual(event_types(output)[-1], "error")
-                self.assertEqual(
-                    translator.compatibility_warnings[-1]["code"], expected_code
-                )
-                self.assertTrue(translator.protocol_failed)
+        output = public.process(
+            "response.created", {"response": {"id": "resp", "model": "gpt"}}
+        )
+        output += public.process("response.completed", {"response": {
+            "id": "resp_other", "model": "gpt", "status": "completed",
+            "output": [], "usage": {},
+        }})
+        self.assertEqual(event_types(output)[-1], "error")
+        self.assertEqual(
+            public.compatibility_warnings[-1]["code"],
+            "responses.terminal_response_id_mismatch",
+        )
+        self.assertTrue(public.protocol_failed)
+
+        translator = self.translator()
+        output = translator.process(
+            "response.created", {"response": {"id": "resp", "model": "gpt"}}
+        )
+        output += translator.process("response.completed", {"response": {
+            "id": "resp", "model": "gpt", "status": "failed",
+            "error": {"message": "failed"}, "output": [], "usage": {},
+        }})
+        self.assertEqual(event_types(output)[-1], "error")
+        self.assertEqual(
+            translator.compatibility_warnings[-1]["code"],
+            "responses.terminal_status_mismatch",
+        )
+        self.assertTrue(translator.protocol_failed)
+
+    def test_copilot_profile_accepts_per_event_opaque_response_ids(self):
+        """Copilot returns a different encrypted response.id on every event of
+        one stream, so an id comparison there fails a stream that is perfectly
+        well formed. Only call_id is stable on that profile."""
+        translator = self.translator()
+        output = translator.process(
+            "response.created", {"response": {"id": "opaque-A", "model": "gpt"}}
+        )
+        output += translator.process(
+            "response.in_progress", {"response": {"id": "opaque-B", "model": "gpt"}}
+        )
+        output += translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "message", "role": "assistant", "content": []},
+        })
+        output += translator.process("response.output_text.delta", {
+            "output_index": 0, "content_index": 0, "delta": "hello",
+        })
+        output += translator.process("response.completed", {"response": {
+            "id": "opaque-C", "model": "gpt", "status": "completed",
+            "output": [{
+                "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }})
+        self.assertFalse(translator.protocol_failed)
+        self.assertNotIn("error", event_types(output))
+        self.assertEqual(event_types(output)[-1], "message_stop")
+        visible = "".join(
+            event["delta"]["text"]
+            for name, event in output
+            if name == "content_block_delta"
+            and event.get("delta", {}).get("type") == "text_delta"
+        )
+        self.assertEqual(visible, "hello")
+        # The client-visible message id stays the one announced in
+        # message_start; a rotated upstream id must not change it.
+        message_start = next(
+            event for name, event in output if name == "message_start"
+        )
+        self.assertTrue(message_start["message"]["id"].startswith("msg_"))
 
     def test_event_after_closed_output_index_is_fatal(self):
         translator = self.translator()

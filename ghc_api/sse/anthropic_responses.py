@@ -146,7 +146,15 @@ class ResponsesAnthropicEventTranslator:
         self.call_id_codec = call_id_codec or IdentifierCodec()
         self.stop_sequences = list(stop_sequences or [])
         self.wire_profile = wire_profile
-        self.stable_item_ids = wire_profile != "copilot_responses_lite"
+        # Copilot's /responses returns opaque, per-event identifiers: one stream
+        # carries a different response.id on response.created,
+        # response.in_progress and response.completed, and a different item.id
+        # on every delta of one item.  Only call_id is stable there.  On that
+        # profile an id is a value, not an identity, so comparing two of them
+        # says nothing about the stream.  The public Responses API does keep
+        # them stable, and there the same comparison is a real check against
+        # two interleaved responses.
+        self.stable_upstream_ids = wire_profile != "copilot_responses_lite"
 
         self.message_started = False
         self.message_stopped = False
@@ -279,7 +287,7 @@ class ResponsesAnthropicEventTranslator:
                 )
 
         effective_type = incoming_type or state.item_type
-        if effective_type == "web_search_call" and self.stable_item_ids:
+        if effective_type == "web_search_call" and self.stable_upstream_ids:
             incoming_id = item.get("id")
             existing_id = state.item.get("id") if isinstance(state.item, dict) else None
             if incoming_id is not None and existing_id is not None and str(incoming_id) != str(existing_id):
@@ -653,7 +661,7 @@ class ResponsesAnthropicEventTranslator:
 
         terminal_id = str(response.get("id") or "")
         terminal_model = str(response.get("model") or "")
-        if self.response_id and terminal_id != self.response_id:
+        if self.stable_upstream_ids and self.response_id and terminal_id != self.response_id:
             return self._protocol_error(
                 "responses.terminal_response_id_mismatch", "/response/id"
             )
@@ -750,7 +758,7 @@ class ResponsesAnthropicEventTranslator:
                 )
             if self.response_created_seen:
                 if (
-                    response_id != self.response_id
+                    (self.stable_upstream_ids and response_id != self.response_id)
                     or response_model != self.created_response_model
                 ):
                     return self._protocol_error(
@@ -781,7 +789,7 @@ class ResponsesAnthropicEventTranslator:
                         "responses.annotation_without_message",
                         f"/events/{event_type}",
                     )
-                if self.stable_item_ids:
+                if self.stable_upstream_ids:
                     expected_id = str(state.item.get("id") or "")
                     item_id = str(event.get("item_id") or "")
                     if expected_id and item_id != expected_id:
@@ -816,7 +824,7 @@ class ResponsesAnthropicEventTranslator:
                         "responses.web_search_lifecycle_without_item",
                         f"/events/{event_type}",
                     )
-                if self.stable_item_ids:
+                if self.stable_upstream_ids:
                     expected_id = str(state.item.get("id") or "")
                     item_id = str(event.get("item_id") or "")
                     if expected_id and item_id != expected_id:
