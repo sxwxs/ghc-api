@@ -289,6 +289,11 @@ webiq_endpoint: ""
 webiq_timeout: 30
 webiq_browse_timeout: 120
 webiq_classic_timeout: 60
+# MCP GET streams have no read timeout. POST/DELETE use this finite read
+# timeout, and the non-blocking process-local cap reserves waitress threads for
+# LLM traffic. Raise the cap only together with server_threads.
+webiq_mcp_timeout: 120
+webiq_mcp_max_concurrent_streams: 4
 # Every REST call (request body, upstream status, response or error) and
 # body-free MCP audit record is appended to <config_dir>/webiq/YYYY-MM-DD.jl.
 # Logging is on by default; MCP request/response bodies are never persisted.

@@ -361,6 +361,11 @@ def main():
             state.webiq_browse_timeout = max(1, int(config['webiq_browse_timeout']))
         if 'webiq_classic_timeout' in config:
             state.webiq_classic_timeout = max(1, int(config['webiq_classic_timeout']))
+        if 'webiq_mcp_timeout' in config:
+            state.webiq_mcp_timeout = max(1, int(config['webiq_mcp_timeout']))
+        if 'webiq_mcp_max_concurrent_streams' in config:
+            state.webiq_mcp_max_concurrent_streams = max(
+                1, int(config['webiq_mcp_max_concurrent_streams']))
         if 'log_webiq_requests' in config:
             state.log_webiq_requests = bool(config['log_webiq_requests'])
 

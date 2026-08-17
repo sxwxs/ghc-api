@@ -117,6 +117,11 @@ class State:
         # than ordinary search and therefore have independent read timeouts.
         self.webiq_browse_timeout: int = 120
         self.webiq_classic_timeout: int = 60
+        # Streamable HTTP GET intentionally has no read timeout. Other MCP
+        # methods are bounded, and all active MCP streams share a non-blocking
+        # process-local cap so they cannot consume every waitress thread.
+        self.webiq_mcp_timeout: int = 120
+        self.webiq_mcp_max_concurrent_streams: int = 4
         # Append every Web IQ REST request and response, plus body-free MCP
         # audit metadata, to a daily .jl file
         # under <config_dir>/webiq/. On by default: unlike the LLM request

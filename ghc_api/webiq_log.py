@@ -28,6 +28,7 @@ from typing import Any, Dict
 
 STATE_COMPLETED = "completed"
 STATE_ERROR = "error"
+STATE_CANCELLED = "cancelled"
 
 
 def log_dir() -> str:

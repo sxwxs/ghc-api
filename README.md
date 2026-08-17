@@ -513,6 +513,8 @@ webiq_base_url: "" # optional all-service upstream override
 webiq_timeout: 30
 webiq_browse_timeout: 120
 webiq_classic_timeout: 60
+webiq_mcp_timeout: 120
+webiq_mcp_max_concurrent_streams: 4
 log_webiq_requests: true
 ```
 
@@ -528,8 +530,13 @@ upstream origin for every service. The old `enable_webiq_search` name remains a
 compatibility alias for `enable_webiq`. The legacy `webiq_endpoint` option still
 overrides only Web Search; if it is not a standard `.../v3/search/web` URL, all
 other services fail closed instead of silently falling through to production.
-`webiq_timeout` covers ordinary REST searches; Browse and Classic use their
-longer service-specific timeouts shown above and can be tuned independently.
+`webiq_timeout` covers ordinary REST searches and MCP connection setup; Browse
+and Classic use their longer service-specific timeouts shown above. MCP GET is
+an intentionally long-lived stream with no read timeout, while POST/DELETE use
+`webiq_mcp_timeout`. At most `webiq_mcp_max_concurrent_streams` MCP responses
+may occupy waitress threads at once; excess requests fail quickly with HTTP 503
+and `Retry-After` instead of queueing behind streams. Keep this cap comfortably
+below `server_threads`, or use an asynchronous server for high MCP concurrency.
 
 What the proxy adds is key custody (`webiq_api_key` never leaves the server), the
 optional user-token auth gate, and logging. It adds nothing to the search itself:

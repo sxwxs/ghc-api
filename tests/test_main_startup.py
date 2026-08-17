@@ -93,7 +93,9 @@ def test_canonical_webiq_config_covers_all_services(startup_env):
         "debug: true\n"
         "enable_webiq: true\n"
         "webiq_browse_timeout: 150\n"
-        "webiq_classic_timeout: 75\n",
+        "webiq_classic_timeout: 75\n"
+        "webiq_mcp_timeout: 180\n"
+        "webiq_mcp_max_concurrent_streams: 6\n",
         encoding="utf-8",
     )
 
@@ -102,6 +104,8 @@ def test_canonical_webiq_config_covers_all_services(startup_env):
     assert state.enable_webiq_search is True
     assert state.webiq_browse_timeout == 150
     assert state.webiq_classic_timeout == 75
+    assert state.webiq_mcp_timeout == 180
+    assert state.webiq_mcp_max_concurrent_streams == 6
 
 
 def test_enable_webiq_wins_over_conflicting_legacy_alias(startup_env, capsys):

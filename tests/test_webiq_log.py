@@ -26,6 +26,8 @@ from unittest import mock
 from ghc_api.app import create_app
 from ghc_api.auth import REDACTED_HEADERS, redact_auth_headers
 from ghc_api.cache import cache
+from ghc_api.counters import counters
+from ghc_api.routes import webiq as webiq_routes
 from ghc_api.routes.webiq import REQUEST_LIST_MODEL, SEARCH_PATH
 from ghc_api.state import state
 from ghc_api.webiq import MCP_PATH, WebIQError
@@ -61,6 +63,9 @@ class IsolatedConfigDirTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         cache.cache.clear()
         self.addCleanup(cache.cache.clear)
+        counters.reset()
+        self.addCleanup(counters.reset)
+        self.assertEqual(webiq_routes._mcp_stream_limiter.active(), 0)
         self.client = create_app().test_client()
 
 
@@ -264,6 +269,53 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(
             cached["request_headers"]["Mcp-Param-Url"], "***REDACTED***")
         self.assertNotIn("SECRET", json.dumps(cached))
+
+    @mock.patch("ghc_api.routes.webiq.mcp_request")
+    def test_interrupted_mcp_stream_is_audited_as_error(self, mcp_mock):
+        upstream = upstream_response(200, headers={
+            "content-type": "text/event-stream",
+        })
+        upstream.iter_content.side_effect = RuntimeError("stream broke")
+        mcp_mock.return_value = upstream
+
+        with self.assertRaisesRegex(RuntimeError, "stream broke"):
+            self.client.post(
+                MCP_PATH, data=b"{}", content_type="application/json",
+                buffered=False)
+
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["state"], "error")
+        self.assertEqual(entry["status_code"], 200)
+        self.assertFalse(entry["stream_completed"])
+        self.assertIn("RuntimeError: stream broke", entry["error"])
+        cached = cache.get_recent_requests(1)[0]
+        self.assertEqual(cached["state"], "error")
+        self.assertEqual(counters.snapshot().get("webiq.mcp_error"), 1)
+        self.assertNotIn("webiq.mcp", counters.snapshot())
+        self.assertEqual(webiq_routes._mcp_stream_limiter.active(), 0)
+
+    @mock.patch("ghc_api.routes.webiq.mcp_request")
+    def test_client_disconnect_is_audited_as_cancelled(self, mcp_mock):
+        upstream = upstream_response(200, headers={
+            "content-type": "text/event-stream",
+        })
+        upstream.iter_content.return_value = [b"first", b"second"]
+        mcp_mock.return_value = upstream
+
+        res = self.client.post(
+            MCP_PATH, data=b"{}", content_type="application/json", buffered=False)
+        res.close()
+
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["state"], "cancelled")
+        self.assertEqual(entry["status_code"], 200)
+        self.assertFalse(entry["stream_completed"])
+        self.assertIn("Client disconnected", entry["error"])
+        cached = cache.get_recent_requests(1)[0]
+        self.assertEqual(cached["state"], "cancelled")
+        self.assertEqual(counters.snapshot().get("webiq.mcp_cancelled"), 1)
+        self.assertNotIn("webiq.mcp", counters.snapshot())
+        self.assertEqual(webiq_routes._mcp_stream_limiter.active(), 0)
 
     @mock.patch(
         "ghc_api.routes.webiq.mcp_request",

@@ -343,16 +343,30 @@ def mcp_request(
     except ValueError as exc:
         raise WebIQError(str(exc), 503) from exc
 
+    normalized_method = method.upper()
+    connect_timeout = max(1, int(getattr(settings, "webiq_timeout", 30)))
+    if normalized_method == "GET":
+        # GET is the long-lived server-to-client event channel. The route-level
+        # concurrency cap prevents these intentionally unbounded reads from
+        # consuming the entire waitress thread pool.
+        timeout = (connect_timeout, None)
+    else:
+        # A stuck tools/call or DELETE must eventually release its WSGI thread.
+        read_timeout = max(1, int(getattr(
+            settings, "webiq_mcp_timeout", connect_timeout)))
+        timeout = (connect_timeout, read_timeout)
+
     try:
         response = requests.request(
-            method,
+            normalized_method,
             upstream_url,
             headers=forwarded_headers,
-            data=body if method not in ("GET", "DELETE") or body else None,
-            # Streamable HTTP GET may remain open indefinitely. Bound connect
-            # time, but let the client decide when to close an established SSE
-            # stream rather than killing a healthy MCP session after 30s.
-            timeout=(settings.webiq_timeout, None),
+            data=(
+                body
+                if normalized_method not in ("GET", "DELETE") or body
+                else None
+            ),
+            timeout=timeout,
             stream=True,
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:

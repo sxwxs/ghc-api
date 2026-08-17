@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from ghc_api.app import PROTECTED_PATHS, create_app
+from ghc_api.routes import webiq as webiq_routes
+from ghc_api.state import state
 from ghc_api.webiq import (
     API_BASE_URL,
     API_PATHS,
@@ -31,6 +33,7 @@ def make_settings(**overrides):
         webiq_base_url="",
         webiq_endpoint="",
         webiq_timeout=30,
+        webiq_mcp_timeout=120,
     )
     for key, value in overrides.items():
         setattr(settings, key, value)
@@ -250,6 +253,7 @@ class MCPRequestTest(unittest.TestCase):
         kwargs = send.call_args.kwargs
         self.assertEqual(kwargs["data"], b'{"jsonrpc":"2.0"}')
         self.assertTrue(kwargs["stream"])
+        self.assertEqual(kwargs["timeout"], (30, 120))
         self.assertEqual(kwargs["headers"]["x-apikey"], "secret")
         self.assertEqual(kwargs["headers"]["mcp-session-id"], "session-1")
         self.assertEqual(kwargs["headers"]["mcp-method"], "tools/call")
@@ -273,6 +277,14 @@ class MCPRequestTest(unittest.TestCase):
 
         self.assertIsNone(send.call_args.kwargs["data"])
         self.assertEqual(send.call_args.kwargs["timeout"], (30, None))
+
+    @patch("ghc_api.webiq.requests.request")
+    def test_delete_also_has_a_finite_read_timeout(self, send):
+        send.return_value = upstream_response()
+
+        mcp_request("DELETE", b"", make_settings(), request_headers={})
+
+        self.assertEqual(send.call_args.kwargs["timeout"], (30, 120))
 
     @patch("ghc_api.webiq.requests.request")
     def test_rejected_server_key_closes_response_and_becomes_503(self, send):
@@ -425,6 +437,23 @@ class RouteTest(unittest.TestCase):
             res = self.client.post(path, json={field: "value"})
             self.assertEqual(res.status_code, 503)
             self.assertEqual(res.get_json()["error"]["type"], error_type)
+
+    @patch("ghc_api.routes.webiq.mcp_request")
+    def test_mcp_concurrency_limit_fails_fast(self, mcp_mock):
+        limiter = webiq_routes._mcp_stream_limiter
+        self.assertEqual(limiter.active(), 0)
+        self.assertTrue(limiter.try_acquire(1))
+        try:
+            with patch.object(state, "webiq_mcp_max_concurrent_streams", 1):
+                res = self.client.post(MCP_PATH, data=b"{}",
+                                       content_type="application/json")
+        finally:
+            limiter.release()
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.headers["Retry-After"], "1")
+        self.assertEqual(res.get_json()["error"]["type"], "webiq_mcp_error")
+        mcp_mock.assert_not_called()
 
     @patch("ghc_api.routes.webiq.mcp_request")
     def test_mcp_stream_and_session_header_reach_the_client(self, mcp_mock):

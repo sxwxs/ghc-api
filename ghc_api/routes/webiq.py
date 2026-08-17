@@ -22,6 +22,7 @@ Streaming MCP bodies are not persisted.
 """
 
 import json
+import threading
 import time
 import uuid
 from typing import Any, Optional, Tuple
@@ -44,13 +45,45 @@ from ..webiq import (
     result_count,
     search,
 )
-from ..webiq_log import STATE_COMPLETED, STATE_ERROR, record_search_to_file
+from ..webiq_log import (
+    STATE_CANCELLED,
+    STATE_COMPLETED,
+    STATE_ERROR,
+    record_search_to_file,
+)
 
 webiq_bp = Blueprint("webiq", __name__)
 
 # Compatibility names retained for the original web-only route.
 SEARCH_PATH = WEB_PATH
 REQUEST_LIST_MODEL = "webiq_search"
+
+
+class _MCPStreamLimiter:
+    """Non-blocking process-local cap for thread-occupying MCP streams."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._active = 0
+
+    def try_acquire(self, limit: int) -> bool:
+        with self._lock:
+            if self._active >= max(1, int(limit)):
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._active > 0:
+                self._active -= 1
+
+    def active(self) -> int:
+        with self._lock:
+            return self._active
+
+
+_mcp_stream_limiter = _MCPStreamLimiter()
 
 
 def _request_list_model(api_path: str) -> str:
@@ -321,6 +354,7 @@ def _complete_mcp_audit(
     response_size: int,
     response_session_id: Optional[str],
     stream_completed: bool,
+    completion_state: str,
     error: Optional[str] = None,
 ) -> None:
     """Complete a body-free MCP audit record in the file and request cache."""
@@ -328,7 +362,9 @@ def _complete_mcp_audit(
     response_summary = {
         "body_logged": False,
         "stream_completed": stream_completed,
+        "stream_state": completion_state,
         "mcp_session_id": response_session_id,
+        "error": error,
     }
     entry = {
         "id": audit["id"],
@@ -353,7 +389,7 @@ def _complete_mcp_audit(
         "status_code": status_code,
         "error": error,
         "duration_ms": int(duration * 1000),
-        "state": STATE_COMPLETED if status_code < 400 else STATE_ERROR,
+        "state": completion_state,
     }
     try:
         record_search_to_file(entry)
@@ -369,7 +405,11 @@ def _complete_mcp_audit(
             "duration": round(duration, 3),
             "user_id": audit["user_id"],
             "stream_completed": stream_completed,
+            "stream_state": completion_state,
             "error": error,
+            # Override RequestCache's status-only default: an HTTP 200 stream
+            # can still be truncated or cancelled after headers were sent.
+            "state": completion_state,
         })
     except Exception as exc:  # pragma: no cover
         print(f"[WebIQ] failed to complete MCP cache record: {exc}")
@@ -381,6 +421,29 @@ def webiq_mcp():
     body = request.get_data()
     headers = {name.lower(): value for name, value in request.headers.items()}
     audit = _start_mcp_audit(body, headers)
+
+    if not _mcp_stream_limiter.try_acquire(
+        state.webiq_mcp_max_concurrent_streams
+    ):
+        counters.incr("webiq.mcp_error")
+        message = (
+            "Web IQ MCP concurrency limit reached; retry after an active "
+            "stream closes."
+        )
+        response, status = _error_response(message, 503, "mcp")
+        response.headers["Retry-After"] = "1"
+        _complete_mcp_audit(
+            audit,
+            status_code=status,
+            upstream_status=None,
+            response_size=len(response.get_data()),
+            response_session_id=None,
+            stream_completed=False,
+            completion_state=STATE_ERROR,
+            error=message,
+        )
+        return response, status
+
     try:
         upstream = mcp_request(
             request.method,
@@ -389,6 +452,7 @@ def webiq_mcp():
             request_headers=headers,
         )
     except WebIQError as exc:
+        _mcp_stream_limiter.release()
         counters.incr("webiq.mcp_error")
         response, status = _error_response(str(exc), exc.status_code, "mcp")
         _complete_mcp_audit(
@@ -398,14 +462,26 @@ def webiq_mcp():
             response_size=len(response.get_data()),
             response_session_id=None,
             stream_completed=False,
+            completion_state=STATE_ERROR,
             error=str(exc),
         )
         return response, status
-
-    if upstream.ok:
-        counters.incr("webiq.mcp")
-    else:
+    except Exception as exc:  # pragma: no cover - defensive slot cleanup
+        _mcp_stream_limiter.release()
         counters.incr("webiq.mcp_error")
+        message = f"Web IQ MCP proxy failed: {type(exc).__name__}"
+        response, status = _error_response(message, 502, "mcp")
+        _complete_mcp_audit(
+            audit,
+            status_code=status,
+            upstream_status=None,
+            response_size=len(response.get_data()),
+            response_session_id=None,
+            stream_completed=False,
+            completion_state=STATE_ERROR,
+            error=message,
+        )
+        return response, status
 
     response_session_id = _header_value(upstream.headers, "mcp-session-id")
 
@@ -413,14 +489,44 @@ def webiq_mcp():
     def generate():
         response_size = 0
         stream_completed = False
+        completion_state = STATE_ERROR
+        stream_error = None
         try:
             for chunk in upstream.iter_content(chunk_size=64 * 1024):
                 if chunk:
                     response_size += len(chunk)
                     yield chunk
             stream_completed = True
+            if upstream.ok:
+                completion_state = STATE_COMPLETED
+            else:
+                stream_error = f"Upstream MCP returned HTTP {upstream.status_code}"
+        except GeneratorExit:
+            completion_state = STATE_CANCELLED
+            stream_error = "Client disconnected before the MCP stream completed"
+            raise
+        except Exception as exc:
+            completion_state = STATE_ERROR
+            detail = str(exc).strip()
+            stream_error = f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+            if len(stream_error) > 500:
+                stream_error = stream_error[:500] + "..."
+            raise
         finally:
-            upstream.close()
+            try:
+                upstream.close()
+            except Exception as exc:  # pragma: no cover - requests close is normally safe
+                if completion_state == STATE_COMPLETED:
+                    completion_state = STATE_ERROR
+                    stream_completed = False
+                    stream_error = f"Failed to close upstream MCP stream: {type(exc).__name__}"
+            _mcp_stream_limiter.release()
+            if completion_state == STATE_COMPLETED:
+                counters.incr("webiq.mcp")
+            elif completion_state == STATE_CANCELLED:
+                counters.incr("webiq.mcp_cancelled")
+            else:
+                counters.incr("webiq.mcp_error")
             _complete_mcp_audit(
                 audit,
                 status_code=upstream.status_code,
@@ -428,6 +534,8 @@ def webiq_mcp():
                 response_size=response_size,
                 response_session_id=response_session_id,
                 stream_completed=stream_completed,
+                completion_state=completion_state,
+                error=stream_error,
             )
 
     response = Response(
