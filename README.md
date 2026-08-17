@@ -1,5 +1,7 @@
 # GitHub Copilot API Proxy (ghc-api)
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sxwxs/ghc-api)
+
 A Python Flask application that serves as a proxy server for GitHub Copilot API, providing OpenAI and Anthropic API compatibility with caching and monitoring capabilities.
 
 ## Features
