@@ -3,14 +3,15 @@ Recording of Web IQ searches to disk.
 
 Every call to one of the six Web IQ REST endpoints is appended as one JSON
 Lines record to ``<config_dir>/webiq/YYYY-MM-DD.jl`` (on by default, controlled
-by ``state.log_webiq_requests``). Failures are recorded too. Streaming MCP
-traffic is deliberately not body-logged.
+by ``state.log_webiq_requests``). Failures are recorded too. MCP calls append
+method, status, duration, session and user metadata, but never their streaming
+request or response bodies.
 
-This file is the only full-fidelity record of a search. The search is also
-added to the shared request cache -- which is where the dashboard, the request
-list, full-text search and export get it from -- but that cache replaces any
-body over ``cache_max_request_size`` with a placeholder, both in memory and in
-``requests/YYYY-MM-DD.jl``. Nothing here is truncated.
+This file is the only full-fidelity record of a REST call. Each REST call and
+MCP metadata record is also added to the shared request cache, which feeds the
+dashboard, request list, full-text search and export. The cache replaces any
+REST body over ``cache_max_request_size`` with a placeholder, both in memory
+and in ``requests/YYYY-MM-DD.jl``. Nothing in this Web IQ log is truncated.
 
 There is deliberately no in-memory buffer: keeping a second copy of every
 search in RAM next to the cache's copy bought nothing but memory.
@@ -40,9 +41,9 @@ def format_jsonl_line(entry: Dict[str, Any]) -> str:
 
 
 def record_search_to_file(entry: Dict[str, Any]) -> None:
-    """Append one search record to today's log file.
+    """Append one Web IQ REST or body-free MCP record to today's log file.
 
-    Recording must never break a search that already succeeded, so disk
+    Recording must never break a request that already succeeded, so disk
     failures are reported and swallowed.
     """
     try:

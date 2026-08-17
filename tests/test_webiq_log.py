@@ -28,6 +28,7 @@ from ghc_api.auth import REDACTED_HEADERS, redact_auth_headers
 from ghc_api.cache import cache
 from ghc_api.routes.webiq import REQUEST_LIST_MODEL, SEARCH_PATH
 from ghc_api.state import state
+from ghc_api.webiq import MCP_PATH, WebIQError
 from ghc_api.webiq_log import log_dir, record_search_to_file
 
 
@@ -131,6 +132,17 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(item["endpoint"], "/v3/search/news")
 
     @mock.patch("ghc_api.routes.webiq.search")
+    def test_browse_records_its_url_instead_of_an_empty_query(self, search_mock):
+        search_mock.return_value = upstream_response(200, b'{"title":"Example"}')
+
+        res = self.client.post("/v3/browse", json={"url": "https://example.com"})
+
+        self.assertEqual(res.status_code, 200)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["url"], "https://example.com")
+        self.assertIsNone(entry["query"])
+
+    @mock.patch("ghc_api.routes.webiq.search")
     def test_upstream_failure_is_recorded_with_its_body(self, search_mock):
         search_mock.return_value = upstream_response(
             429, b'{"error":{"code":"TooManyRequests"}}')
@@ -207,6 +219,65 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertIn("x-apikey", REDACTED_HEADERS)
         redacted = redact_auth_headers({"X-Apikey": "k", "X-Api-Key": "k", "Api-Key": "k"})
         self.assertEqual(set(redacted.values()), {"***REDACTED***"})
+
+    @mock.patch("ghc_api.routes.webiq.mcp_request")
+    def test_mcp_is_audited_without_persisting_stream_bodies(self, mcp_mock):
+        upstream = upstream_response(200, headers={
+            "content-type": "text/event-stream",
+            "Mcp-Session-Id": "response-session",
+        })
+        upstream.iter_content.return_value = [b"SECRET-STREAM-BODY"]
+        mcp_mock.return_value = upstream
+
+        res = self.client.post(
+            MCP_PATH,
+            data=b"SECRET-REQUEST-BODY",
+            content_type="application/json",
+            headers={
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": "browse",
+                "Mcp-Param-Url": "SECRET-MIRRORED-PARAM",
+                "Mcp-Session-Id": "request-session",
+            },
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data, b"SECRET-STREAM-BODY")
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["type"], "webiq_mcp")
+        self.assertEqual(entry["method"], "POST")
+        self.assertEqual(entry["mcp_method"], "tools/call")
+        self.assertEqual(entry["mcp_name"], "browse")
+        self.assertEqual(entry["request_session_id"], "request-session")
+        self.assertEqual(entry["response_session_id"], "response-session")
+        self.assertEqual(entry["status_code"], 200)
+        self.assertEqual(entry["user_id"], "anonymous")
+        self.assertTrue(entry["stream_completed"])
+        self.assertFalse(entry["body_logged"])
+        serialized = json.dumps(entry)
+        self.assertNotIn("SECRET-REQUEST-BODY", serialized)
+        self.assertNotIn("SECRET-STREAM-BODY", serialized)
+
+        cached = cache.get_recent_requests(1)[0]
+        self.assertEqual(cached["model"], "webiq_mcp")
+        self.assertEqual(cached["request_body"]["mcp_name"], "browse")
+        self.assertEqual(
+            cached["request_headers"]["Mcp-Param-Url"], "***REDACTED***")
+        self.assertNotIn("SECRET", json.dumps(cached))
+
+    @mock.patch(
+        "ghc_api.routes.webiq.mcp_request",
+        side_effect=WebIQError("not configured", 503),
+    )
+    def test_mcp_local_failure_has_its_own_error_and_audit_record(self, _mcp):
+        res = self.client.post(MCP_PATH, data=b"{}", content_type="application/json")
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.get_json()["error"]["type"], "webiq_mcp_error")
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["status_code"], 503)
+        self.assertIsNone(entry["upstream"]["status_code"])
+        self.assertEqual(entry["error"], "not configured")
 
 
 class RequestListTest(IsolatedConfigDirTest):

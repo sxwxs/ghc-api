@@ -9,6 +9,7 @@ from ghc_api.webiq import (
     DROPPED_RESPONSE_HEADERS,
     ENDPOINT,
     MCP_PATH,
+    WEB_PATH,
     WebIQError,
     endpoint_for,
     mcp_request,
@@ -16,6 +17,7 @@ from ghc_api.webiq import (
     pop_legacy_option,
     result_count,
     search,
+    timeout_for,
     tool_definition,
 )
 
@@ -111,9 +113,27 @@ class EndpointTest(unittest.TestCase):
         self.assertEqual(endpoint_for(settings, "/v3/search/news"),
                          "http://127.0.0.1:9/v3/search/news")
 
+    def test_nonstandard_legacy_endpoint_fails_closed_for_other_services(self):
+        settings = make_settings(webiq_endpoint="http://127.0.0.1:9/mock-web")
+        self.assertEqual(endpoint_for(settings), "http://127.0.0.1:9/mock-web")
+        with self.assertRaisesRegex(ValueError, "webiq_base_url"):
+            endpoint_for(settings, "/v3/browse")
+
     def test_arbitrary_paths_are_rejected(self):
         with self.assertRaises(ValueError):
             endpoint_for(make_settings(), "/v3/not-real")
+
+
+class TimeoutTest(unittest.TestCase):
+    def test_slower_services_have_independent_defaults(self):
+        settings = make_settings(
+            webiq_timeout=30,
+            webiq_browse_timeout=120,
+            webiq_classic_timeout=60,
+        )
+        self.assertEqual(timeout_for(settings, WEB_PATH), 30)
+        self.assertEqual(timeout_for(settings, "/v3/browse"), 120)
+        self.assertEqual(timeout_for(settings, "/v3/search/classic"), 60)
 
 
 class SearchTest(unittest.TestCase):
@@ -216,7 +236,11 @@ class MCPRequestTest(unittest.TestCase):
                     request_headers={
                         "accept": "application/json, text/event-stream",
                         "content-type": "application/json",
-                        "mcp-protocol-version": "2025-06-18",
+                        "mcp-protocol-version": "2026-07-28",
+                        "mcp-method": "tools/call",
+                        "mcp-name": "web",
+                        "mcp-param-region": "us-west1",
+                        "mcp-future-extension": "future-value",
                         "mcp-session-id": "session-1",
                         "authorization": "Bearer client-secret",
                         "x-apikey": "client-key",
@@ -228,7 +252,15 @@ class MCPRequestTest(unittest.TestCase):
         self.assertTrue(kwargs["stream"])
         self.assertEqual(kwargs["headers"]["x-apikey"], "secret")
         self.assertEqual(kwargs["headers"]["mcp-session-id"], "session-1")
+        self.assertEqual(kwargs["headers"]["mcp-method"], "tools/call")
+        self.assertEqual(kwargs["headers"]["mcp-name"], "web")
+        self.assertEqual(kwargs["headers"]["mcp-param-region"], "us-west1")
+        self.assertEqual(kwargs["headers"]["mcp-future-extension"], "future-value")
         self.assertNotIn("authorization", kwargs["headers"])
+        self.assertNotIn("x-apikey", {
+            key for key, value in kwargs["headers"].items()
+            if value == "client-key"
+        })
 
     @patch("ghc_api.webiq.requests.request")
     def test_get_opens_a_stream_without_a_body(self, send):
@@ -383,11 +415,16 @@ class RouteTest(unittest.TestCase):
         self.assertNotEqual(res.headers.get("Connection"), "keep-alive")
 
     @patch("ghc_api.routes.webiq.search", side_effect=WebIQError("nope", 503))
-    def test_local_failures_still_get_a_json_error(self, _search):
-        res = self.client.post("/v3/search/web", json={"query": "python"})
-
-        self.assertEqual(res.status_code, 503)
-        self.assertEqual(res.get_json()["error"]["type"], "webiq_search_error")
+    def test_local_failures_use_a_service_specific_error_type(self, _search):
+        cases = {
+            "/v3/search/web": ("query", "webiq_search_error"),
+            "/v3/search/videos": ("query", "webiq_videos_error"),
+            "/v3/browse": ("url", "webiq_browse_error"),
+        }
+        for path, (field, error_type) in cases.items():
+            res = self.client.post(path, json={field: "value"})
+            self.assertEqual(res.status_code, 503)
+            self.assertEqual(res.get_json()["error"]["type"], error_type)
 
     @patch("ghc_api.routes.webiq.mcp_request")
     def test_mcp_stream_and_session_header_reach_the_client(self, mcp_mock):
@@ -407,6 +444,8 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.data, b"event: message\ndata: {}\n\n")
         self.assertEqual(res.headers["Mcp-Session-Id"], "session-9")
+        self.assertEqual(res.headers["X-Accel-Buffering"], "no")
+        self.assertEqual(res.headers["Cache-Control"], "no-cache")
         request_headers = mcp_mock.call_args.kwargs["request_headers"]
         self.assertEqual(request_headers["mcp-session-id"], "session-1")
         upstream.close.assert_called_once_with()

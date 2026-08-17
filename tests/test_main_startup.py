@@ -6,10 +6,10 @@ from unittest import mock
 
 import pytest
 
+from ghc_api.state import state
+
 # ghc_api re-exports the main() function, so import the module explicitly.
 main_module = importlib.import_module("ghc_api.main")
-
-from ghc_api.state import state
 
 
 @pytest.fixture
@@ -85,6 +85,36 @@ def test_valid_config_is_used(startup_env):
     assert kwargs["host"] == "127.0.0.1"
     assert kwargs["port"] == 9999
     assert kwargs["debug"] is True
+
+
+def test_canonical_webiq_config_covers_all_services(startup_env):
+    tmp_path, _fake_app = startup_env
+    (tmp_path / "config.yaml").write_text(
+        "debug: true\n"
+        "enable_webiq: true\n"
+        "webiq_browse_timeout: 150\n"
+        "webiq_classic_timeout: 75\n",
+        encoding="utf-8",
+    )
+
+    main_module.main()
+
+    assert state.enable_webiq_search is True
+    assert state.webiq_browse_timeout == 150
+    assert state.webiq_classic_timeout == 75
+
+
+def test_enable_webiq_wins_over_conflicting_legacy_alias(startup_env, capsys):
+    tmp_path, _fake_app = startup_env
+    (tmp_path / "config.yaml").write_text(
+        "debug: true\nenable_webiq: false\nenable_webiq_search: true\n",
+        encoding="utf-8",
+    )
+
+    main_module.main()
+
+    assert state.enable_webiq_search is False
+    assert "enable_webiq takes precedence" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("configured,expected", [

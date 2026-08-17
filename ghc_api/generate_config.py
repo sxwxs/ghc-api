@@ -276,17 +276,22 @@ web_search_proxy_endpoint: "http://127.0.0.1:5002"
 # There are no server-side API parameter defaults or validation.
 # A client's x-apikey/Authorization is ignored and redacted; this server's key
 # is always used and is never sent to the UI or Copilot.
-enable_webiq_search: false
+enable_webiq: false
+# Compatibility alias for older config files: enable_webiq_search
 webiq_api_key: ""
 # Override the upstream origin/prefix for every Web IQ route (for example a
 # local recording proxy). Empty uses https://api.microsoft.ai.
 webiq_base_url: ""
 # Legacy full-URL override for /v3/search/web only. Prefer webiq_base_url.
 webiq_endpoint: ""
+# REST read timeouts in seconds. Browse live crawl and Classic multi-vertical
+# aggregation can take longer than ordinary search.
 webiq_timeout: 30
-# Every REST call (request body, upstream status, response or error) is appended
-# to <config_dir>/webiq/YYYY-MM-DD.jl. That is the only untruncated copy, so
-# logging is on by default. Streaming MCP traffic is not body-logged.
+webiq_browse_timeout: 120
+webiq_classic_timeout: 60
+# Every REST call (request body, upstream status, response or error) and
+# body-free MCP audit record is appended to <config_dir>/webiq/YYYY-MM-DD.jl.
+# Logging is on by default; MCP request/response bodies are never persisted.
 log_webiq_requests: true
 
 # User Authentication

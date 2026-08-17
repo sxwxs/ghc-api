@@ -98,6 +98,11 @@ def _record_search(
     duration = time.time() - started
     request_body = _decode(request_bytes)
     query = request_body.get("query") if isinstance(request_body, dict) else None
+    url = (
+        request_body.get("url")
+        if api_path == "/v3/browse" and isinstance(request_body, dict)
+        else None
+    )
     state_label = STATE_COMPLETED if status_code < 400 else STATE_ERROR
     model_name = _request_list_model(api_path)
 
@@ -109,9 +114,10 @@ def _record_search(
         "client_ip": client_ip,
         "user_id": user_id,
         "query": query,
+        "url": url,
         "request_body": request_body,
         "upstream": {
-            "endpoint": endpoint_for(state, api_path),
+            "endpoint": _audit_endpoint(api_path),
             # None when the request never reached upstream (unconfigured
             # server, connection failure), which is itself worth seeing.
             "status_code": upstream_status,
@@ -154,10 +160,22 @@ def _record_search(
         print(f"[WebIQ] failed to add the search to the request cache: {exc}")
 
 
-def _error_response(message: str, status_code: int) -> Tuple[Response, int]:
+def _audit_endpoint(api_path: str) -> Optional[str]:
+    """Best-effort upstream URL for audit records; configuration errors are data."""
+    try:
+        return endpoint_for(state, api_path)
+    except ValueError:
+        return None
+
+
+def _error_response(
+    message: str,
+    status_code: int,
+    service: str,
+) -> Tuple[Response, int]:
     return jsonify({"error": {
         "message": message,
-        "type": "webiq_search_error",
+        "type": f"webiq_{service}_error",
     }}), status_code
 
 
@@ -187,7 +205,9 @@ def webiq_search():
         # Only reached when there is no upstream response to pass through.
         counters.incr(f"webiq.{counter_name}_error")
         print(f"[WebIQ] {service} failed: {exc}")
-        response, status = _error_response(str(exc), exc.status_code)
+        error_service = "search" if api_path == WEB_PATH else service
+        response, status = _error_response(
+            str(exc), exc.status_code, error_service)
         _record_search(
             request_id=request_id,
             started=started,
@@ -220,9 +240,14 @@ def webiq_search():
     )
 
     count = result_count(body, api_path)
-    query = request.get_json(silent=True)
-    query = query.get("query") if isinstance(query, dict) else None
-    print(f"[WebIQ] service={service} query={query!r} status={upstream.status_code} "
+    request_view = request.get_json(silent=True)
+    identifier_name = "url" if api_path == "/v3/browse" else "query"
+    identifier = (
+        request_view.get(identifier_name)
+        if isinstance(request_view, dict) else None
+    )
+    print(f"[WebIQ] service={service} {identifier_name}={identifier!r} "
+          f"status={upstream.status_code} "
           f"results={count if count is not None else '-'} "
           f"in {time.time() - started:.2f}s")
 
@@ -233,11 +258,129 @@ def webiq_search():
     )
 
 
+def _header_value(headers: Any, name: str) -> Optional[str]:
+    if not headers:
+        return None
+    wanted = name.lower()
+    for key, value in headers.items():
+        if key.lower() == wanted:
+            return value
+    return None
+
+
+def _start_mcp_audit(body: bytes, headers: dict) -> dict:
+    """Create a pending cache entry without retaining the MCP body."""
+    audit_headers = redact_auth_headers(dict(request.headers))
+    # Mcp-Param-* values mirror selected tool arguments from the body. Keeping
+    # them would defeat the body-free audit promise, so retain their presence
+    # but not their value.
+    for name in list(audit_headers):
+        if name.lower().startswith("mcp-param-"):
+            audit_headers[name] = "***REDACTED***"
+
+    audit = {
+        "id": str(uuid.uuid4()),
+        "started": time.time(),
+        "client_ip": get_client_ip(request),
+        "user_id": getattr(g, "user_id", ANONYMOUS_USER_ID) or ANONYMOUS_USER_ID,
+        "http_method": request.method,
+        "mcp_method": headers.get("mcp-method"),
+        "mcp_name": headers.get("mcp-name"),
+        "request_session_id": headers.get("mcp-session-id"),
+        "request_size": len(body),
+        "request_headers": audit_headers,
+    }
+    request_summary = {
+        "body_logged": False,
+        "http_method": audit["http_method"],
+        "mcp_method": audit["mcp_method"],
+        "mcp_name": audit["mcp_name"],
+        "mcp_session_id": audit["request_session_id"],
+    }
+    audit["request_summary"] = request_summary
+    try:
+        cache.start_request(audit["id"], {
+            "client_ip": audit["client_ip"],
+            "request_headers": audit["request_headers"],
+            "request_body": request_summary,
+            "model": "webiq_mcp",
+            "endpoint": MCP_PATH,
+            "request_size": audit["request_size"],
+            "user_id": audit["user_id"],
+        })
+    except Exception as exc:  # pragma: no cover - auditing must not break MCP
+        print(f"[WebIQ] failed to start MCP audit record: {exc}")
+    return audit
+
+
+def _complete_mcp_audit(
+    audit: dict,
+    *,
+    status_code: int,
+    upstream_status: Optional[int],
+    response_size: int,
+    response_session_id: Optional[str],
+    stream_completed: bool,
+    error: Optional[str] = None,
+) -> None:
+    """Complete a body-free MCP audit record in the file and request cache."""
+    duration = time.time() - audit["started"]
+    response_summary = {
+        "body_logged": False,
+        "stream_completed": stream_completed,
+        "mcp_session_id": response_session_id,
+    }
+    entry = {
+        "id": audit["id"],
+        "timestamp": int(audit["started"]),
+        "type": "webiq_mcp",
+        "endpoint": MCP_PATH,
+        "client_ip": audit["client_ip"],
+        "user_id": audit["user_id"],
+        "method": audit["http_method"],
+        "mcp_method": audit["mcp_method"],
+        "mcp_name": audit["mcp_name"],
+        "request_session_id": audit["request_session_id"],
+        "response_session_id": response_session_id,
+        "request_size": audit["request_size"],
+        "response_size": response_size,
+        "body_logged": False,
+        "stream_completed": stream_completed,
+        "upstream": {
+            "endpoint": _audit_endpoint(MCP_PATH),
+            "status_code": upstream_status,
+        },
+        "status_code": status_code,
+        "error": error,
+        "duration_ms": int(duration * 1000),
+        "state": STATE_COMPLETED if status_code < 400 else STATE_ERROR,
+    }
+    try:
+        record_search_to_file(entry)
+    except Exception as exc:  # pragma: no cover
+        print(f"[WebIQ] failed to record MCP audit: {exc}")
+    try:
+        cache.complete_request(audit["id"], {
+            "request_body": audit["request_summary"],
+            "response_body": response_summary,
+            "status_code": status_code,
+            "request_size": audit["request_size"],
+            "response_size": response_size,
+            "duration": round(duration, 3),
+            "user_id": audit["user_id"],
+            "stream_completed": stream_completed,
+            "error": error,
+        })
+    except Exception as exc:  # pragma: no cover
+        print(f"[WebIQ] failed to complete MCP cache record: {exc}")
+
+
 @webiq_bp.route(MCP_PATH, methods=["GET", "POST", "DELETE"])
 def webiq_mcp():
     """Transparently proxy the Web IQ Streamable HTTP MCP transport."""
     body = request.get_data()
     headers = {name.lower(): value for name, value in request.headers.items()}
+    audit = _start_mcp_audit(body, headers)
     try:
         upstream = mcp_request(
             request.method,
@@ -247,7 +390,16 @@ def webiq_mcp():
         )
     except WebIQError as exc:
         counters.incr("webiq.mcp_error")
-        response, status = _error_response(str(exc), exc.status_code)
+        response, status = _error_response(str(exc), exc.status_code, "mcp")
+        _complete_mcp_audit(
+            audit,
+            status_code=status,
+            upstream_status=None,
+            response_size=len(response.get_data()),
+            response_session_id=None,
+            stream_completed=False,
+            error=str(exc),
+        )
         return response, status
 
     if upstream.ok:
@@ -255,18 +407,37 @@ def webiq_mcp():
     else:
         counters.incr("webiq.mcp_error")
 
+    response_session_id = _header_value(upstream.headers, "mcp-session-id")
+
     @stream_with_context
     def generate():
+        response_size = 0
+        stream_completed = False
         try:
             for chunk in upstream.iter_content(chunk_size=64 * 1024):
                 if chunk:
+                    response_size += len(chunk)
                     yield chunk
+            stream_completed = True
         finally:
             upstream.close()
+            _complete_mcp_audit(
+                audit,
+                status_code=upstream.status_code,
+                upstream_status=upstream.status_code,
+                response_size=response_size,
+                response_session_id=response_session_id,
+                stream_completed=stream_completed,
+            )
 
-    return Response(
+    response = Response(
         generate(),
         status=upstream.status_code,
         headers=passthrough_headers(upstream.headers),
         direct_passthrough=True,
     )
+    content_type = _header_value(upstream.headers, "content-type") or ""
+    if content_type.split(";", 1)[0].strip().lower() == "text/event-stream":
+        response.headers["X-Accel-Buffering"] = "no"
+        response.headers["Cache-Control"] = "no-cache"
+    return response

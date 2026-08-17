@@ -99,6 +99,15 @@ API_PATHS: Dict[str, str] = {
 }
 ALL_PATHS = frozenset((*API_PATHS, MCP_PATH))
 
+# Standard HTTP fields used by Streamable HTTP plus the open-ended MCP header
+# namespace. MCP 2026-07-28 added Mcp-Method, Mcp-Name and Mcp-Param-*; keeping
+# a fixed list here would silently break every later protocol addition. Client
+# authentication is still replaced by the server-held x-apikey, and requests
+# owns Host, framing and connection headers.
+MCP_STANDARD_REQUEST_HEADERS = frozenset({
+    "accept", "content-type", "last-event-id",
+})
+
 # Kept as a public compatibility constant for clients/tests that imported the
 # original web-only endpoint.
 ENDPOINT = API_BASE_URL + WEB_PATH
@@ -202,10 +211,30 @@ def endpoint_for(settings: Any, api_path: str = WEB_PATH) -> str:
     if legacy_endpoint:
         if api_path == WEB_PATH:
             return legacy_endpoint
-        if legacy_endpoint.endswith(WEB_PATH):
-            return legacy_endpoint[:-len(WEB_PATH)].rstrip("/") + api_path
+        if legacy_endpoint.rstrip("/").endswith(WEB_PATH):
+            normalized = legacy_endpoint.rstrip("/")
+            return normalized[:-len(WEB_PATH)].rstrip("/") + api_path
+        # Do not silently split traffic between a legacy Web Search mock and
+        # production Web IQ. That can spend real quota and disclose test data.
+        raise ValueError(
+            "webiq_endpoint is a Web Search-only URL and cannot safely route "
+            f"{api_path}; configure webiq_base_url for all Web IQ services"
+        )
 
     return API_BASE_URL + api_path
+
+
+def timeout_for(settings: Any, api_path: str) -> int:
+    """Resolve the REST read timeout, with slower services independently tunable."""
+    field = {
+        "/v3/browse": "webiq_browse_timeout",
+        "/v3/search/classic": "webiq_classic_timeout",
+    }.get(api_path)
+    if field:
+        configured = getattr(settings, field, None)
+        if configured is not None:
+            return max(1, int(configured))
+    return max(1, int(getattr(settings, "webiq_timeout", 30)))
 
 
 def passthrough_headers(headers: Any) -> List[Tuple[str, str]]:
@@ -242,8 +271,13 @@ def search(
         raise WebIQError("Microsoft Web IQ is not configured on this server.", 503)
 
     try:
+        upstream_url = endpoint_for(settings, api_path)
+    except ValueError as exc:
+        raise WebIQError(str(exc), 503) from exc
+
+    try:
         response = requests.post(
-            endpoint_for(settings, api_path),
+            upstream_url,
             headers={
                 # The client's own x-apikey/Authorization are deliberately not
                 # forwarded: this server's key is the only one that is used.
@@ -252,7 +286,7 @@ def search(
                 "content-type": content_type or "application/json",
             },
             data=body,
-            timeout=settings.webiq_timeout,
+            timeout=timeout_for(settings, api_path),
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
         raise WebIQError(f"Web IQ connection failed: {type(exc).__name__}", 504) from exc
@@ -297,18 +331,22 @@ def mcp_request(
         raise WebIQError("Microsoft Web IQ is not configured on this server.", 503)
 
     forwarded_headers = {"x-apikey": settings.webiq_api_key}
-    for name in (
-        "accept", "content-type", "mcp-protocol-version", "mcp-session-id",
-        "last-event-id",
-    ):
-        value = request_headers.get(name)
-        if value:
+    for raw_name, value in request_headers.items():
+        name = raw_name.lower().strip()
+        if not value:
+            continue
+        if name in MCP_STANDARD_REQUEST_HEADERS or name.startswith("mcp-"):
             forwarded_headers[name] = value
+
+    try:
+        upstream_url = endpoint_for(settings, MCP_PATH)
+    except ValueError as exc:
+        raise WebIQError(str(exc), 503) from exc
 
     try:
         response = requests.request(
             method,
-            endpoint_for(settings, MCP_PATH),
+            upstream_url,
             headers=forwarded_headers,
             data=body if method not in ("GET", "DELETE") or body else None,
             # Streamable HTTP GET may remain open indefinitely. Bound connect

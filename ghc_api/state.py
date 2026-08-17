@@ -97,6 +97,9 @@ class State:
 
         # Microsoft Web IQ settings. The API key may be loaded directly from
         # config.yaml; it is never exposed to browser clients.
+        # Internal name retained for compatibility with older integrations;
+        # config.yaml now calls this enable_webiq because it gates every REST
+        # service and MCP, not only Web Search.
         self.enable_webiq_search: bool = False
         self.webiq_api_key: str = ""
         # All-service upstream origin/prefix override. Empty uses
@@ -110,7 +113,12 @@ class State:
         # every default is Microsoft's. Server-side defaults would silently make
         # this endpoint disagree with the API it claims to be.
         self.webiq_timeout: int = 30
-        # Append every Web IQ REST request and response to a daily .jl file
+        # Browse live-crawl and Classic multi-vertical requests can take longer
+        # than ordinary search and therefore have independent read timeouts.
+        self.webiq_browse_timeout: int = 120
+        self.webiq_classic_timeout: int = 60
+        # Append every Web IQ REST request and response, plus body-free MCP
+        # audit metadata, to a daily .jl file
         # under <config_dir>/webiq/. On by default: unlike the LLM request
         # dumps, this is the only untruncated record of a search.
         self.log_webiq_requests: bool = True
