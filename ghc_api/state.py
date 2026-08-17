@@ -95,20 +95,35 @@ class State:
         self.enable_web_search_proxy: bool = False
         self.web_search_proxy_endpoint: str = ""
 
-        # Microsoft Web IQ search settings. The API key may be loaded directly
-        # from config.yaml; it is never exposed to browser clients.
+        # Microsoft Web IQ settings. The API key may be loaded directly from
+        # config.yaml; it is never exposed to browser clients.
+        # Internal name retained for compatibility with older integrations;
+        # config.yaml now calls this enable_webiq because it gates every REST
+        # service and MCP, not only Web Search.
         self.enable_webiq_search: bool = False
         self.webiq_api_key: str = ""
-        # Empty means the spec endpoint (webiq.ENDPOINT). Override for a mock, a
-        # recording proxy or a regional deployment. The URL is deliberately not
-        # duplicated here: two copies of it is how a wrong host survived before.
+        # All-service upstream origin/prefix override. Empty uses
+        # https://api.microsoft.ai. Useful for a mock or recording proxy.
+        self.webiq_base_url: str = ""
+        # Legacy Web Search-only full URL override. Kept for existing configs;
+        # new configs should use webiq_base_url so every API follows it.
         self.webiq_endpoint: str = ""
-        # There are deliberately no search-parameter settings. /v3/search/web is
-        # a transparent proxy: the client's body is forwarded as received, so
+        # There are deliberately no API-parameter settings. REST bodies are
+        # transparently forwarded as received, so
         # every default is Microsoft's. Server-side defaults would silently make
         # this endpoint disagree with the API it claims to be.
         self.webiq_timeout: int = 30
-        # Append every /v3/search/web request and response to a daily .jl file
+        # Browse live-crawl and Classic multi-vertical requests can take longer
+        # than ordinary search and therefore have independent read timeouts.
+        self.webiq_browse_timeout: int = 120
+        self.webiq_classic_timeout: int = 60
+        # Streamable HTTP GET intentionally has no read timeout. Other MCP
+        # methods are bounded, and all active MCP streams share a non-blocking
+        # process-local cap so they cannot consume every waitress thread.
+        self.webiq_mcp_timeout: int = 120
+        self.webiq_mcp_max_concurrent_streams: int = 4
+        # Append every Web IQ REST request and response, plus body-free MCP
+        # audit metadata, to a daily .jl file
         # under <config_dir>/webiq/. On by default: unlike the LLM request
         # dumps, this is the only untruncated record of a search.
         self.log_webiq_requests: bool = True

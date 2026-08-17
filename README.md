@@ -24,7 +24,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
 - **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
-- **Microsoft Web IQ Search**: `/v3/search/web`, a transparent proxy for the official Web Search v3 API, backed by a server-held API key
+- **Microsoft Web IQ**: transparent proxies for all six Web IQ v3 REST APIs and its Streamable HTTP MCP server, backed by a server-held API key
 
 ## Maintenance Guides
 
@@ -393,7 +393,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, `/v3/search/web`, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -482,22 +482,61 @@ every `/v1/messages` backend (native Anthropic, Chat Completions translation, an
 Responses compatibility path), because an ambiguous body cannot be forwarded with a
 predictable meaning.
 
-### Microsoft Web IQ Search
+### Microsoft Web IQ
 
-- `POST /v3/search/web` - Web Search v3, backed by the server-held Web IQ API key
+All production Web IQ v3 services are exposed using the server-held API key:
 
-A transparent proxy for the [official Microsoft Web Search v3
-API](https://webiq.microsoft.ai/documentation/api-reference/web/). The request
-body is forwarded as the bytes the client sent, and the upstream status, headers
-and body come back verbatim. A client written against `api.microsoft.ai` works
-here by changing only the base URL — the same deal the OpenAI- and
-Anthropic-shaped endpoints offer.
+- `POST /v3/search/web` - Web Search
+- `POST /v3/search/videos` - Videos Search
+- `POST /v3/browse` - direct URL content extraction
+- `POST /v3/search/news` - News Search
+- `POST /v3/search/images` - Images Search
+- `POST /v3/search/classic` - multi-answer Classic Search
+- `GET|POST|DELETE /v3/mcp` - Streamable HTTP MCP server (`web`, `videos`,
+  `browse`, `news`, and `images` tools)
+
+These are transparent proxies for the [official Microsoft Web IQ v3
+APIs](https://webiq.microsoft.ai/documentation/). REST request bodies are
+forwarded as the bytes the client sent, and upstream status, headers, and bodies
+come back verbatim. MCP standard transport headers and the open-ended `Mcp-*`
+namespace—including `Mcp-Method`, `Mcp-Name`, and `Mcp-Param-*`—are passed
+through, while client authentication and hop-by-hop/framing headers are replaced
+or dropped. A client written against `api.microsoft.ai` works by changing only
+the base URL.
+
+Enable them in `config.yaml`:
+
+```yaml
+enable_webiq: true
+webiq_api_key: "YOUR_WEB_IQ_KEY"
+webiq_base_url: "" # optional all-service upstream override
+webiq_timeout: 30
+webiq_browse_timeout: 120
+webiq_classic_timeout: 60
+webiq_mcp_timeout: 120
+webiq_mcp_max_concurrent_streams: 4
+log_webiq_requests: true
+```
 
 ```bash
 curl -X POST http://localhost:8313/v3/search/web \
   -H "content-type: application/json" \
   -d '{"query": "latest trends in LLM RAG", "maxResults": 10, "contentFormat": "passage"}'
 ```
+
+An MCP client can use `http://localhost:8313/v3/mcp` without an `x-apikey`; the
+proxy supplies its configured key. Configure `webiq_base_url` to override the
+upstream origin for every service. The old `enable_webiq_search` name remains a
+compatibility alias for `enable_webiq`. The legacy `webiq_endpoint` option still
+overrides only Web Search; if it is not a standard `.../v3/search/web` URL, all
+other services fail closed instead of silently falling through to production.
+`webiq_timeout` covers ordinary REST searches and MCP connection setup; Browse
+and Classic use their longer service-specific timeouts shown above. MCP GET is
+an intentionally long-lived stream with no read timeout, while POST/DELETE use
+`webiq_mcp_timeout`. At most `webiq_mcp_max_concurrent_streams` MCP responses
+may occupy waitress threads at once; excess requests fail quickly with HTTP 503
+and `Retry-After` instead of queueing behind streams. Keep this cap comfortably
+below `server_threads`, or use an asynchronous server for high MCP concurrency.
 
 What the proxy adds is key custody (`webiq_api_key` never leaves the server), the
 optional user-token auth gate, and logging. It adds nothing to the search itself:
@@ -512,10 +551,10 @@ optional user-token auth gate, and logging. It adds nothing to the search itself
   Microsoft adds tomorrow works here today, and an invalid request gets the
   authoritative upstream error instead of an imitation of it.
 - **Errors and error headers are passed through too**, so `Retry-After` on a 429
-  reaches the client that has to back off. The single exception is upstream
-  401/403: those mean *this server's* key was rejected, so they surface as 503
-  with an explicit message rather than being confused with this proxy rejecting
-  the caller's token.
+  reaches the client that has to back off. Upstream credential failures surface
+  as 503 because they concern this server's key, not the caller's token. A
+  Browse 403 is preserved because Web IQ also uses it for blocked URLs and
+  filtered content.
 - **A client's own `x-apikey` is ignored**, never forwarded, and redacted before
   the request is logged. Searches always spend this server's key and quota.
 
@@ -527,10 +566,12 @@ when the Web IQ toggle is on. That tool schema stays narrow (`query`,
 is what turns those arguments into a full official request. See
 `scripts/webiq_search_demo.py`.
 
-Every call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
-(`log_webiq_requests`, on by default), which is the only untruncated record of a
-search, and added to the shared request cache so it appears in the request list,
-full-text search, detail view and export under the model name `webiq_search`.
+Every REST call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
+(`log_webiq_requests`, on by default), which is the only untruncated record, and
+added to the shared request cache with a service-specific model name such as
+`webiq_search`, `webiq_videos`, or `webiq_browse`. MCP calls are audited in both
+places with HTTP/MCP method, name, status, duration, session IDs and user ID;
+streaming MCP request and response bodies are never persisted.
 
 ### Configured Upstream Proxy
 
@@ -681,7 +722,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v3/search/web`, configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`; `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
@@ -713,6 +754,17 @@ server {
     }
     # Aliases without the /v1 prefix
     location ~ ^/(chat/completions|responses|models)(/|$) {
+        auth_basic off;
+        proxy_pass http://127.0.0.1:8313;
+        proxy_buffering off;
+        proxy_read_timeout 1200s;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # Web IQ REST and MCP routes use the same client bearer-token model.
+    # Buffering must be off because /v3/mcp may return an SSE stream.
+    location ^~ /v3/ {
         auth_basic off;
         proxy_pass http://127.0.0.1:8313;
         proxy_buffering off;
@@ -763,7 +815,7 @@ sudo htpasswd -B /etc/nginx/ghc-api.htpasswd alice
 ### Critical caveats
 
 - **Never apply `auth_basic` to LLM API paths.** Clients like Codex, Claude Code, and the OpenAI SDK send `Authorization: Bearer <token>`, not HTTP basic. nginx would 401 the request before ghc-api ever sees it.
-- **Always set `proxy_buffering off;` and a long `proxy_read_timeout`** for any location that forwards LLM traffic — otherwise streamed responses stall or get truncated.
+- **Always set `proxy_buffering off;` and a long `proxy_read_timeout`** for any location that forwards LLM or MCP traffic — otherwise streamed responses stall or get truncated. MCP SSE responses also set `X-Accel-Buffering: no` and `Cache-Control: no-cache` defensively.
 - **The two `Authorization` schemes don't conflict**: basic-auth lives in admin `location` blocks (`Authorization: Basic ...`), user tokens live in LLM `location` blocks (`Authorization: Bearer ...`). They never coexist on the same request.
 - **For local-only single-user use without nginx**, bind ghc-api to localhost so the admin endpoints aren't reachable from the network: `ghc-api --enable-auth -a 127.0.0.1`.
 

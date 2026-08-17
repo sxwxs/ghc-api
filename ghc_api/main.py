@@ -324,17 +324,48 @@ def main():
 
         # Load Microsoft Web IQ settings. The API key is deliberately kept in
         # server-side state and only a configured/not-configured flag reaches UI.
-        if 'enable_webiq_search' in config:
+        if 'enable_webiq' in config:
+            state.enable_webiq_search = bool(config['enable_webiq'])
+            if (
+                'enable_webiq_search' in config
+                and bool(config['enable_webiq_search']) != state.enable_webiq_search
+            ):
+                print(
+                    "WARNING: enable_webiq takes precedence over the legacy "
+                    "enable_webiq_search setting."
+                )
+        elif 'enable_webiq_search' in config:
+            # Compatibility alias from the original Web Search-only release.
             state.enable_webiq_search = bool(config['enable_webiq_search'])
         if 'webiq_api_key' in config:
             state.webiq_api_key = str(config['webiq_api_key'] or '')
+        if 'webiq_base_url' in config:
+            state.webiq_base_url = str(config['webiq_base_url'] or '')
         if 'webiq_endpoint' in config:
             state.webiq_endpoint = str(config['webiq_endpoint'] or '')
-        # There are no search-parameter settings on purpose: /v3/search/web
-        # forwards the client's body as received, so every default is
-        # Microsoft's.
+        if (
+            state.webiq_endpoint
+            and not state.webiq_base_url
+            and not state.webiq_endpoint.rstrip('/').endswith(webiq.WEB_PATH)
+        ):
+            print(
+                "WARNING: the legacy webiq_endpoint is a non-standard Web "
+                "Search-only URL. Other Web IQ services will fail closed; set "
+                "webiq_base_url to route all services to the same upstream."
+            )
+        # There are no API-parameter settings on purpose: REST requests forward
+        # the client's body as received, so every default is Microsoft's.
         if 'webiq_timeout' in config:
             state.webiq_timeout = max(1, int(config['webiq_timeout']))
+        if 'webiq_browse_timeout' in config:
+            state.webiq_browse_timeout = max(1, int(config['webiq_browse_timeout']))
+        if 'webiq_classic_timeout' in config:
+            state.webiq_classic_timeout = max(1, int(config['webiq_classic_timeout']))
+        if 'webiq_mcp_timeout' in config:
+            state.webiq_mcp_timeout = max(1, int(config['webiq_mcp_timeout']))
+        if 'webiq_mcp_max_concurrent_streams' in config:
+            state.webiq_mcp_max_concurrent_streams = max(
+                1, int(config['webiq_mcp_max_concurrent_streams']))
         if 'log_webiq_requests' in config:
             state.log_webiq_requests = bool(config['log_webiq_requests'])
 
@@ -398,7 +429,7 @@ def main():
         print("       a reverse proxy (e.g. nginx basic-auth) in front to gate them.")
         print("       See README \"Production deployment\" for a sample nginx config.")
         print("")
-        print(f"       For local-only use, bind to 127.0.0.1: ghc-api --enable-auth -a 127.0.0.1")
+        print("       For local-only use, bind to 127.0.0.1: ghc-api --enable-auth -a 127.0.0.1")
         print("=" * 60 + "\n")
 
     # Create the Flask app
@@ -424,7 +455,8 @@ def main():
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
     if webiq.is_configured(state):
-        print(f"Web Search v3 API: http://{host}:{port}/v3/search/web")
+        print(f"Web IQ v3 REST APIs: http://{host}:{port}/v3/")
+        print(f"Web IQ MCP server: http://{host}:{port}/v3/mcp")
 
     serve_app(app, host=host, port=port, debug=debug)
 

@@ -262,33 +262,41 @@ cache_max_request_size: 1048576
 enable_web_search_proxy: false
 web_search_proxy_endpoint: "http://127.0.0.1:5002"
 
-# Microsoft Web IQ Search
-# -----------------------
-# Exposes POST /v3/search/web, a transparent proxy for the official Microsoft
-# Web Search v3 API backed by the key below:
-#   https://webiq.microsoft.ai/documentation/api-reference/web/
-# The client's request body is forwarded as received and the upstream status,
-# headers and body are returned verbatim, so any client written against
-# api.microsoft.ai works here by changing only the base URL, and every search
-# parameter and default is Microsoft's. There are deliberately no server-side
-# search settings: a client that wants passage format asks for it.
-# A client's own x-apikey header is ignored (this server's key is always the
-# one used) and redacted before the request is logged.
-# webiq_endpoint overrides the upstream URL; leave it empty to use the endpoint
-# the specification defines.
-# The proxy never searches on a model's behalf: clients declare the
-# 'webiq_search' function tool, the model decides whether and what to search,
-# and the client executes the tool call against that endpoint. The built-in
-# chat UI (/chat) does this automatically when the Web IQ toggle is on.
-# The key stays on this server and is never sent to the UI or to Copilot.
-enable_webiq_search: false
+# Microsoft Web IQ
+# ----------------
+# Exposes transparent proxies for all Web IQ v3 REST APIs plus its Streamable
+# HTTP MCP server, backed by the key below:
+#   POST /v3/search/web       POST /v3/search/videos
+#   POST /v3/browse           POST /v3/search/news
+#   POST /v3/search/images    POST /v3/search/classic
+#   GET|POST|DELETE /v3/mcp
+# Documentation: https://webiq.microsoft.ai/documentation/
+# REST request bytes and upstream responses are passed through unchanged, so
+# clients written against api.microsoft.ai work by changing only the base URL.
+# There are no server-side API parameter defaults or validation.
+# A client's x-apikey/Authorization is ignored and redacted; this server's key
+# is always used and is never sent to the UI or Copilot.
+enable_webiq: false
+# Compatibility alias for older config files: enable_webiq_search
 webiq_api_key: ""
+# Override the upstream origin/prefix for every Web IQ route (for example a
+# local recording proxy). Empty uses https://api.microsoft.ai.
+webiq_base_url: ""
+# Legacy full-URL override for /v3/search/web only. Prefer webiq_base_url.
 webiq_endpoint: ""
+# REST read timeouts in seconds. Browse live crawl and Classic multi-vertical
+# aggregation can take longer than ordinary search.
 webiq_timeout: 30
-# Every /v3/search/web call (request body, upstream status, response or error)
-# is appended to <config_dir>/webiq/YYYY-MM-DD.jl. That file is the only
-# untruncated record of a search, so logging is on by default. The API key is
-# never written to it.
+webiq_browse_timeout: 120
+webiq_classic_timeout: 60
+# MCP GET streams have no read timeout. POST/DELETE use this finite read
+# timeout, and the non-blocking process-local cap reserves waitress threads for
+# LLM traffic. Raise the cap only together with server_threads.
+webiq_mcp_timeout: 120
+webiq_mcp_max_concurrent_streams: 4
+# Every REST call (request body, upstream status, response or error) and
+# body-free MCP audit record is appended to <config_dir>/webiq/YYYY-MM-DD.jl.
+# Logging is on by default; MCP request/response bodies are never persisted.
 log_webiq_requests: true
 
 # User Authentication

@@ -1,14 +1,14 @@
 """
-Microsoft Web IQ search, exposed as an LLM-callable tool.
+Microsoft Web IQ REST and MCP proxy, with Web Search as an LLM-callable tool.
 
 Design
 ------
 The proxy does NOT search on the model's behalf and does NOT inject anything
-into prompts. It only exposes one plain endpoint (``POST /v3/search/web``)
-that runs a search with the server-held API key.
+into prompts. It exposes the six official Web IQ v3 REST endpoints, plus the
+Web IQ Streamable HTTP MCP endpoint, using the server-held API key.
 
-That endpoint is the official Microsoft Web Search v3 contract:
-https://webiq.microsoft.ai/documentation/api-reference/web/
+The REST contracts are Microsoft's official Web IQ v3 contracts:
+https://webiq.microsoft.ai/documentation/api-reference/
 
 It is a transparent proxy in the strict sense -- the request body is forwarded
 as the raw bytes the client sent, and the upstream status, headers and body
@@ -21,9 +21,9 @@ gets the authoritative upstream error rather than an imitation of it.
 The only thing that is not passed through is the API key: the client's own
 ``x-apikey``/``Authorization`` headers are never forwarded (that is the whole
 point of key custody) and never persisted (see ``auth.redact_auth_headers``).
-The single response rewrite is upstream 401/403 -> 503, because those describe
-*this server's* credentials and must not be confused with this proxy rejecting
-the caller's token.
+Upstream authentication failures become 503 because they describe *this
+server's* credentials, not the caller's token. Browse 403 is preserved because
+Microsoft also uses it for URL/content policy rejection, not only key access.
 
 The caller (the built-in chat UI, or any API client) declares ``webiq_search``
 as a normal function tool, lets the model decide whether and what to search,
@@ -38,7 +38,7 @@ calls, no silent tool rewriting, no search failure escalating into a failed
 chat request.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import requests
 
@@ -83,11 +83,34 @@ TOOL_PARAMETERS: Dict[str, Any] = {
     "additionalProperties": False,
 }
 
-# The endpoint the Web Search v3 specification defines, used unless config.yaml
-# overrides it via webiq_endpoint (for a mock, a recording proxy, or a regional
-# deployment), matching the github_api_base_url/copilot_api_base_url overrides
-# elsewhere in this project.
-ENDPOINT = "https://api.microsoft.ai/v3/search/web"
+# The complete public Web IQ v3 surface. Keeping this as an allowlist prevents
+# a caller from turning the server-held key into a credential for an arbitrary
+# path while still allowing additive request fields to pass through untouched.
+API_BASE_URL = "https://api.microsoft.ai"
+WEB_PATH = "/v3/search/web"
+MCP_PATH = "/v3/mcp"
+API_PATHS: Dict[str, str] = {
+    WEB_PATH: "web",
+    "/v3/search/videos": "videos",
+    "/v3/browse": "browse",
+    "/v3/search/news": "news",
+    "/v3/search/images": "images",
+    "/v3/search/classic": "classic",
+}
+ALL_PATHS = frozenset((*API_PATHS, MCP_PATH))
+
+# Standard HTTP fields used by Streamable HTTP plus the open-ended MCP header
+# namespace. MCP 2026-07-28 added Mcp-Method, Mcp-Name and Mcp-Param-*; keeping
+# a fixed list here would silently break every later protocol addition. Client
+# authentication is still replaced by the server-held x-apikey, and requests
+# owns Host, framing and connection headers.
+MCP_STANDARD_REQUEST_HEADERS = frozenset({
+    "accept", "content-type", "last-event-id",
+})
+
+# Kept as a public compatibility constant for clients/tests that imported the
+# original web-only endpoint.
+ENDPOINT = API_BASE_URL + WEB_PATH
 
 # Response headers that must not be copied from upstream to the client.
 #
@@ -123,9 +146,16 @@ class WebIQError(RuntimeError):
     server's key. Everything else is returned verbatim, not raised.
     """
 
-    def __init__(self, message: str, status_code: int = 502):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        *,
+        upstream_status: Optional[int] = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.upstream_status = upstream_status
 
 
 def pop_legacy_option(payload: Dict) -> bool:
@@ -168,9 +198,50 @@ def tool_definition(api_style: str) -> Dict[str, Any]:
     }
 
 
-def endpoint_for(settings: Any) -> str:
-    """The upstream URL to call: the configured override, or the spec one."""
-    return getattr(settings, "webiq_endpoint", "") or ENDPOINT
+def endpoint_for(settings: Any, api_path: str = WEB_PATH) -> str:
+    """Return the upstream URL for one allowlisted Web IQ path.
+
+    ``webiq_base_url`` is the all-service override and should be an origin (or
+    reverse-proxy prefix), for example ``http://127.0.0.1:9000``. The old
+    ``webiq_endpoint`` setting remains compatible for Web Search. If that old
+    value is the standard-shaped ``.../v3/search/web`` URL, its base is also
+    safely derivable for the other services.
+    """
+    if api_path not in ALL_PATHS:
+        raise ValueError(f"Unsupported Web IQ API path: {api_path}")
+
+    base_url = getattr(settings, "webiq_base_url", "")
+    if base_url:
+        return base_url.rstrip("/") + api_path
+
+    legacy_endpoint = getattr(settings, "webiq_endpoint", "")
+    if legacy_endpoint:
+        if api_path == WEB_PATH:
+            return legacy_endpoint
+        if legacy_endpoint.rstrip("/").endswith(WEB_PATH):
+            normalized = legacy_endpoint.rstrip("/")
+            return normalized[:-len(WEB_PATH)].rstrip("/") + api_path
+        # Do not silently split traffic between a legacy Web Search mock and
+        # production Web IQ. That can spend real quota and disclose test data.
+        raise ValueError(
+            "webiq_endpoint is a Web Search-only URL and cannot safely route "
+            f"{api_path}; configure webiq_base_url for all Web IQ services"
+        )
+
+    return API_BASE_URL + api_path
+
+
+def timeout_for(settings: Any, api_path: str) -> int:
+    """Resolve the REST read timeout, with slower services independently tunable."""
+    field = {
+        "/v3/browse": "webiq_browse_timeout",
+        "/v3/search/classic": "webiq_classic_timeout",
+    }.get(api_path)
+    if field:
+        configured = getattr(settings, field, None)
+        if configured is not None:
+            return max(1, int(configured))
+    return max(1, int(getattr(settings, "webiq_timeout", 30)))
 
 
 def passthrough_headers(headers: Any) -> List[Tuple[str, str]]:
@@ -192,8 +263,9 @@ def search(
     settings: Any,
     *,
     content_type: str = "application/json",
+    api_path: str = WEB_PATH,
 ) -> requests.Response:
-    """Forward one Web Search v3 request and return the raw upstream response.
+    """Forward one Web IQ REST request and return the raw upstream response.
 
     ``body`` is handed over as received; this function never parses, validates,
     defaults or rewrites it. The caller gets the ``requests.Response`` so it
@@ -206,8 +278,13 @@ def search(
         raise WebIQError("Microsoft Web IQ is not configured on this server.", 503)
 
     try:
+        upstream_url = endpoint_for(settings, api_path)
+    except ValueError as exc:
+        raise WebIQError(str(exc), 503) from exc
+
+    try:
         response = requests.post(
-            endpoint_for(settings),
+            upstream_url,
             headers={
                 # The client's own x-apikey/Authorization are deliberately not
                 # forwarded: this server's key is the only one that is used.
@@ -216,14 +293,20 @@ def search(
                 "content-type": content_type or "application/json",
             },
             data=body,
-            timeout=settings.webiq_timeout,
+            timeout=timeout_for(settings, api_path),
         )
     except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
         raise WebIQError(f"Web IQ connection failed: {type(exc).__name__}", 504) from exc
     except requests.RequestException as exc:
         raise WebIQError(f"Web IQ request failed: {type(exc).__name__}") from exc
 
-    if response.status_code in (401, 403):
+    # Browse also uses 403 for blocked URLs and filtered content, which is an
+    # authoritative result the caller needs. Its credential failure is
+    # ambiguous, so only the unambiguous 401 is rewritten on that endpoint.
+    rejected_server_key = response.status_code == 401 or (
+        response.status_code == 403 and api_path != "/v3/browse"
+    )
+    if rejected_server_key:
         detail = (response.text or "").strip()
         if len(detail) > 500:
             detail = detail[:500] + "..."
@@ -233,18 +316,99 @@ def search(
             "Check webiq_api_key in config.yaml."
             + (f" Upstream said: {detail}" if detail else ""),
             503,
+            upstream_status=response.status_code,
         )
 
     return response
 
 
-def result_count(body: Any) -> Optional[int]:
-    """Number of webResults in a parsed response body, or None if unknown.
+def mcp_request(
+    method: str,
+    body: bytes,
+    settings: Any,
+    *,
+    request_headers: Mapping[str, str],
+) -> requests.Response:
+    """Open a streaming request to the official Web IQ MCP server.
 
-    Used for the log line and nothing else; the response itself is never
-    inspected on its way to the client.
+    MCP transport headers are end-to-end protocol state and must survive the
+    proxy. Authentication and connection/framing headers do not: the former is
+    replaced with this server's key and ``requests`` owns the latter.
+    """
+    if not is_configured(settings):
+        raise WebIQError("Microsoft Web IQ is not configured on this server.", 503)
+
+    forwarded_headers = {"x-apikey": settings.webiq_api_key}
+    for raw_name, value in request_headers.items():
+        name = raw_name.lower().strip()
+        if not value:
+            continue
+        if name in MCP_STANDARD_REQUEST_HEADERS or name.startswith("mcp-"):
+            forwarded_headers[name] = value
+
+    try:
+        upstream_url = endpoint_for(settings, MCP_PATH)
+    except ValueError as exc:
+        raise WebIQError(str(exc), 503) from exc
+
+    normalized_method = method.upper()
+    connect_timeout = max(1, int(getattr(settings, "webiq_timeout", 30)))
+    if normalized_method == "GET":
+        # GET is the long-lived server-to-client event channel. The route-level
+        # concurrency cap prevents these intentionally unbounded reads from
+        # consuming the entire waitress thread pool.
+        timeout = (connect_timeout, None)
+    else:
+        # A stuck tools/call or DELETE must eventually release its WSGI thread.
+        read_timeout = max(1, int(getattr(
+            settings, "webiq_mcp_timeout", connect_timeout)))
+        timeout = (connect_timeout, read_timeout)
+
+    try:
+        response = requests.request(
+            normalized_method,
+            upstream_url,
+            headers=forwarded_headers,
+            data=body if normalized_method not in ("GET", "DELETE") else None,
+            timeout=timeout,
+            stream=True,
+        )
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+        raise WebIQError(f"Web IQ MCP connection failed: {type(exc).__name__}", 504) from exc
+    except requests.RequestException as exc:
+        raise WebIQError(f"Web IQ MCP request failed: {type(exc).__name__}") from exc
+
+    if response.status_code in (401, 403):
+        response.close()
+        raise WebIQError(
+            "Web IQ rejected this server's API key "
+            f"(upstream HTTP {response.status_code}). "
+            "Check webiq_api_key in config.yaml.",
+            503,
+            upstream_status=response.status_code,
+        )
+    return response
+
+
+def result_count(body: Any, api_path: str = WEB_PATH) -> Optional[int]:
+    """Number of primary results in a parsed REST response, if applicable.
+
+    Used for logging only; response bodies are never changed. Classic combines
+    verticals, so its count is the sum of all top-level ``*Results`` arrays.
+    Browse has one document rather than a result array and therefore returns
+    ``None``.
     """
     if not isinstance(body, dict):
         return None
-    results = body.get("webResults")
+    if api_path == "/v3/search/classic":
+        arrays = [value for key, value in body.items()
+                  if key.endswith("Results") and isinstance(value, list)]
+        return sum(len(value) for value in arrays) if arrays else None
+    result_key = {
+        WEB_PATH: "webResults",
+        "/v3/search/videos": "videoResults",
+        "/v3/search/news": "newsResults",
+        "/v3/search/images": "imageResults",
+    }.get(api_path)
+    results = body.get(result_key) if result_key else None
     return len(results) if isinstance(results, list) else None

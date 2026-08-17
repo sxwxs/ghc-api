@@ -26,8 +26,11 @@ from unittest import mock
 from ghc_api.app import create_app
 from ghc_api.auth import REDACTED_HEADERS, redact_auth_headers
 from ghc_api.cache import cache
+from ghc_api.counters import counters
+from ghc_api.routes import webiq as webiq_routes
 from ghc_api.routes.webiq import REQUEST_LIST_MODEL, SEARCH_PATH
 from ghc_api.state import state
+from ghc_api.webiq import MCP_PATH, WebIQError
 from ghc_api.webiq_log import log_dir, record_search_to_file
 
 
@@ -60,6 +63,9 @@ class IsolatedConfigDirTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         cache.cache.clear()
         self.addCleanup(cache.cache.clear)
+        counters.reset()
+        self.addCleanup(counters.reset)
+        self.assertEqual(webiq_routes._mcp_stream_limiter.active(), 0)
         self.client = create_app().test_client()
 
 
@@ -115,6 +121,33 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertIsInstance(entry["duration_ms"], int)
 
     @mock.patch("ghc_api.routes.webiq.search")
+    def test_other_rest_services_use_their_own_endpoint_model_and_count(self, search_mock):
+        search_mock.return_value = upstream_response(
+            200, b'{"newsResults":[{"title":"a"},{"title":"b"}]}')
+
+        res = self.client.post("/v3/search/news", json={"query": "python"})
+
+        self.assertEqual(res.status_code, 200)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["type"], "webiq_news")
+        self.assertEqual(entry["endpoint"], "/v3/search/news")
+        self.assertEqual(entry["result_count"], 2)
+        item = self.client.get("/api/requests").get_json()["items"][0]
+        self.assertEqual(item["model"], "webiq_news")
+        self.assertEqual(item["endpoint"], "/v3/search/news")
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_browse_records_its_url_instead_of_an_empty_query(self, search_mock):
+        search_mock.return_value = upstream_response(200, b'{"title":"Example"}')
+
+        res = self.client.post("/v3/browse", json={"url": "https://example.com"})
+
+        self.assertEqual(res.status_code, 200)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["url"], "https://example.com")
+        self.assertIsNone(entry["query"])
+
+    @mock.patch("ghc_api.routes.webiq.search")
     def test_upstream_failure_is_recorded_with_its_body(self, search_mock):
         search_mock.return_value = upstream_response(
             429, b'{"error":{"code":"TooManyRequests"}}')
@@ -142,6 +175,18 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(entry["error"], "not configured")
         # None, not 0: the request never reached upstream at all.
         self.assertIsNone(entry["upstream"]["status_code"])
+
+    @mock.patch("ghc_api.routes.webiq.search")
+    def test_rejected_server_key_retains_the_upstream_status(self, search_mock):
+        search_mock.side_effect = WebIQError(
+            "bad server key", 503, upstream_status=401)
+
+        res = self.client.post(SEARCH_PATH, json={"query": "python"})
+
+        self.assertEqual(res.status_code, 503)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["status_code"], 503)
+        self.assertEqual(entry["upstream"]["status_code"], 401)
 
     @mock.patch("ghc_api.routes.webiq.search")
     def test_a_malformed_body_is_still_logged(self, search_mock):
@@ -191,6 +236,138 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertIn("x-apikey", REDACTED_HEADERS)
         redacted = redact_auth_headers({"X-Apikey": "k", "X-Api-Key": "k", "Api-Key": "k"})
         self.assertEqual(set(redacted.values()), {"***REDACTED***"})
+
+    @mock.patch("ghc_api.routes.webiq.mcp_request")
+    def test_mcp_is_audited_without_persisting_stream_bodies(self, mcp_mock):
+        before_stats = cache.get_stats()
+        before_model_count = before_stats["model_stats"].get(
+            "webiq_mcp", {}).get("request_count", 0)
+        before_endpoint_count = before_stats["endpoint_stats"].get(
+            MCP_PATH, {}).get("request_count", 0)
+        upstream = upstream_response(200, headers={
+            "content-type": "text/event-stream",
+            "Mcp-Session-Id": "response-session",
+        })
+        upstream.iter_content.return_value = [b"SECRET-STREAM-BODY"]
+        mcp_mock.return_value = upstream
+
+        res = self.client.post(
+            MCP_PATH,
+            data=b"SECRET-REQUEST-BODY",
+            content_type="application/json",
+            headers={
+                "Mcp-Method": "tools/call",
+                "Mcp-Name": "browse",
+                "Mcp-Param-Url": "SECRET-MIRRORED-PARAM",
+                "Mcp-Session-Id": "request-session",
+            },
+        )
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data, b"SECRET-STREAM-BODY")
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["type"], "webiq_mcp")
+        self.assertEqual(entry["method"], "POST")
+        self.assertEqual(entry["mcp_method"], "tools/call")
+        self.assertEqual(entry["mcp_name"], "browse")
+        self.assertEqual(entry["request_session_id"], "request-session")
+        self.assertEqual(entry["response_session_id"], "response-session")
+        self.assertEqual(entry["status_code"], 200)
+        self.assertEqual(entry["user_id"], "anonymous")
+        self.assertTrue(entry["stream_completed"])
+        self.assertFalse(entry["body_logged"])
+        serialized = json.dumps(entry)
+        self.assertNotIn("SECRET-REQUEST-BODY", serialized)
+        self.assertNotIn("SECRET-STREAM-BODY", serialized)
+
+        cached = cache.get_recent_requests(1)[0]
+        self.assertEqual(cached["model"], "webiq_mcp")
+        self.assertEqual(cached["request_body"]["mcp_name"], "browse")
+        self.assertEqual(
+            cached["request_headers"]["Mcp-Param-Url"], "***REDACTED***")
+        self.assertNotIn("SECRET", json.dumps(cached))
+        stats = cache.get_stats()
+        self.assertEqual(
+            stats["model_stats"]["webiq_mcp"]["request_count"],
+            before_model_count + 1,
+        )
+        self.assertEqual(
+            stats["endpoint_stats"][MCP_PATH]["request_count"],
+            before_endpoint_count + 1,
+        )
+
+    @mock.patch("ghc_api.routes.webiq.mcp_request")
+    def test_interrupted_mcp_stream_is_audited_as_error(self, mcp_mock):
+        upstream = upstream_response(200, headers={
+            "content-type": "text/event-stream",
+        })
+        upstream.iter_content.side_effect = RuntimeError("stream broke")
+        mcp_mock.return_value = upstream
+
+        with self.assertRaisesRegex(RuntimeError, "stream broke"):
+            self.client.post(
+                MCP_PATH, data=b"{}", content_type="application/json",
+                buffered=False)
+
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["state"], "error")
+        self.assertEqual(entry["status_code"], 200)
+        self.assertFalse(entry["stream_completed"])
+        self.assertIn("RuntimeError: stream broke", entry["error"])
+        cached = cache.get_recent_requests(1)[0]
+        self.assertEqual(cached["state"], "error")
+        self.assertEqual(counters.snapshot().get("webiq.mcp_error"), 1)
+        self.assertNotIn("webiq.mcp", counters.snapshot())
+        self.assertEqual(webiq_routes._mcp_stream_limiter.active(), 0)
+
+    @mock.patch("ghc_api.routes.webiq.mcp_request")
+    def test_client_disconnect_is_audited_as_cancelled(self, mcp_mock):
+        upstream = upstream_response(200, headers={
+            "content-type": "text/event-stream",
+        })
+        upstream.iter_content.return_value = [b"first", b"second"]
+        mcp_mock.return_value = upstream
+
+        res = self.client.post(
+            MCP_PATH, data=b"{}", content_type="application/json", buffered=False)
+        res.close()
+
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["state"], "cancelled")
+        self.assertEqual(entry["status_code"], 200)
+        self.assertFalse(entry["stream_completed"])
+        self.assertIn("Client disconnected", entry["error"])
+        cached = cache.get_recent_requests(1)[0]
+        self.assertEqual(cached["state"], "cancelled")
+        self.assertEqual(counters.snapshot().get("webiq.mcp_cancelled"), 1)
+        self.assertNotIn("webiq.mcp", counters.snapshot())
+        self.assertEqual(webiq_routes._mcp_stream_limiter.active(), 0)
+
+    @mock.patch(
+        "ghc_api.routes.webiq.mcp_request",
+        side_effect=WebIQError("not configured", 503),
+    )
+    def test_mcp_local_failure_has_its_own_error_and_audit_record(self, _mcp):
+        res = self.client.post(MCP_PATH, data=b"{}", content_type="application/json")
+
+        self.assertEqual(res.status_code, 503)
+        self.assertEqual(res.get_json()["error"]["type"], "webiq_mcp_error")
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["status_code"], 503)
+        self.assertIsNone(entry["upstream"]["status_code"])
+        self.assertEqual(entry["error"], "not configured")
+
+    @mock.patch(
+        "ghc_api.routes.webiq.mcp_request",
+        side_effect=WebIQError("bad server key", 503, upstream_status=403),
+    )
+    def test_mcp_rejected_server_key_retains_upstream_status(self, _mcp):
+        res = self.client.post(MCP_PATH, data=b"{}", content_type="application/json")
+
+        self.assertEqual(res.status_code, 503)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["status_code"], 503)
+        self.assertEqual(entry["upstream"]["status_code"], 403)
 
 
 class RequestListTest(IsolatedConfigDirTest):
