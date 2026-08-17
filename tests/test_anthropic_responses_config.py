@@ -51,16 +51,26 @@ class AnthropicResponsesRuntimeConfigTest(unittest.TestCase):
             {field: getattr(self.state, field) for field in CONFIG_FIELDS},
         )
 
-    def test_grok_uses_public_profile_even_with_an_older_partial_mapping(self):
+    def test_grok_uses_copilot_public_profile_with_rotating_stream_ids(self):
         # Older generated configs only contained the GPT entry. The built-in
-        # provider rule must still prevent Grok from receiving Responses-Lite's
-        # additional_tools input item and other GPT-only request fields.
+        # provider rule must still select public request fields without enabling
+        # stable-id checks on Copilot's rotating encrypted SSE identifiers.
         self.assertEqual(
             anthropic_responses_wire_profile("grok-4.6"),
-            "public_responses",
+            "copilot_public_responses",
         )
 
-        # An explicit operator rule always wins over the built-in default.
+        # Migrate the profile name emitted by the first Grok compatibility
+        # release so existing config files do not retain broken stream checks.
+        self.state.anthropic_responses_model_profiles["grok-*"] = (
+            "public_responses"
+        )
+        self.assertEqual(
+            anthropic_responses_wire_profile("grok-4.6"),
+            "copilot_public_responses",
+        )
+
+        # Other explicit operator rules still win over the built-in default.
         self.state.anthropic_responses_model_profiles["grok-*"] = (
             "copilot_responses_lite"
         )
@@ -174,7 +184,7 @@ class AnthropicResponsesGeneratedConfigTest(unittest.TestCase):
             "anthropic_responses_wire_profile": "copilot_responses_lite",
             "anthropic_responses_model_profiles": {
                 "gpt-5.6-sol": "copilot_responses_lite",
-                "grok-*": "public_responses",
+                "grok-*": "copilot_public_responses",
             },
         }
         self.assertEqual({field: config[field] for field in CONFIG_FIELDS}, expected)

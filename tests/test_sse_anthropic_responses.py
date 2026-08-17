@@ -598,35 +598,55 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         )
         self.assertTrue(translator.protocol_failed)
 
-    def test_copilot_profile_accepts_per_event_opaque_response_ids(self):
+    def test_copilot_profiles_accept_per_event_opaque_response_ids(self):
         """Copilot returns a different encrypted response.id on every event of
-        one stream, so an id comparison there fails a stream that is perfectly
-        well formed. Only call_id is stable on that profile."""
-        translator = self.translator()
-        output = translator.process(
-            "response.created", {"response": {"id": "opaque-A", "model": "gpt"}}
-        )
-        output += translator.process(
-            "response.in_progress", {"response": {"id": "opaque-B", "model": "gpt"}}
-        )
-        output += translator.process("response.output_item.added", {
-            "output_index": 0,
-            "item": {"type": "message", "role": "assistant", "content": []},
-        })
-        output += translator.process("response.output_text.delta", {
-            "output_index": 0, "content_index": 0, "delta": "hello",
-        })
-        output += translator.process("response.completed", {"response": {
-            "id": "opaque-C", "model": "gpt", "status": "completed",
-            "output": [{
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "hello"}],
-            }],
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-        }})
-        self.assertFalse(translator.protocol_failed)
-        self.assertNotIn("error", event_types(output))
-        self.assertEqual(event_types(output)[-1], "message_stop")
+        one stream, including for Grok's standard Responses request dialect.
+        Only call_id is stable on these profiles."""
+        for profile in (
+            "copilot_responses_lite",
+            "copilot_public_responses",
+        ):
+            with self.subTest(profile=profile):
+                translator = ResponsesAnthropicEventTranslator(
+                    original_model="claude-opus-4.8",
+                    reasoning_model=(
+                        "grok-4.6"
+                        if profile == "copilot_public_responses"
+                        else "gpt-5.6-sol"
+                    ),
+                    wire_profile=profile,
+                )
+                output = translator.process(
+                    "response.created",
+                    {"response": {"id": "opaque-A", "model": "model"}},
+                )
+                output += translator.process(
+                    "response.in_progress",
+                    {"response": {"id": "opaque-B", "model": "model"}},
+                )
+                output += translator.process("response.output_item.added", {
+                    "output_index": 0,
+                    "item": {
+                        "type": "message", "id": "opaque-item-A",
+                        "role": "assistant", "content": [],
+                    },
+                })
+                output += translator.process("response.output_text.delta", {
+                    "output_index": 0, "content_index": 0,
+                    "item_id": "opaque-item-B", "delta": "hello",
+                })
+                output += translator.process("response.completed", {"response": {
+                    "id": "opaque-C", "model": "model", "status": "completed",
+                    "output": [{
+                        "type": "message", "id": "opaque-item-C",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "hello"}],
+                    }],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }})
+                self.assertFalse(translator.protocol_failed)
+                self.assertNotIn("error", event_types(output))
+                self.assertEqual(event_types(output)[-1], "message_stop")
         visible = "".join(
             event["delta"]["text"]
             for name, event in output

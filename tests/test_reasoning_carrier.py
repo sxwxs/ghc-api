@@ -207,6 +207,18 @@ class ReasoningCarrierTranslationTests(unittest.TestCase):
         self.assertEqual(public_request.payload["input"][0]["id"], "rs_public_1")
         self.assertNotIn("id", lite_request.payload["input"][0])
 
+        # Preserve continuity for carriers emitted by the first Grok release,
+        # which used public_responses before Copilot's rotating SSE ids were
+        # observed and assigned a dedicated profile.
+        migrated_request = convert_anthropic_to_responses(
+            {"model": "gpt", "messages": [{"role": "assistant", "content": [thinking]}]},
+            wire_profile="copilot_public_responses",
+        )
+        self.assertEqual(migrated_request.payload["input"][0]["id"], "rs_public_1")
+        self.assertEqual(
+            migrated_request.payload["input"][0]["encrypted_content"], "enc"
+        )
+
     def test_request_restoration_preserves_block_order(self):
         first = build_reasoning_carrier(
             model="gpt",

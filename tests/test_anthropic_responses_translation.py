@@ -187,7 +187,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
             "shared-session", json.dumps(alice.payload["client_metadata"])
         )
 
-    def test_grok_public_profile_uses_top_level_tools_and_omits_lite_fields(self):
+    def test_grok_copilot_public_profile_uses_standard_request_fields(self):
         payload = {
             "model": "grok-4.6",
             "messages": [{"role": "user", "content": "hello"}],
@@ -206,7 +206,7 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
         }
         result = convert_anthropic_to_responses(
             payload,
-            wire_profile="public_responses",
+            wire_profile="copilot_public_responses",
             session_id="session-fixture",
             tenant_id="tenant-fixture",
         )
