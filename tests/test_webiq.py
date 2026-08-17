@@ -4,10 +4,14 @@ from unittest.mock import Mock, patch
 
 from ghc_api.app import PROTECTED_PATHS, create_app
 from ghc_api.webiq import (
+    API_BASE_URL,
+    API_PATHS,
     DROPPED_RESPONSE_HEADERS,
     ENDPOINT,
+    MCP_PATH,
     WebIQError,
     endpoint_for,
+    mcp_request,
     passthrough_headers,
     pop_legacy_option,
     result_count,
@@ -22,6 +26,7 @@ def make_settings(**overrides):
     settings = SimpleNamespace(
         enable_webiq_search=True,
         webiq_api_key="secret",
+        webiq_base_url="",
         webiq_endpoint="",
         webiq_timeout=30,
     )
@@ -84,11 +89,31 @@ class EndpointTest(unittest.TestCase):
     def test_defaults_to_the_spec_endpoint(self):
         self.assertEqual(endpoint_for(make_settings()), ENDPOINT)
 
-    def test_config_can_override_it(self):
+    def test_legacy_config_can_override_web_search(self):
         self.assertEqual(
             endpoint_for(make_settings(webiq_endpoint="http://127.0.0.1:9/x")),
             "http://127.0.0.1:9/x",
         )
+
+    def test_all_service_base_override_applies_to_every_path(self):
+        settings = make_settings(webiq_base_url="http://127.0.0.1:9/root/")
+        for path in (*API_PATHS, MCP_PATH):
+            self.assertEqual(endpoint_for(settings, path),
+                             "http://127.0.0.1:9/root" + path)
+
+    def test_default_urls_cover_every_official_service(self):
+        for path in (*API_PATHS, MCP_PATH):
+            self.assertEqual(endpoint_for(make_settings(), path), API_BASE_URL + path)
+
+    def test_standard_shaped_legacy_endpoint_can_supply_a_base(self):
+        settings = make_settings(
+            webiq_endpoint="http://127.0.0.1:9/v3/search/web")
+        self.assertEqual(endpoint_for(settings, "/v3/search/news"),
+                         "http://127.0.0.1:9/v3/search/news")
+
+    def test_arbitrary_paths_are_rejected(self):
+        with self.assertRaises(ValueError):
+            endpoint_for(make_settings(), "/v3/not-real")
 
 
 class SearchTest(unittest.TestCase):
@@ -107,6 +132,14 @@ class SearchTest(unittest.TestCase):
         # defaulted or dropped on the way out.
         self.assertNotIn("json", kwargs)
         self.assertEqual(post.call_args[0][0], ENDPOINT)
+
+    @patch("ghc_api.webiq.requests.post")
+    def test_each_rest_api_uses_its_official_path(self, post):
+        post.return_value = upstream_response()
+
+        for path in API_PATHS:
+            search(b"{}", make_settings(), api_path=path)
+            self.assertEqual(post.call_args[0][0], API_BASE_URL + path)
 
     @patch("ghc_api.webiq.requests.post")
     def test_unknown_parameters_are_not_rejected(self, post):
@@ -150,7 +183,7 @@ class SearchTest(unittest.TestCase):
 
     @patch("ghc_api.webiq.requests.post")
     def test_rejected_server_key_is_not_reported_as_client_auth_failure(self, post):
-        """401/403 upstream is about our key, not about the caller's token."""
+        """401/403 on search APIs is about our key, not the caller's token."""
         for status in (401, 403):
             post.return_value = upstream_response(status, b"bad key")
             with self.assertRaises(WebIQError) as ctx:
@@ -158,11 +191,67 @@ class SearchTest(unittest.TestCase):
             self.assertEqual(ctx.exception.status_code, 503)
             self.assertIn("webiq_api_key", str(ctx.exception))
 
+    @patch("ghc_api.webiq.requests.post")
+    def test_browse_403_is_preserved_because_it_can_be_content_policy(self, post):
+        post.return_value = upstream_response(403, b'{"errorCode":"URL_BLOCKED"}')
+
+        response = search(b"{}", make_settings(), api_path="/v3/browse")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.content, b'{"errorCode":"URL_BLOCKED"}')
+
     def test_unconfigured_server_reports_503(self):
         with self.assertRaises(WebIQError) as ctx:
             search(b'{"query":"q"}', make_settings(webiq_api_key=""))
 
         self.assertEqual(ctx.exception.status_code, 503)
+
+
+class MCPRequestTest(unittest.TestCase):
+    @patch("ghc_api.webiq.requests.request")
+    def test_transport_method_headers_and_body_are_forwarded(self, send):
+        send.return_value = upstream_response()
+
+        mcp_request("POST", b'{"jsonrpc":"2.0"}', make_settings(),
+                    request_headers={
+                        "accept": "application/json, text/event-stream",
+                        "content-type": "application/json",
+                        "mcp-protocol-version": "2025-06-18",
+                        "mcp-session-id": "session-1",
+                        "authorization": "Bearer client-secret",
+                        "x-apikey": "client-key",
+                    })
+
+        self.assertEqual(send.call_args.args, ("POST", API_BASE_URL + MCP_PATH))
+        kwargs = send.call_args.kwargs
+        self.assertEqual(kwargs["data"], b'{"jsonrpc":"2.0"}')
+        self.assertTrue(kwargs["stream"])
+        self.assertEqual(kwargs["headers"]["x-apikey"], "secret")
+        self.assertEqual(kwargs["headers"]["mcp-session-id"], "session-1")
+        self.assertNotIn("authorization", kwargs["headers"])
+
+    @patch("ghc_api.webiq.requests.request")
+    def test_get_opens_a_stream_without_a_body(self, send):
+        send.return_value = upstream_response()
+
+        mcp_request("GET", b"", make_settings(), request_headers={
+            "accept": "text/event-stream",
+            "last-event-id": "event-7",
+        })
+
+        self.assertIsNone(send.call_args.kwargs["data"])
+        self.assertEqual(send.call_args.kwargs["timeout"], (30, None))
+
+    @patch("ghc_api.webiq.requests.request")
+    def test_rejected_server_key_closes_response_and_becomes_503(self, send):
+        response = upstream_response(401, b"bad key")
+        send.return_value = response
+
+        with self.assertRaises(WebIQError) as ctx:
+            mcp_request("POST", b"{}", make_settings(), request_headers={})
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        response.close.assert_called_once_with()
 
 
 class PassthroughHeaderTest(unittest.TestCase):
@@ -205,10 +294,22 @@ class ResultCountTest(unittest.TestCase):
     def test_counts_web_results(self):
         self.assertEqual(result_count({"webResults": [{}, {}]}), 2)
 
+    def test_counts_each_vertical_and_combined_classic_results(self):
+        cases = {
+            "/v3/search/videos": ("videoResults", 2),
+            "/v3/search/news": ("newsResults", 2),
+            "/v3/search/images": ("imageResults", 2),
+        }
+        for path, (key, expected) in cases.items():
+            self.assertEqual(result_count({key: [{}, {}]}, path), expected)
+        self.assertEqual(result_count({"webResults": [{}], "imageResults": [{}, {}]},
+                                      "/v3/search/classic"), 3)
+
     def test_unknown_shapes_report_nothing_rather_than_zero(self):
         self.assertIsNone(result_count(None))
         self.assertIsNone(result_count("plain text error"))
         self.assertIsNone(result_count({"error": "x"}))
+        self.assertIsNone(result_count({"url": "https://example.com"}, "/v3/browse"))
 
 
 class RouteTest(unittest.TestCase):
@@ -216,8 +317,18 @@ class RouteTest(unittest.TestCase):
         self.app = create_app()
         self.client = self.app.test_client()
 
-    def test_search_endpoint_is_auth_gated(self):
-        self.assertIn("/v3/search/web", PROTECTED_PATHS)
+    def test_every_webiq_endpoint_is_auth_gated(self):
+        for path in (*API_PATHS, MCP_PATH):
+            self.assertIn(path, PROTECTED_PATHS)
+
+    @patch("ghc_api.routes.webiq.search")
+    def test_every_rest_endpoint_is_exposed(self, search_mock):
+        search_mock.return_value = upstream_response()
+
+        for path in API_PATHS:
+            res = self.client.post(path, data=b"{}", content_type="application/json")
+            self.assertEqual(res.status_code, 200, path)
+            self.assertEqual(search_mock.call_args.kwargs["api_path"], path)
 
     def test_retired_path_is_gone(self):
         """No alias: the bespoke shape was removed, like webiq_search_options."""
@@ -277,6 +388,28 @@ class RouteTest(unittest.TestCase):
 
         self.assertEqual(res.status_code, 503)
         self.assertEqual(res.get_json()["error"]["type"], "webiq_search_error")
+
+    @patch("ghc_api.routes.webiq.mcp_request")
+    def test_mcp_stream_and_session_header_reach_the_client(self, mcp_mock):
+        upstream = upstream_response(
+            200, b"ignored", headers={
+                "content-type": "text/event-stream",
+                "Mcp-Session-Id": "session-9",
+            })
+        upstream.iter_content.return_value = [b"event: message\n", b"data: {}\n\n"]
+        mcp_mock.return_value = upstream
+
+        res = self.client.post(MCP_PATH, data=b"{}", headers={
+            "Accept": "application/json, text/event-stream",
+            "Mcp-Session-Id": "session-1",
+        }, content_type="application/json")
+
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data, b"event: message\ndata: {}\n\n")
+        self.assertEqual(res.headers["Mcp-Session-Id"], "session-9")
+        request_headers = mcp_mock.call_args.kwargs["request_headers"]
+        self.assertEqual(request_headers["mcp-session-id"], "session-1")
+        upstream.close.assert_called_once_with()
 
 
 class LegacyRouteRejectionTest(unittest.TestCase):

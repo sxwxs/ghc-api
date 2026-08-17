@@ -328,11 +328,12 @@ def main():
             state.enable_webiq_search = bool(config['enable_webiq_search'])
         if 'webiq_api_key' in config:
             state.webiq_api_key = str(config['webiq_api_key'] or '')
+        if 'webiq_base_url' in config:
+            state.webiq_base_url = str(config['webiq_base_url'] or '')
         if 'webiq_endpoint' in config:
             state.webiq_endpoint = str(config['webiq_endpoint'] or '')
-        # There are no search-parameter settings on purpose: /v3/search/web
-        # forwards the client's body as received, so every default is
-        # Microsoft's.
+        # There are no API-parameter settings on purpose: REST requests forward
+        # the client's body as received, so every default is Microsoft's.
         if 'webiq_timeout' in config:
             state.webiq_timeout = max(1, int(config['webiq_timeout']))
         if 'log_webiq_requests' in config:
@@ -424,7 +425,8 @@ def main():
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
     if webiq.is_configured(state):
-        print(f"Web Search v3 API: http://{host}:{port}/v3/search/web")
+        print(f"Web IQ v3 REST APIs: http://{host}:{port}/v3/")
+        print(f"Web IQ MCP server: http://{host}:{port}/v3/mcp")
 
     serve_app(app, host=host, port=port, debug=debug)
 

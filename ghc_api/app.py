@@ -33,8 +33,14 @@ PROTECTED_PATHS = frozenset({
     "/models",
     "/v1/models/full/",
     "/models/full/",
-    # Spends the server-held Web IQ quota, so it is gated like the LLM paths.
+    # Spend the server-held Web IQ quota, so they are gated like LLM paths.
     "/v3/search/web",
+    "/v3/search/videos",
+    "/v3/browse",
+    "/v3/search/news",
+    "/v3/search/images",
+    "/v3/search/classic",
+    "/v3/mcp",
 })
 
 

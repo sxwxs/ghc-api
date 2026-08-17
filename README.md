@@ -24,7 +24,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
 - **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
-- **Microsoft Web IQ Search**: `/v3/search/web`, a transparent proxy for the official Web Search v3 API, backed by a server-held API key
+- **Microsoft Web IQ**: transparent proxies for all six Web IQ v3 REST APIs and its Streamable HTTP MCP server, backed by a server-held API key
 
 ## Maintenance Guides
 
@@ -482,22 +482,46 @@ every `/v1/messages` backend (native Anthropic, Chat Completions translation, an
 Responses compatibility path), because an ambiguous body cannot be forwarded with a
 predictable meaning.
 
-### Microsoft Web IQ Search
+### Microsoft Web IQ
 
-- `POST /v3/search/web` - Web Search v3, backed by the server-held Web IQ API key
+All production Web IQ v3 services are exposed using the server-held API key:
 
-A transparent proxy for the [official Microsoft Web Search v3
-API](https://webiq.microsoft.ai/documentation/api-reference/web/). The request
-body is forwarded as the bytes the client sent, and the upstream status, headers
-and body come back verbatim. A client written against `api.microsoft.ai` works
-here by changing only the base URL — the same deal the OpenAI- and
-Anthropic-shaped endpoints offer.
+- `POST /v3/search/web` - Web Search
+- `POST /v3/search/videos` - Videos Search
+- `POST /v3/browse` - direct URL content extraction
+- `POST /v3/search/news` - News Search
+- `POST /v3/search/images` - Images Search
+- `POST /v3/search/classic` - multi-answer Classic Search
+- `GET|POST|DELETE /v3/mcp` - Streamable HTTP MCP server (`web`, `videos`,
+  `browse`, `news`, and `images` tools)
+
+These are transparent proxies for the [official Microsoft Web IQ v3
+APIs](https://webiq.microsoft.ai/documentation/). REST request bodies are
+forwarded as the bytes the client sent, and upstream status, headers, and bodies
+come back verbatim. MCP transport/session headers and response streams are also
+passed through. A client written against `api.microsoft.ai` works by changing
+only the base URL.
+
+Enable them in `config.yaml`:
+
+```yaml
+enable_webiq_search: true
+webiq_api_key: "YOUR_WEB_IQ_KEY"
+webiq_base_url: "" # optional all-service upstream override
+webiq_timeout: 30
+log_webiq_requests: true
+```
 
 ```bash
 curl -X POST http://localhost:8313/v3/search/web \
   -H "content-type: application/json" \
   -d '{"query": "latest trends in LLM RAG", "maxResults": 10, "contentFormat": "passage"}'
 ```
+
+An MCP client can use `http://localhost:8313/v3/mcp` without an `x-apikey`; the
+proxy supplies its configured key. Configure `webiq_base_url` to override the
+upstream origin for every service. The legacy `webiq_endpoint` option still
+overrides only Web Search.
 
 What the proxy adds is key custody (`webiq_api_key` never leaves the server), the
 optional user-token auth gate, and logging. It adds nothing to the search itself:
@@ -512,10 +536,10 @@ optional user-token auth gate, and logging. It adds nothing to the search itself
   Microsoft adds tomorrow works here today, and an invalid request gets the
   authoritative upstream error instead of an imitation of it.
 - **Errors and error headers are passed through too**, so `Retry-After` on a 429
-  reaches the client that has to back off. The single exception is upstream
-  401/403: those mean *this server's* key was rejected, so they surface as 503
-  with an explicit message rather than being confused with this proxy rejecting
-  the caller's token.
+  reaches the client that has to back off. Upstream credential failures surface
+  as 503 because they concern this server's key, not the caller's token. A
+  Browse 403 is preserved because Web IQ also uses it for blocked URLs and
+  filtered content.
 - **A client's own `x-apikey` is ignored**, never forwarded, and redacted before
   the request is logged. Searches always spend this server's key and quota.
 
@@ -527,10 +551,11 @@ when the Web IQ toggle is on. That tool schema stays narrow (`query`,
 is what turns those arguments into a full official request. See
 `scripts/webiq_search_demo.py`.
 
-Every call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
-(`log_webiq_requests`, on by default), which is the only untruncated record of a
-search, and added to the shared request cache so it appears in the request list,
-full-text search, detail view and export under the model name `webiq_search`.
+Every REST call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
+(`log_webiq_requests`, on by default), which is the only untruncated record, and
+added to the shared request cache with a service-specific model name such as
+`webiq_search`, `webiq_videos`, or `webiq_browse`. Streaming MCP bodies are not
+persisted.
 
 ### Configured Upstream Proxy
 

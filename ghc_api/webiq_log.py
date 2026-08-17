@@ -1,11 +1,10 @@
 """
 Recording of Web IQ searches to disk.
 
-Every call that reaches ``POST /v3/search/web`` is appended as one JSON Lines
-record to ``<config_dir>/webiq/YYYY-MM-DD.jl`` (on by default, controlled by
-``state.log_webiq_requests``). Failures are recorded too: a search that never
-reached upstream, or that came back 429/502, is exactly the thing you want in
-the log.
+Every call to one of the six Web IQ REST endpoints is appended as one JSON
+Lines record to ``<config_dir>/webiq/YYYY-MM-DD.jl`` (on by default, controlled
+by ``state.log_webiq_requests``). Failures are recorded too. Streaming MCP
+traffic is deliberately not body-logged.
 
 This file is the only full-fidelity record of a search. The search is also
 added to the shared request cache -- which is where the dashboard, the request

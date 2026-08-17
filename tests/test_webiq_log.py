@@ -115,6 +115,22 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertIsInstance(entry["duration_ms"], int)
 
     @mock.patch("ghc_api.routes.webiq.search")
+    def test_other_rest_services_use_their_own_endpoint_model_and_count(self, search_mock):
+        search_mock.return_value = upstream_response(
+            200, b'{"newsResults":[{"title":"a"},{"title":"b"}]}')
+
+        res = self.client.post("/v3/search/news", json={"query": "python"})
+
+        self.assertEqual(res.status_code, 200)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["type"], "webiq_news")
+        self.assertEqual(entry["endpoint"], "/v3/search/news")
+        self.assertEqual(entry["result_count"], 2)
+        item = self.client.get("/api/requests").get_json()["items"][0]
+        self.assertEqual(item["model"], "webiq_news")
+        self.assertEqual(item["endpoint"], "/v3/search/news")
+
+    @mock.patch("ghc_api.routes.webiq.search")
     def test_upstream_failure_is_recorded_with_its_body(self, search_mock):
         search_mock.return_value = upstream_response(
             429, b'{"error":{"code":"TooManyRequests"}}')
