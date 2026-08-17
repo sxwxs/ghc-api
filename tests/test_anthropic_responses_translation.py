@@ -187,6 +187,40 @@ class AnthropicResponsesRequestTranslationTests(unittest.TestCase):
             "shared-session", json.dumps(alice.payload["client_metadata"])
         )
 
+    def test_grok_public_profile_uses_top_level_tools_and_omits_lite_fields(self):
+        payload = {
+            "model": "grok-4.6",
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [{
+                "name": "Read",
+                "description": "Read a file",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                },
+            }],
+            "thinking": {"type": "enabled", "budget_tokens": 32000},
+            "context_management": {
+                "edits": [{"type": "clear_thinking_20251015", "keep": "all"}]
+            },
+        }
+        result = convert_anthropic_to_responses(
+            payload,
+            wire_profile="public_responses",
+            session_id="session-fixture",
+            tenant_id="tenant-fixture",
+        )
+
+        self.assertEqual(len(result.payload["tools"]), 1)
+        self.assertFalse(any(
+            item.get("type") == "additional_tools"
+            for item in result.payload["input"]
+        ))
+        self.assertEqual(result.payload["reasoning"], {"effort": "xhigh"})
+        self.assertNotIn("client_metadata", result.payload)
+        self.assertNotIn("text", result.payload)
+        self.assertIn("prompt_cache_key", result.payload)
+
     def test_public_profile_omits_copilot_only_phase_context_and_max_effort(self):
         payload = {
             "model": "gpt-test",
