@@ -207,9 +207,12 @@ anthropic_responses_compat_enabled: true
 
 # Default Responses request dialect, plus optional per-model overrides.
 # Supported profiles: public_responses, copilot_responses_lite.
+# GPT accepts Copilot's private Responses-Lite dialect; Grok requires the
+# public dialect (top-level tools and no Responses-Lite-only request fields).
 anthropic_responses_wire_profile: copilot_responses_lite
 anthropic_responses_model_profiles:
   gpt-5.6-sol: copilot_responses_lite
+  "grok-*": public_responses
 
 # Responses reasoning is carried statelessly in namespaced Anthropic
 # thinking.signature envelopes. No replay database, session identity, or

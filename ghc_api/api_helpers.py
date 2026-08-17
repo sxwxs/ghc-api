@@ -4,7 +4,7 @@ API helper functions for GitHub Copilot API
 
 import time
 import uuid
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -347,29 +347,60 @@ def supports_responses_api(model_id: str) -> bool:
     return "/responses" in supported_endpoints or "/v1/responses" in supported_endpoints
 
 
+_BUILTIN_ANTHROPIC_RESPONSES_MODEL_PROFILES = {
+    # Copilot's GPT backend accepts the private Responses-Lite dialect, where
+    # function tools are carried in an ``additional_tools`` input item. xAI's
+    # Grok backend expects the public Responses dialect (top-level ``tools``)
+    # and rejects Responses-Lite-only fields such as reasoning.context and
+    # client_metadata, sometimes as a plain-text HTTP 503.
+    "grok-*": "public_responses",
+}
+
+
+def _matching_responses_wire_profile(
+    profiles: Any, model_id: str
+) -> Optional[str]:
+    if not isinstance(profiles, dict):
+        return None
+    exact = profiles.get(model_id)
+    if isinstance(exact, str) and exact:
+        return exact
+    # A trailing '*' denotes a prefix rule without adding another config
+    # structure solely for this small capability map.
+    prefix_matches = [
+        (pattern[:-1], profile)
+        for pattern, profile in profiles.items()
+        if (
+            isinstance(pattern, str)
+            and pattern.endswith("*")
+            and model_id.startswith(pattern[:-1])
+            and isinstance(profile, str)
+            and profile
+        )
+    ]
+    if prefix_matches:
+        # Most-specific prefix wins regardless of YAML/dict insertion order.
+        return max(prefix_matches, key=lambda item: len(item[0]))[1]
+    return None
+
+
 def anthropic_responses_wire_profile(model_id: str) -> str:
-    """Resolve the configured wire profile for a Responses-backed model."""
+    """Resolve the wire profile for a Responses-backed model.
+
+    Operator rules take precedence over built-in provider compatibility rules,
+    which in turn take precedence over the global fallback profile. Keeping the
+    Grok rule built in also fixes installations whose older config contains a
+    model-profile mapping but predates Grok Responses support.
+    """
     configured = getattr(state, "anthropic_responses_model_profiles", {}) or {}
-    if isinstance(configured, dict):
-        exact = configured.get(model_id)
-        if isinstance(exact, str) and exact:
-            return exact
-        # A trailing '*' denotes a prefix rule without adding another config
-        # structure solely for this small capability map.
-        prefix_matches = [
-            (pattern[:-1], profile)
-            for pattern, profile in configured.items()
-            if (
-                isinstance(pattern, str)
-                and pattern.endswith("*")
-                and model_id.startswith(pattern[:-1])
-                and isinstance(profile, str)
-                and profile
-            )
-        ]
-        if prefix_matches:
-            # Most-specific prefix wins regardless of YAML/dict insertion order.
-            return max(prefix_matches, key=lambda item: len(item[0]))[1]
+    matched = _matching_responses_wire_profile(configured, model_id)
+    if matched:
+        return matched
+    matched = _matching_responses_wire_profile(
+        _BUILTIN_ANTHROPIC_RESPONSES_MODEL_PROFILES, model_id
+    )
+    if matched:
+        return matched
     return getattr(state, "anthropic_responses_wire_profile", "copilot_responses_lite")
 
 

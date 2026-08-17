@@ -56,6 +56,7 @@ class State:
         self.anthropic_responses_wire_profile: str = "copilot_responses_lite"
         self.anthropic_responses_model_profiles: Dict[str, str] = {
             "gpt-5.6-sol": "copilot_responses_lite",
+            "grok-*": "public_responses",
         }
 
         # Copilot intermittently answers /v1/responses with HTTP 200 whose SSE body is

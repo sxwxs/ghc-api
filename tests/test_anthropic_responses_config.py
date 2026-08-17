@@ -6,6 +6,7 @@ from unittest import mock
 import yaml
 
 import ghc_api.state
+from ghc_api.api_helpers import anthropic_responses_wire_profile
 from ghc_api.app import create_app
 from ghc_api.generate_config import generate_config_file
 from ghc_api.main import apply_anthropic_responses_config
@@ -48,6 +49,24 @@ class AnthropicResponsesRuntimeConfigTest(unittest.TestCase):
         self.assertEqual(
             {field: body[field] for field in CONFIG_FIELDS},
             {field: getattr(self.state, field) for field in CONFIG_FIELDS},
+        )
+
+    def test_grok_uses_public_profile_even_with_an_older_partial_mapping(self):
+        # Older generated configs only contained the GPT entry. The built-in
+        # provider rule must still prevent Grok from receiving Responses-Lite's
+        # additional_tools input item and other GPT-only request fields.
+        self.assertEqual(
+            anthropic_responses_wire_profile("grok-4.6"),
+            "public_responses",
+        )
+
+        # An explicit operator rule always wins over the built-in default.
+        self.state.anthropic_responses_model_profiles["grok-*"] = (
+            "copilot_responses_lite"
+        )
+        self.assertEqual(
+            anthropic_responses_wire_profile("grok-4.6"),
+            "copilot_responses_lite",
         )
 
     def test_post_updates_every_anthropic_responses_setting(self):
@@ -155,6 +174,7 @@ class AnthropicResponsesGeneratedConfigTest(unittest.TestCase):
             "anthropic_responses_wire_profile": "copilot_responses_lite",
             "anthropic_responses_model_profiles": {
                 "gpt-5.6-sol": "copilot_responses_lite",
+                "grok-*": "public_responses",
             },
         }
         self.assertEqual({field: config[field] for field in CONFIG_FIELDS}, expected)
