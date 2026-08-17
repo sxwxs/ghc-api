@@ -177,6 +177,18 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertIsNone(entry["upstream"]["status_code"])
 
     @mock.patch("ghc_api.routes.webiq.search")
+    def test_rejected_server_key_retains_the_upstream_status(self, search_mock):
+        search_mock.side_effect = WebIQError(
+            "bad server key", 503, upstream_status=401)
+
+        res = self.client.post(SEARCH_PATH, json={"query": "python"})
+
+        self.assertEqual(res.status_code, 503)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["status_code"], 503)
+        self.assertEqual(entry["upstream"]["status_code"], 401)
+
+    @mock.patch("ghc_api.routes.webiq.search")
     def test_a_malformed_body_is_still_logged(self, search_mock):
         """Nothing validates the body locally, so logging cannot assume JSON."""
         search_mock.return_value = upstream_response(400, b"query is required")
@@ -227,6 +239,11 @@ class RouteLoggingTest(IsolatedConfigDirTest):
 
     @mock.patch("ghc_api.routes.webiq.mcp_request")
     def test_mcp_is_audited_without_persisting_stream_bodies(self, mcp_mock):
+        before_stats = cache.get_stats()
+        before_model_count = before_stats["model_stats"].get(
+            "webiq_mcp", {}).get("request_count", 0)
+        before_endpoint_count = before_stats["endpoint_stats"].get(
+            MCP_PATH, {}).get("request_count", 0)
         upstream = upstream_response(200, headers={
             "content-type": "text/event-stream",
             "Mcp-Session-Id": "response-session",
@@ -269,6 +286,15 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(
             cached["request_headers"]["Mcp-Param-Url"], "***REDACTED***")
         self.assertNotIn("SECRET", json.dumps(cached))
+        stats = cache.get_stats()
+        self.assertEqual(
+            stats["model_stats"]["webiq_mcp"]["request_count"],
+            before_model_count + 1,
+        )
+        self.assertEqual(
+            stats["endpoint_stats"][MCP_PATH]["request_count"],
+            before_endpoint_count + 1,
+        )
 
     @mock.patch("ghc_api.routes.webiq.mcp_request")
     def test_interrupted_mcp_stream_is_audited_as_error(self, mcp_mock):
@@ -330,6 +356,18 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(entry["status_code"], 503)
         self.assertIsNone(entry["upstream"]["status_code"])
         self.assertEqual(entry["error"], "not configured")
+
+    @mock.patch(
+        "ghc_api.routes.webiq.mcp_request",
+        side_effect=WebIQError("bad server key", 503, upstream_status=403),
+    )
+    def test_mcp_rejected_server_key_retains_upstream_status(self, _mcp):
+        res = self.client.post(MCP_PATH, data=b"{}", content_type="application/json")
+
+        self.assertEqual(res.status_code, 503)
+        entry = read_log_lines()[0]
+        self.assertEqual(entry["status_code"], 503)
+        self.assertEqual(entry["upstream"]["status_code"], 403)
 
 
 class RequestListTest(IsolatedConfigDirTest):

@@ -212,6 +212,7 @@ class SearchTest(unittest.TestCase):
             with self.assertRaises(WebIQError) as ctx:
                 search(b"{}", make_settings())
             self.assertEqual(ctx.exception.status_code, 503)
+            self.assertEqual(ctx.exception.upstream_status, status)
             self.assertIn("webiq_api_key", str(ctx.exception))
 
     @patch("ghc_api.webiq.requests.post")
@@ -270,7 +271,7 @@ class MCPRequestTest(unittest.TestCase):
     def test_get_opens_a_stream_without_a_body(self, send):
         send.return_value = upstream_response()
 
-        mcp_request("GET", b"", make_settings(), request_headers={
+        mcp_request("GET", b"ignored", make_settings(), request_headers={
             "accept": "text/event-stream",
             "last-event-id": "event-7",
         })
@@ -282,8 +283,9 @@ class MCPRequestTest(unittest.TestCase):
     def test_delete_also_has_a_finite_read_timeout(self, send):
         send.return_value = upstream_response()
 
-        mcp_request("DELETE", b"", make_settings(), request_headers={})
+        mcp_request("DELETE", b"ignored", make_settings(), request_headers={})
 
+        self.assertIsNone(send.call_args.kwargs["data"])
         self.assertEqual(send.call_args.kwargs["timeout"], (30, 120))
 
     @patch("ghc_api.webiq.requests.request")
@@ -295,6 +297,7 @@ class MCPRequestTest(unittest.TestCase):
             mcp_request("POST", b"{}", make_settings(), request_headers={})
 
         self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.upstream_status, 401)
         response.close.assert_called_once_with()
 
 

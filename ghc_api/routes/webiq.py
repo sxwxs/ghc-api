@@ -248,6 +248,7 @@ def webiq_search():
             status_code=status,
             response_bytes=response.get_data(),
             response_body=response.get_json(),
+            upstream_status=exc.upstream_status,
             error=str(exc),
             api_path=api_path,
         )
@@ -404,6 +405,8 @@ def _complete_mcp_audit(
             "response_size": response_size,
             "duration": round(duration, 3),
             "user_id": audit["user_id"],
+            "model": "webiq_mcp",
+            "endpoint": MCP_PATH,
             "stream_completed": stream_completed,
             "stream_state": completion_state,
             "error": error,
@@ -458,7 +461,7 @@ def webiq_mcp():
         _complete_mcp_audit(
             audit,
             status_code=status,
-            upstream_status=None,
+            upstream_status=exc.upstream_status,
             response_size=len(response.get_data()),
             response_session_id=None,
             stream_completed=False,

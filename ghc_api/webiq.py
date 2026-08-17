@@ -146,9 +146,16 @@ class WebIQError(RuntimeError):
     server's key. Everything else is returned verbatim, not raised.
     """
 
-    def __init__(self, message: str, status_code: int = 502):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 502,
+        *,
+        upstream_status: Optional[int] = None,
+    ):
         super().__init__(message)
         self.status_code = status_code
+        self.upstream_status = upstream_status
 
 
 def pop_legacy_option(payload: Dict) -> bool:
@@ -309,6 +316,7 @@ def search(
             "Check webiq_api_key in config.yaml."
             + (f" Upstream said: {detail}" if detail else ""),
             503,
+            upstream_status=response.status_code,
         )
 
     return response
@@ -361,11 +369,7 @@ def mcp_request(
             normalized_method,
             upstream_url,
             headers=forwarded_headers,
-            data=(
-                body
-                if normalized_method not in ("GET", "DELETE") or body
-                else None
-            ),
+            data=body if normalized_method not in ("GET", "DELETE") else None,
             timeout=timeout,
             stream=True,
         )
@@ -381,6 +385,7 @@ def mcp_request(
             f"(upstream HTTP {response.status_code}). "
             "Check webiq_api_key in config.yaml.",
             503,
+            upstream_status=response.status_code,
         )
     return response
 
