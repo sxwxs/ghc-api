@@ -1,6 +1,7 @@
 import json
 import unittest
 
+from ghc_api.anthropic_responses import convert_anthropic_to_responses
 from ghc_api.sse.anthropic_responses import (
     ResponsesAnthropicEventTranslator,
     StopSequenceScanner,
@@ -61,6 +62,54 @@ class ResponsesAnthropicEventTranslatorTests(unittest.TestCase):
         carrier = parse_reasoning_carrier(signature_event["delta"]["signature"])
         self.assertEqual(carrier.encrypted_content, "x")
         self.assertEqual(output[-2][1]["usage"]["input_tokens"], 8)
+
+    def test_copilot_public_replays_terminal_reasoning_id_with_encrypted_content(self):
+        translator = self.translator(
+            wire_profile="copilot_public_responses",
+            reasoning_model="grok-4.6",
+        )
+        translator.process("response.output_item.added", {
+            "output_index": 0,
+            "item": {"type": "reasoning", "id": "per-frame-added-id"},
+        })
+        output = translator.process("response.output_item.done", {
+            "output_index": 0,
+            "item": {
+                "type": "reasoning",
+                "id": "terminal-done-id",
+                "summary": [{"type": "summary_text", "text": "summary"}],
+                "encrypted_content": "encrypted-reasoning",
+            },
+        })
+        signature_event = next(
+            event for event_type, event in output
+            if event_type == "content_block_delta"
+            and event.get("delta", {}).get("type") == "signature_delta"
+        )
+        signature = signature_event["delta"]["signature"]
+        carrier = parse_reasoning_carrier(signature)
+        self.assertEqual(carrier.item_id, "terminal-done-id")
+        self.assertEqual(carrier.encrypted_content, "encrypted-reasoning")
+
+        next_turn = convert_anthropic_to_responses(
+            {
+                "model": "grok-4.6",
+                "messages": [{
+                    "role": "assistant",
+                    "content": [{
+                        "type": "thinking",
+                        "thinking": "summary",
+                        "signature": signature,
+                    }],
+                }],
+            },
+            wire_profile="copilot_public_responses",
+        )
+        reasoning = next_turn.payload["input"][0]
+        self.assertEqual(reasoning["id"], "terminal-done-id")
+        self.assertEqual(
+            reasoning["encrypted_content"], "encrypted-reasoning"
+        )
 
     def test_web_search_lifecycle_is_sidecar_only_and_final_text_streams(self):
         translator = self.translator()

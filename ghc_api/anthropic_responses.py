@@ -305,7 +305,9 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
         # Grok uses the standard Responses request shape through Copilot, but
         # Copilot still re-encrypts response and item ids independently in
         # every SSE frame. It therefore cannot use public_responses' stable-id
-        # stream invariants.
+        # stream invariants. The id on the terminal reasoning-item frame is,
+        # however, accepted when replayed with encrypted_content on later Grok
+        # turns, so retain that terminal value in the reasoning carrier.
         tools_in_input=False,
         supports_native_web_search=True,
         native_server_tools_in_input=False,
