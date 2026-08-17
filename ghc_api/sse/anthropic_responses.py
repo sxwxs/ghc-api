@@ -23,6 +23,7 @@ from ..anthropic_responses import (
     ResponsesToAnthropicResult,
     anthropic_error_from_responses,
     convert_responses_to_anthropic,
+    get_wire_profile,
     parse_strict_json_bytes,
 )
 from ..compat_profiles import audit_responses_event
@@ -146,15 +147,12 @@ class ResponsesAnthropicEventTranslator:
         self.call_id_codec = call_id_codec or IdentifierCodec()
         self.stop_sequences = list(stop_sequences or [])
         self.wire_profile = wire_profile
-        # Copilot's /responses returns opaque, per-event identifiers: one stream
-        # carries a different response.id on response.created,
-        # response.in_progress and response.completed, and a different item.id
-        # on every delta of one item.  Only call_id is stable there.  On that
-        # profile an id is a value, not an identity, so comparing two of them
-        # says nothing about the stream.  The public Responses API does keep
-        # them stable, and there the same comparison is a real check against
-        # two interleaved responses.
-        self.stable_upstream_ids = wire_profile != "copilot_responses_lite"
+        # Copilot can return opaque, per-event identifiers even when a model
+        # uses the standard public request shape. Profile metadata, rather than
+        # request dialect or model family, decides whether identity comparisons
+        # are meaningful for this stream.
+        self.profile = get_wire_profile(wire_profile)
+        self.stable_upstream_ids = self.profile.stable_ids
 
         self.message_started = False
         self.message_stopped = False
@@ -515,7 +513,7 @@ class ResponsesAnthropicEventTranslator:
                     encrypted_content = None
                 item_id = (
                     state.item.get("id")
-                    if self.wire_profile == "public_responses"
+                    if self.profile.preserves_reasoning_item_ids
                     else None
                 )
                 if not isinstance(item_id, str):

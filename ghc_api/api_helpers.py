@@ -353,7 +353,7 @@ _BUILTIN_ANTHROPIC_RESPONSES_MODEL_PROFILES = {
     # Grok backend expects the public Responses dialect (top-level ``tools``)
     # and rejects Responses-Lite-only fields such as reasoning.context and
     # client_metadata, sometimes as a plain-text HTTP 503.
-    "grok-*": "public_responses",
+    "grok-*": "copilot_public_responses",
 }
 
 
@@ -395,6 +395,11 @@ def anthropic_responses_wire_profile(model_id: str) -> str:
     configured = getattr(state, "anthropic_responses_model_profiles", {}) or {}
     matched = _matching_responses_wire_profile(configured, model_id)
     if matched:
+        # The first Grok compatibility release documented public_responses.
+        # Preserve those configs while selecting the corrected Copilot stream
+        # semantics (standard request shape, rotating opaque event ids).
+        if model_id.startswith("grok-") and matched == "public_responses":
+            return "copilot_public_responses"
         return matched
     matched = _matching_responses_wire_profile(
         _BUILTIN_ANTHROPIC_RESPONSES_MODEL_PROFILES, model_id

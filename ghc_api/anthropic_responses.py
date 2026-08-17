@@ -277,8 +277,12 @@ class ResponsesWireProfile:
     supports_max_output_tokens: bool
     supports_message_phase: bool
     supports_reasoning_context: bool
+    preserves_reasoning_item_ids: bool
     reasoning_efforts: Tuple[str, ...]
     default_text_verbosity: Optional[str] = None
+    # Copilot may encrypt the same logical response/item id differently in
+    # every SSE frame. Such ids cannot be used as cross-event identity keys.
+    stable_ids: bool = True
 
 
 WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
@@ -293,7 +297,27 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
         supports_max_output_tokens=True,
         supports_message_phase=False,
         supports_reasoning_context=False,
+        preserves_reasoning_item_ids=True,
         reasoning_efforts=("none", "minimal", "low", "medium", "high", "xhigh"),
+    ),
+    "copilot_public_responses": ResponsesWireProfile(
+        name="copilot_public_responses",
+        # Grok uses the standard Responses request shape through Copilot, but
+        # Copilot still re-encrypts response and item ids independently in
+        # every SSE frame. It therefore cannot use public_responses' stable-id
+        # stream invariants.
+        tools_in_input=False,
+        supports_native_web_search=True,
+        native_server_tools_in_input=False,
+        supports_prompt_cache_breakpoint=True,
+        supports_temperature=False,
+        supports_top_p=False,
+        supports_max_output_tokens=True,
+        supports_message_phase=False,
+        supports_reasoning_context=False,
+        preserves_reasoning_item_ids=True,
+        reasoning_efforts=("low", "medium", "high", "xhigh"),
+        stable_ids=False,
     ),
     "copilot_responses_lite": ResponsesWireProfile(
         name="copilot_responses_lite",
@@ -309,8 +333,10 @@ WIRE_PROFILES: Dict[str, ResponsesWireProfile] = {
         supports_max_output_tokens=True,
         supports_message_phase=True,
         supports_reasoning_context=True,
+        preserves_reasoning_item_ids=False,
         reasoning_efforts=("none", "low", "medium", "high", "xhigh", "max"),
         default_text_verbosity="low",
+        stable_ids=False,
     ),
 }
 
@@ -697,7 +723,14 @@ def _append_message_items(
                 encrypted_content: Optional[str] = None
                 carrier_item_id: Optional[str] = None
                 if carrier is not None:
-                    if carrier.model != target_model or carrier.wire_profile != profile.name:
+                    profile_matches = (
+                        carrier.wire_profile == profile.name
+                        or (
+                            profile.name == "copilot_public_responses"
+                            and carrier.wire_profile == "public_responses"
+                        )
+                    )
+                    if carrier.model != target_model or not profile_matches:
                         report.mark(
                             path,
                             PRESERVATION_APPROXIMATION,
@@ -720,7 +753,7 @@ def _append_message_items(
                         if summary_text else []
                     ),
                 }
-                if profile.name == "public_responses" and carrier_item_id:
+                if profile.preserves_reasoning_item_ids and carrier_item_id:
                     reasoning_item["id"] = carrier_item_id
                 if encrypted_content is not None:
                     reasoning_item["encrypted_content"] = encrypted_content
@@ -1731,7 +1764,11 @@ def convert_responses_to_anthropic(
                 encrypted_content = item.get("encrypted_content")
                 if not isinstance(encrypted_content, str):
                     encrypted_content = None
-                item_id = item.get("id") if wire_profile == "public_responses" else None
+                item_id = (
+                    item.get("id")
+                    if get_wire_profile(wire_profile).preserves_reasoning_item_ids
+                    else None
+                )
                 if not isinstance(item_id, str):
                     item_id = None
                 try:

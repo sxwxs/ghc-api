@@ -184,9 +184,10 @@ auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns H
 
 Responses backends do not all accept the same request dialect. Copilot's GPT
 backend uses the private `copilot_responses_lite` profile (including an
-`additional_tools` input item), while xAI Grok models require the standard
-`public_responses` profile with top-level `tools`. Grok model IDs are selected
-as `public_responses` automatically. The generated config exposes
+`additional_tools` input item), while xAI Grok models require standard request
+fields with top-level `tools`. Because Copilot rotates Grok's opaque IDs between
+SSE frames, Grok uses the `copilot_public_responses` profile rather than the
+stable-ID `public_responses` profile. The generated config exposes
 `anthropic_responses_model_profiles` for explicit exact-name or trailing-`*`
 prefix overrides.
 
