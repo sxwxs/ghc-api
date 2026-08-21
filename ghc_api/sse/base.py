@@ -30,6 +30,10 @@ from ..state import state
 from .keepalive import KEEPALIVE, iter_lines_with_keepalive
 
 
+class UpstreamStreamProtocolError(Exception):
+    """The upstream SSE body ended without a valid protocol terminator."""
+
+
 class SSEStreamHandler:
     """Base class for an SSE stream from Copilot back to the API client.
 
@@ -121,6 +125,7 @@ class SSEStreamHandler:
         # Stream-level state.
         self.status_code: int = response.status_code
         self.error_occurred: bool = False
+        self.stream_error: Optional[Dict[str, str]] = None
 
         # Whether the cache entry has been started. Seeded eagerly from
         # :meth:`stream` so the request shows up in /api/requests before the
@@ -156,6 +161,19 @@ class SSEStreamHandler:
 
     def parse_event_data(self, data: str) -> Any:
         return json.loads(data)
+
+    def has_terminal_event(self) -> bool:
+        """Whether a protocol-defined terminal event has already been received."""
+        return False
+
+    def validate_stream_end(self) -> None:
+        """Validate a clean EOF before finalizing protocol-specific state.
+
+        Most SSE protocols do not require a common terminator, so the base
+        implementation accepts EOF. Protocol handlers with terminal events
+        should override this and raise :class:`UpstreamStreamProtocolError`.
+        """
+        return None
 
     def finalize_stream(self) -> Iterator[tuple]:
         """Emit any pending events after the upstream iterator ends. Default: none."""
@@ -240,6 +258,8 @@ class SSEStreamHandler:
             "duration": duration,
             "user_id": self.user_id,
         }
+        if self.stream_error is not None:
+            record["stream_error"] = dict(self.stream_error)
         record.update(self.extra_cache_fields())
         cache.complete_request(self.request_id, record)
 
@@ -350,6 +370,7 @@ class SSEStreamHandler:
                 # Anything else (non-event, non-data line): defer to subclass.
                 yield from self.forward_raw_line(line)
 
+            self.validate_stream_end()
             for out_type, out_data in self.finalize_stream():
                 if self.emit_event_header:
                     yield f"event: {out_type}\ndata: {out_data}\n\n"
@@ -357,9 +378,47 @@ class SSEStreamHandler:
                     yield f"data: {out_data}\n\n"
 
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            self.error_occurred = True
-            self.status_code = 504
-            print(f"{self.log_prefix} Upstream timeout/connection error for request {self.request_id}: {type(e).__name__}")
+            if self.has_terminal_event():
+                print(
+                    f"{self.log_prefix} Ignoring connection error after terminal "
+                    f"event for request {self.request_id}: {type(e).__name__}: {e}"
+                )
+                return
+            self._set_stream_error(e, 504, "upstream_connection_error")
+            print(
+                f"{self.log_prefix} Upstream timeout/connection error for request "
+                f"{self.request_id}: {type(e).__name__}: {e}"
+            )
+            formatted = self._format_transport_error(e)
+            if formatted:
+                yield formatted
+        except requests.exceptions.RequestException as e:
+            # If the protocol terminal event arrived intact, a missing final
+            # HTTP chunk carries no additional application data. Finish the
+            # downstream stream normally instead of turning success into error.
+            if self.has_terminal_event():
+                print(
+                    f"{self.log_prefix} Ignoring transport error after terminal "
+                    f"event for request {self.request_id}: {type(e).__name__}: {e}"
+                )
+                return
+            # requests raises ChunkedEncodingError (a RequestException, not a
+            # ConnectionError) when a chunked body loses its terminating chunk.
+            # It is an upstream gateway/transport failure, not an internal 500.
+            self._set_stream_error(e, 502, "upstream_stream_error")
+            print(
+                f"{self.log_prefix} Upstream stream error for request "
+                f"{self.request_id}: {type(e).__name__}: {e}"
+            )
+            formatted = self._format_transport_error(e)
+            if formatted:
+                yield formatted
+        except UpstreamStreamProtocolError as e:
+            self._set_stream_error(e, 502, "upstream_stream_error")
+            print(
+                f"{self.log_prefix} Incomplete upstream stream for request "
+                f"{self.request_id}: {e}"
+            )
             formatted = self._format_transport_error(e)
             if formatted:
                 yield formatted
@@ -386,12 +445,21 @@ class SSEStreamHandler:
             # promoted to reusable state here.
             self._complete_cache()
 
+    def _set_stream_error(self, exc: Exception, status_code: int, category: str) -> None:
+        self.error_occurred = True
+        self.status_code = status_code
+        self.stream_error = {
+            "category": category,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+
     def _format_generic_error(self, e: Exception) -> str:
         """SSE payload for the generic-Exception arm. Subclasses can override
         to emit an API-specific shape (e.g. Anthropic ``error`` event)."""
         return f"data: {json.dumps({'error': str(e)})}\n\n"
 
     def _format_transport_error(self, e: Exception) -> Optional[str]:
-        """Optional protocol-specific SSE error for an upstream timeout."""
+        """Optional protocol-specific SSE error for an upstream stream failure."""
 
         return None

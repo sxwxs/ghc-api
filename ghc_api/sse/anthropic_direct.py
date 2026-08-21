@@ -40,6 +40,7 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         # Tracked for the cache record. Defaults to the requested model; updated
         # when ``message_start`` arrives.
         self.accumulated_model: str = self.original_model
+        self._terminal_event_seen = False
 
     def keepalive_event(self) -> str:
         # Anthropic's real API sends ``ping`` events as keepalive; clients like
@@ -47,6 +48,8 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         return 'event: ping\ndata: {"type": "ping"}\n\n'
 
     def on_event(self, event_type: str, event: Dict) -> None:
+        if event_type == "message_stop":
+            self._terminal_event_seen = True
         if event_type == "message_start":
             msg = event.get("message", {}) or {}
             self.accumulated_model = msg.get("model", self.original_model)
@@ -58,9 +61,29 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
             usage = event.get("usage", {}) or {}
             self.output_tokens = usage.get("output_tokens", 0)
 
+    def has_terminal_event(self) -> bool:
+        return self._terminal_event_seen
+
     def _format_generic_error(self, e: Exception) -> str:
         # Match the existing handler: emit ``event: error\ndata: {...}\n\n``.
         error_event = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+        return f"event: error\ndata: {json.dumps(error_event)}\n\n"
+
+    def _format_transport_error(self, exc: Exception) -> str:
+        timed_out = (
+            (self.stream_error or {}).get("category") == "upstream_connection_error"
+        )
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "timeout_error" if timed_out else "api_error",
+                "message": (
+                    "Upstream Anthropic stream timed out"
+                    if timed_out
+                    else "Upstream Anthropic stream ended unexpectedly"
+                ),
+            },
+        }
         return f"event: error\ndata: {json.dumps(error_event)}\n\n"
 
 

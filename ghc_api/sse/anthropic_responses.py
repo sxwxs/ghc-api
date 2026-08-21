@@ -1206,6 +1206,9 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
             self.cache_creation_input_tokens = int(usage.get("cache_creation_input_tokens") or 0)
             self.cache_read_input_tokens = int(usage.get("cache_read_input_tokens") or 0)
 
+    def has_terminal_event(self) -> bool:
+        return self.translator.message_stopped
+
     def finalize_stream(self) -> Iterator[Tuple[str, str]]:
         translated = self.translator.finalize_interrupted()
         if self.translator.protocol_failed:
@@ -1225,11 +1228,18 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         return f"event: error\ndata: {_json(event)}\n\n"
 
     def _format_transport_error(self, exc: Exception) -> str:
+        timed_out = (
+            (self.stream_error or {}).get("category") == "upstream_connection_error"
+        )
         event = {
             "type": "error",
             "error": {
-                "type": "timeout_error",
-                "message": "Upstream Responses stream timed out",
+                "type": "timeout_error" if timed_out else "api_error",
+                "message": (
+                    "Upstream Responses stream timed out"
+                    if timed_out
+                    else "Upstream Responses stream ended unexpectedly"
+                ),
             },
         }
         return f"event: error\ndata: {_json(event)}\n\n"
