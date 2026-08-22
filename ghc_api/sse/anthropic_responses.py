@@ -1105,6 +1105,11 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
     emit_event_header = True
     emit_done_sentinel = False
     capture_raw_sse_lines = False
+    # Termination is declared here so clean-EOF truncation is detected, but
+    # detection itself stays in the overridden :meth:`has_terminal_event`:
+    # the translator also marks the stream stopped on error/interrupt paths
+    # that do not correspond to a single upstream event type.
+    TERMINAL_EVENTS = frozenset({"message_stop"})
 
     def __init__(
         self,
@@ -1228,9 +1233,7 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
         return f"event: error\ndata: {_json(event)}\n\n"
 
     def _format_transport_error(self, exc: Exception) -> str:
-        timed_out = (
-            (self.stream_error or {}).get("category") == "upstream_connection_error"
-        )
+        timed_out, _ = self._transport_failure(exc)
         event = {
             "type": "error",
             "error": {

@@ -12,7 +12,7 @@ from typing import Callable, Dict, Iterator, Optional
 
 import requests
 
-from .base import SSEStreamHandler, UpstreamStreamProtocolError
+from .base import SSEStreamHandler
 
 
 def format_responses_error_event(
@@ -179,6 +179,10 @@ class RetryingResponsesResponse:
                 ):
                     retries += 1
                     continue
+                # Match the early_failure path: the buffered preamble (e.g.
+                # ``response.created``) is still delivered before the failure
+                # propagates, so clients always see a well-formed stream start.
+                yield from buffered
                 raise transport_error
 
             if early_failure and retries < self._max_retries:
@@ -214,10 +218,15 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     # We pass the event header through verbatim and emit only the data line
     # ourselves (the original handler's convention).
     emit_event_header = False
+    TERMINAL_EVENTS = frozenset({
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+        "error",
+    })
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._terminal_event_seen = False
         self._next_sequence_number = 0
 
     def on_event(self, event_type: str, event: Dict) -> None:
@@ -226,14 +235,6 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
             self._next_sequence_number = max(
                 self._next_sequence_number, sequence_number + 1
             )
-
-        if event_type in (
-            "response.completed",
-            "response.incomplete",
-            "response.failed",
-            "error",
-        ):
-            self._terminal_event_seen = True
 
         if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
@@ -255,29 +256,14 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
             self.error_occurred = True
             self.status_code = 502
 
-    def has_terminal_event(self) -> bool:
-        return self._terminal_event_seen
-
-    def validate_stream_end(self) -> None:
-        if not self._terminal_event_seen:
-            raise UpstreamStreamProtocolError(
-                "Responses SSE stream ended without a terminal event"
-            )
-
     def _format_transport_error(self, exc: Exception) -> str:
-        category = (self.stream_error or {}).get("category")
-        if category == "upstream_connection_error":
+        timed_out, detail = self._transport_failure(exc)
+        if timed_out:
             code = "upstream_connection_error"
-            message = (
-                "Upstream Responses connection was interrupted: "
-                f"{type(exc).__name__}"
-            )
+            message = f"Upstream Responses connection was interrupted: {detail}"
         else:
             code = "upstream_stream_error"
-            message = (
-                "Upstream Responses stream ended unexpectedly: "
-                f"{type(exc).__name__}"
-            )
+            message = f"Upstream Responses stream ended unexpectedly: {detail}"
         return format_responses_error_event(
             message,
             code=code,

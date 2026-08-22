@@ -34,13 +34,16 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
     # bare ``[DONE]`` sentinel is OpenAI-specific and would break clients that
     # try to JSON-decode every SSE data line.
     emit_done_sentinel = False
+    # An upstream ``error`` event also terminates an Anthropic stream, so it
+    # counts as terminal too -- otherwise a transport hiccup after a definitive
+    # upstream error would be reported to the client twice.
+    TERMINAL_EVENTS = frozenset({"message_stop", "error"})
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         # Tracked for the cache record. Defaults to the requested model; updated
         # when ``message_start`` arrives.
         self.accumulated_model: str = self.original_model
-        self._terminal_event_seen = False
 
     def keepalive_event(self) -> str:
         # Anthropic's real API sends ``ping`` events as keepalive; clients like
@@ -48,8 +51,6 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         return 'event: ping\ndata: {"type": "ping"}\n\n'
 
     def on_event(self, event_type: str, event: Dict) -> None:
-        if event_type == "message_stop":
-            self._terminal_event_seen = True
         if event_type == "message_start":
             msg = event.get("message", {}) or {}
             self.accumulated_model = msg.get("model", self.original_model)
@@ -61,18 +62,13 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
             usage = event.get("usage", {}) or {}
             self.output_tokens = usage.get("output_tokens", 0)
 
-    def has_terminal_event(self) -> bool:
-        return self._terminal_event_seen
-
     def _format_generic_error(self, e: Exception) -> str:
         # Match the existing handler: emit ``event: error\ndata: {...}\n\n``.
         error_event = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
         return f"event: error\ndata: {json.dumps(error_event)}\n\n"
 
     def _format_transport_error(self, exc: Exception) -> str:
-        timed_out = (
-            (self.stream_error or {}).get("category") == "upstream_connection_error"
-        )
+        timed_out, _ = self._transport_failure(exc)
         error_event = {
             "type": "error",
             "error": {

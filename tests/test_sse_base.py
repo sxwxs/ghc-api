@@ -101,6 +101,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
         message_start = json.dumps({"type": "message_start", "message": {"model": "claude-opus-4", "usage": {"input_tokens": 11, "cache_read_input_tokens": 3}}})
         delta = json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}})
         message_delta = json.dumps({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 9}})
+        message_stop = json.dumps({"type": "message_stop"})
         lines = [
             b"event: message_start",
             f"data: {message_start}".encode(),
@@ -108,6 +109,8 @@ class SSEBasePassthroughTest(unittest.TestCase):
             f"data: {delta}".encode(),
             b"event: message_delta",
             f"data: {message_delta}".encode(),
+            b"event: message_stop",
+            f"data: {message_stop}".encode(),
             b"data: [DONE]",
         ]
         handler = self._make_handler(lines)
@@ -115,7 +118,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
 
         entry = self.cache.get_request("req-1")
         self.assertIsNotNone(entry)
-        self.assertEqual(entry["raw_events"], [message_start, delta, message_delta])
+        self.assertEqual(entry["raw_events"], [message_start, delta, message_delta, message_stop])
         self.assertIsNone(entry["response_body"])
         self.assertEqual(entry["input_tokens"], 11)
         self.assertEqual(entry["cache_read_input_tokens"], 3)
@@ -124,17 +127,62 @@ class SSEBasePassthroughTest(unittest.TestCase):
 
     def test_malformed_json_is_preserved_but_does_not_break_stream(self):
         good = json.dumps({"type": "message_start", "message": {"usage": {}}})
+        stop = json.dumps({"type": "message_stop"})
         lines = [
             b"event: message_start",
             f"data: {good}".encode(),
             b"data: not-json-at-all",
+            b"event: message_stop",
+            f"data: {stop}".encode(),
             b"data: [DONE]",
         ]
         handler = self._make_handler(lines)
         out = "".join(_collect(handler._generate()))
         self.assertIn("data: not-json-at-all\n\n", out)
         entry = self.cache.get_request("req-1")
-        self.assertEqual(entry["raw_events"], [good, "not-json-at-all"])
+        self.assertEqual(entry["raw_events"], [good, "not-json-at-all", stop])
+
+    def test_clean_eof_without_message_stop_is_treated_as_truncated(self):
+        """An Anthropic stream that ends cleanly before ``message_stop`` is a
+        truncated upstream body: the client gets an ``error`` event and the
+        cache record must not claim success."""
+        start = json.dumps({"type": "message_start", "message": {"usage": {}}})
+        delta = json.dumps({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "partial"}})
+        lines = [
+            b"event: message_start",
+            f"data: {start}".encode(),
+            b"event: content_block_delta",
+            f"data: {delta}".encode(),
+        ]
+        handler = self._make_handler(lines)
+        output = "".join(_collect(handler._generate()))
+
+        self.assertIn("event: error\n", output)
+        entry = self.cache.get_request("req-1")
+        self.assertEqual(entry["status_code"], 502)
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+        self.assertEqual(entry["stream_error"]["category"], "upstream_stream_error")
+
+    def test_upstream_error_event_is_terminal_for_anthropic(self):
+        """A definitive upstream ``error`` event terminates an Anthropic stream;
+        a transport failure right after it must not produce a second error
+        event or downgrade the request."""
+        upstream_error = json.dumps({
+            "type": "error",
+            "error": {"type": "overloaded_error", "message": "Overloaded"},
+        })
+        lines = [
+            b"event: error",
+            f"data: {upstream_error}".encode(),
+            requests.exceptions.ChunkedEncodingError("missing final chunk"),
+        ]
+        handler = self._make_handler(lines)
+        output = "".join(_collect(handler._generate()))
+
+        # Exactly one error event (the forwarded upstream one), no synthesized
+        # transport error appended after it.
+        self.assertEqual(output.count("event: error"), 1)
+        self.assertIn(upstream_error, output)
 
     def test_generator_exit_marks_cache_error_499(self):
         message_start = json.dumps({"type": "message_start", "message": {"usage": {}}})
@@ -640,6 +688,24 @@ class RetryingResponsesResponseTest(unittest.TestCase):
         with self.assertRaises(requests.exceptions.ChunkedEncodingError):
             next(stream)
         retry.assert_not_called()
+
+    def test_yields_buffered_preamble_before_raising_unretryable_transport_error(self):
+        """When a pre-output transport failure cannot be retried (budget
+        exhausted), the buffered preamble is still delivered before the error
+        propagates -- matching the early_failure path's contract."""
+        created = self._event("response.created")
+        first = _FakeResponse([
+            created,
+            requests.exceptions.ChunkedEncodingError("Response ended prematurely"),
+        ])
+        retry = mock.Mock(return_value=None)
+        stream = RetryingResponsesResponse(
+            first, retry, 0, "req-no-budget"
+        ).iter_lines()
+
+        self.assertEqual(next(stream), created)
+        with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+            next(stream)
 
     def test_forwards_failure_after_retry_budget_is_exhausted(self):
         failed_line = self._event("response.failed", response={"error": None})
