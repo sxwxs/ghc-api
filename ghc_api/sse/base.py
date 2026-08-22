@@ -30,6 +30,10 @@ from ..state import state
 from .keepalive import KEEPALIVE, iter_lines_with_keepalive
 
 
+class UpstreamStreamProtocolError(Exception):
+    """The upstream SSE body ended without a valid protocol terminator."""
+
+
 class SSEStreamHandler:
     """Base class for an SSE stream from Copilot back to the API client.
 
@@ -54,6 +58,9 @@ class SSEStreamHandler:
         iterator ends. Default: no events.
       - ``extra_cache_fields()`` -- additional keys to pass to ``cache.complete_request``.
         Default: empty dict.
+
+    Subclasses declare their protocol's terminal events via ``TERMINAL_EVENTS``;
+    declaring any enables automatic clean-EOF truncation detection (see below).
     """
 
     endpoint: str = ""
@@ -70,6 +77,16 @@ class SSEStreamHandler:
     # each line as Anthropic JSON would choke on a bare ``[DONE]``.
     emit_done_sentinel: bool = True
     capture_raw_sse_lines: bool = False
+    # Event types that terminate the stream per the protocol spec (e.g.
+    # Anthropic ``message_stop``, Responses ``response.completed``). The base
+    # class tracks them automatically in :meth:`note_event`; a transport error
+    # arriving after one is ignored, and a clean EOF without one raises
+    # :class:`UpstreamStreamProtocolError`. Empty (default) means the protocol
+    # has no required terminator: EOF is always accepted and truncation is only
+    # detected via transport errors. Protocols whose termination cannot be
+    # expressed as an event-type set should leave this empty-ish declaration to
+    # the base class and override :meth:`has_terminal_event` instead.
+    TERMINAL_EVENTS: frozenset = frozenset()
 
     def __init__(
         self,
@@ -121,6 +138,8 @@ class SSEStreamHandler:
         # Stream-level state.
         self.status_code: int = response.status_code
         self.error_occurred: bool = False
+        self.stream_error: Optional[Dict[str, str]] = None
+        self._terminal_event_seen: bool = False
 
         # Whether the cache entry has been started. Seeded eagerly from
         # :meth:`stream` so the request shows up in /api/requests before the
@@ -156,6 +175,38 @@ class SSEStreamHandler:
 
     def parse_event_data(self, data: str) -> Any:
         return json.loads(data)
+
+    def note_event(self, event_type: str) -> None:
+        """Track protocol terminal events. Called by ``_generate`` for every
+        parsed event, before :meth:`on_event`. Subclasses normally do not
+        override this; they declare ``TERMINAL_EVENTS`` instead.
+        """
+        if event_type in self.TERMINAL_EVENTS:
+            self._terminal_event_seen = True
+
+    def has_terminal_event(self) -> bool:
+        """Whether a protocol-defined terminal event has already been received.
+
+        Override when termination is tracked outside the event-type set (e.g. a
+        translator state machine). The default reads the flag maintained by
+        :meth:`note_event` from declared ``TERMINAL_EVENTS``.
+        """
+        return self._terminal_event_seen
+
+    def validate_stream_end(self) -> None:
+        """Validate a clean EOF before finalizing protocol-specific state.
+
+        Protocols that declare ``TERMINAL_EVENTS`` must see one before EOF;
+        anything else is a truncated upstream body and raises
+        :class:`UpstreamStreamProtocolError`. Protocols without a required
+        terminator accept EOF (legacy behavior for handlers that have not
+        opted into truncation detection).
+        """
+        if self.TERMINAL_EVENTS and not self.has_terminal_event():
+            raise UpstreamStreamProtocolError(
+                f"stream ended without a terminal event "
+                f"(expected one of {sorted(self.TERMINAL_EVENTS)})"
+            )
 
     def finalize_stream(self) -> Iterator[tuple]:
         """Emit any pending events after the upstream iterator ends. Default: none."""
@@ -240,6 +291,8 @@ class SSEStreamHandler:
             "duration": duration,
             "user_id": self.user_id,
         }
+        if self.stream_error is not None:
+            record["stream_error"] = dict(self.stream_error)
         record.update(self.extra_cache_fields())
         cache.complete_request(self.request_id, record)
 
@@ -337,6 +390,7 @@ class SSEStreamHandler:
                     event_type = sse_event_type or event.get("type", "")
                     sse_event_type = ""
 
+                    self.note_event(event_type)
                     self.on_event(event_type, event)
 
                     for out_type, out_data in self.forward_event(event_type, event, data):
@@ -350,16 +404,49 @@ class SSEStreamHandler:
                 # Anything else (non-event, non-data line): defer to subclass.
                 yield from self.forward_raw_line(line)
 
+            self.validate_stream_end()
             for out_type, out_data in self.finalize_stream():
                 if self.emit_event_header:
                     yield f"event: {out_type}\ndata: {out_data}\n\n"
                 else:
                     yield f"data: {out_data}\n\n"
 
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            self.error_occurred = True
-            self.status_code = 504
-            print(f"{self.log_prefix} Upstream timeout/connection error for request {self.request_id}: {type(e).__name__}")
+        except requests.exceptions.RequestException as e:
+            # If the protocol terminal event arrived intact, a missing final
+            # HTTP chunk carries no additional application data. Finish the
+            # downstream stream normally instead of turning success into error.
+            if self.has_terminal_event():
+                print(
+                    f"{self.log_prefix} Ignoring transport error after terminal "
+                    f"event for request {self.request_id}: {type(e).__name__}: {e}"
+                )
+                return
+            # requests raises ChunkedEncodingError (a RequestException, not a
+            # ConnectionError) when a chunked body loses its terminating chunk.
+            # ReadTimeout/ConnectionError mean the connection itself broke
+            # (504); any other transport failure is an upstream gateway error
+            # mid-body (502), not an internal 500.
+            if isinstance(
+                e,
+                (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError),
+            ):
+                status_code, category = 504, "upstream_connection_error"
+            else:
+                status_code, category = 502, "upstream_stream_error"
+            self._set_stream_error(e, status_code, category)
+            print(
+                f"{self.log_prefix} Upstream transport error for request "
+                f"{self.request_id}: {type(e).__name__}: {e}"
+            )
+            formatted = self._format_transport_error(e)
+            if formatted:
+                yield formatted
+        except UpstreamStreamProtocolError as e:
+            self._set_stream_error(e, 502, "upstream_stream_error")
+            print(
+                f"{self.log_prefix} Incomplete upstream stream for request "
+                f"{self.request_id}: {e}"
+            )
             formatted = self._format_transport_error(e)
             if formatted:
                 yield formatted
@@ -386,12 +473,33 @@ class SSEStreamHandler:
             # promoted to reusable state here.
             self._complete_cache()
 
+    def _set_stream_error(self, exc: Exception, status_code: int, category: str) -> None:
+        self.error_occurred = True
+        self.status_code = status_code
+        self.stream_error = {
+            "category": category,
+            "type": type(exc).__name__,
+            "message": str(exc),
+        }
+
+    def _transport_failure(self, exc: Exception) -> tuple:
+        """Facts about the recorded stream error, for protocol-specific
+        rendering: ``(timed_out, detail)``. ``timed_out`` is True when the
+        connection itself broke (read timeout / connection loss); ``detail``
+        carries the exception class and message for client-side diagnostics.
+        Must be called after :meth:`_set_stream_error`.
+        """
+        timed_out = (
+            (self.stream_error or {}).get("category") == "upstream_connection_error"
+        )
+        return timed_out, f"{type(exc).__name__}: {exc}"
+
     def _format_generic_error(self, e: Exception) -> str:
         """SSE payload for the generic-Exception arm. Subclasses can override
         to emit an API-specific shape (e.g. Anthropic ``error`` event)."""
         return f"data: {json.dumps({'error': str(e)})}\n\n"
 
     def _format_transport_error(self, e: Exception) -> Optional[str]:
-        """Optional protocol-specific SSE error for an upstream timeout."""
+        """Optional protocol-specific SSE error for an upstream stream failure."""
 
         return None

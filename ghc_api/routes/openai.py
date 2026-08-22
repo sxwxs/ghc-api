@@ -25,7 +25,11 @@ from ..auth import redact_auth_headers
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support
-from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
+from ..sse import (
+    OpenAIResponsesStreamHandler,
+    RetryingResponsesResponse,
+    format_responses_error_event,
+)
 from ..sse.keepalive import (
     BackgroundResult,
     KEEPALIVE,
@@ -82,36 +86,6 @@ def _wait_responses_response_with_keepalive(pending_response):
         if item is KEEPALIVE:
             counters.incr("ping_sent")
             yield _responses_keepalive()
-
-
-def _responses_error_event(
-    message: str,
-    code: str = "upstream_error",
-    param=None,
-    sequence_number: int = 0,
-) -> str:
-    """Standard Responses streaming ``error`` event, documented flat shape.
-
-    Deliberately not ``response.failed``: ``RetryingResponsesResponse`` treats an
-    early ``response.failed`` as a transient upstream failure that is safe to
-    replay, so using it for permanent errors makes a downstream ghc-api replay a
-    request that can never succeed (4 upstream calls for one client request).
-
-    The flat shape is what the API reference documents; the live service sends a
-    nested ``error`` object instead, which breaks SDK deserialization
-    (openai/openai-dotnet#881), so it is not imitated here.
-
-    ``sequence_number`` is 0 because this event is only ever emitted before any
-    upstream SSE event has been forwarded.
-    """
-    event = {
-        "type": "error",
-        "code": code,
-        "message": message,
-        "param": param,
-        "sequence_number": sequence_number,
-    }
-    return f"event: error\ndata: {json.dumps(event)}\n\n"
 
 
 def _complete_responses_stream_error(
@@ -280,7 +254,7 @@ def _stream_pending_responses_request(
                         request_id, active_payload, body, 504, active_request_size,
                         start_time, original_model, translated_model, user_id,
                     )
-                    yield _responses_error_event(message, "upstream_connection_error")
+                    yield format_responses_error_event(message, "upstream_connection_error")
                     return
 
                 if response.ok:
@@ -335,7 +309,7 @@ def _stream_pending_responses_request(
                     active_request_size, start_time, original_model, translated_model,
                     user_id,
                 )
-                yield _responses_error_event(message)
+                yield format_responses_error_event(message)
                 return
 
         except GeneratorExit:
@@ -352,7 +326,7 @@ def _stream_pending_responses_request(
                 start_time, original_model, translated_model, user_id,
             )
             try:
-                yield _responses_error_event(str(exc), "proxy_error")
+                yield format_responses_error_event(str(exc), "proxy_error")
             except GeneratorExit:
                 cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
                 return

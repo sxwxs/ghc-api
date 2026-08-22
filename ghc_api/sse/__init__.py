@@ -17,7 +17,11 @@ from .anthropic_direct import (
     AnthropicDirectStreamHandler,
     AnthropicDirectStreamHandlerWithRecovery,
 )
-from .openai_responses import OpenAIResponsesStreamHandler, RetryingResponsesResponse
+from .openai_responses import (
+    OpenAIResponsesStreamHandler,
+    RetryingResponsesResponse,
+    format_responses_error_event,
+)
 from .anthropic_responses import (
     AnthropicResponsesStreamHandler,
     ResponsesAnthropicEventTranslator,
@@ -32,6 +36,7 @@ __all__ = [
     "AnthropicDirectStreamHandlerWithRecovery",
     "OpenAIResponsesStreamHandler",
     "RetryingResponsesResponse",
+    "format_responses_error_event",
     "AnthropicResponsesStreamHandler",
     "ResponsesAnthropicEventTranslator",
     "StopSequenceScanner",

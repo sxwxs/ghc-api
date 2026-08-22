@@ -3,10 +3,10 @@
 import json
 from typing import Dict, Iterator
 
-from .base import SSEStreamHandler
+from .openai_responses import OpenAIResponsesStreamHandler
 
 
-class ProxyResponsesStreamHandler(SSEStreamHandler):
+class ProxyResponsesStreamHandler(OpenAIResponsesStreamHandler):
     log_prefix = "[Configured Proxy Responses]"
     emit_event_header = False
 
@@ -24,18 +24,6 @@ class ProxyResponsesStreamHandler(SSEStreamHandler):
         self.profile_name = profile_name
         self.public_model = public_model
         self.rewrite_model = rewrite_model
-
-    def on_event(self, event_type: str, event: Dict) -> None:
-        if event_type in ("response.completed", "response.incomplete"):
-            response = event.get("response", {}) or {}
-            usage = response.get("usage", {}) or {}
-            self.input_tokens = usage.get("input_tokens", 0)
-            self.output_tokens = usage.get("output_tokens", 0)
-            details = usage.get("input_tokens_details", {}) or {}
-            self.cache_creation_input_tokens = details.get("cached_tokens", 0)
-        elif event_type == "response.failed":
-            self.error_occurred = True
-            self.status_code = 502
 
     def forward_event(
         self, event_type: str, event: Dict, raw_data: str
