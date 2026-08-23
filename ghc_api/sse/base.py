@@ -404,12 +404,17 @@ class SSEStreamHandler:
                 # Anything else (non-event, non-data line): defer to subclass.
                 yield from self.forward_raw_line(line)
 
-            self.validate_stream_end()
+            # Finalize before validating: a protocol adapter may resolve the
+            # missing-terminal case itself in finalize_stream (e.g. the
+            # Responses->Anthropic translator emits its own richer error and
+            # marks the stream stopped), which then satisfies validation.
             for out_type, out_data in self.finalize_stream():
                 if self.emit_event_header:
                     yield f"event: {out_type}\ndata: {out_data}\n\n"
                 else:
                     yield f"data: {out_data}\n\n"
+
+            self.validate_stream_end()
 
         except requests.exceptions.RequestException as e:
             # If the protocol terminal event arrived intact, a missing final
@@ -439,6 +444,11 @@ class SSEStreamHandler:
                 f"{self.request_id}: {type(e).__name__}: {e}"
             )
             formatted = self._format_transport_error(e)
+            if formatted is None:
+                # Handlers without a protocol-specific transport formatter
+                # previously surfaced this exception through the generic arm;
+                # keep that fallback so their clients are not silently cut off.
+                formatted = self._format_generic_error(e)
             if formatted:
                 yield formatted
         except UpstreamStreamProtocolError as e:
@@ -448,6 +458,8 @@ class SSEStreamHandler:
                 f"{self.request_id}: {e}"
             )
             formatted = self._format_transport_error(e)
+            if formatted is None:
+                formatted = self._format_generic_error(e)
             if formatted:
                 yield formatted
         except GeneratorExit:

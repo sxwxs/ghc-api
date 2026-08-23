@@ -61,6 +61,11 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         elif event_type == "message_delta":
             usage = event.get("usage", {}) or {}
             self.output_tokens = usage.get("output_tokens", 0)
+        elif event_type == "error":
+            # A definitive upstream error event: record it as a failure so
+            # request history does not file it as 200/completed.
+            self.error_occurred = True
+            self.status_code = 502
 
     def _format_generic_error(self, e: Exception) -> str:
         # Match the existing handler: emit ``event: error\ndata: {...}\n\n``.

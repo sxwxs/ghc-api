@@ -18,6 +18,7 @@ from ghc_api.sse import (
     AnthropicDirectStreamHandler,
     OpenAIResponsesStreamHandler,
     RetryingResponsesResponse,
+    SSEStreamHandler,
 )
 from ghc_api.sse import base as base_module
 
@@ -183,6 +184,76 @@ class SSEBasePassthroughTest(unittest.TestCase):
         # transport error appended after it.
         self.assertEqual(output.count("event: error"), 1)
         self.assertIn(upstream_error, output)
+        entry = self.cache.get_request("req-1")
+        self.assertEqual(entry["status_code"], 502)
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+
+    def test_finalize_stream_runs_before_truncation_validation(self):
+        """A protocol adapter that resolves the missing-terminal case itself in
+        finalize_stream (e.g. a translator emitting its own richer error and
+        marking the stream stopped) must not be preempted by the base-class
+        truncation error."""
+
+        class FinalizingHandler(AnthropicDirectStreamHandler):
+            def finalize_stream(self):
+                # Emulates translator.finalize_interrupted(): emits a
+                # protocol-specific error, then marks the stream stopped.
+                yield (
+                    "error",
+                    json.dumps({"type": "error", "error": {"type": "api_error", "message": "interrupted"}}),
+                )
+                self._terminal_event_seen = True
+
+        lines = [
+            b"event: message_start",
+            f"data: {json.dumps({'type': 'message_start', 'message': {'usage': {}}})}".encode(),
+        ]
+        handler = FinalizingHandler(
+            response=_FakeResponse(lines),
+            request_id="req-finalize-first",
+            request_size=10,
+            start_time=0.0,
+            original_model="claude-opus-4",
+            translated_model="claude-opus-4",
+            request_body_for_cache={"model": "claude-opus-4"},
+        )
+        output = "".join(_collect(handler._generate()))
+
+        self.assertIn('"interrupted"', output)
+        # The base truncation transport error must not be appended on top of
+        # the finalizer's own terminal error.
+        self.assertNotIn("Upstream Anthropic stream ended unexpectedly", output)
+
+    def test_transport_fallback_to_generic_error_without_protocol_formatter(self):
+        """Handlers without a protocol-specific transport formatter (e.g. chat
+        completions passthrough) must still surface an upstream transport
+        failure to the client via the generic error payload."""
+        start = json.dumps({"type": "message_start", "message": {"usage": {}}})
+        lines = [
+            b"event: message_start",
+            f"data: {start}".encode(),
+            requests.exceptions.ChunkedEncodingError("missing final chunk"),
+        ]
+
+        class PlainHandler(SSEStreamHandler):
+            endpoint = "/v1/chat/completions"
+            log_prefix = "[Stream Test Plain]"
+
+        handler = PlainHandler(
+            response=_FakeResponse(lines),
+            request_id="req-plain-transport",
+            request_size=10,
+            start_time=0.0,
+            original_model="gpt-5",
+            translated_model="gpt-5",
+            request_body_for_cache={"model": "gpt-5"},
+        )
+        output = "".join(_collect(handler._generate()))
+
+        self.assertIn("missing final chunk", output)
+        entry = self.cache.get_request("req-plain-transport")
+        self.assertEqual(entry["status_code"], 502)
+        self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
 
     def test_generator_exit_marks_cache_error_499(self):
         message_start = json.dumps({"type": "message_start", "message": {"usage": {}}})
