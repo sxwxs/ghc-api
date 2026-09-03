@@ -15,14 +15,32 @@ import requests
 from .base import SSEStreamHandler
 
 
+def format_responses_error_event(
+    message: str,
+    code: str = "upstream_error",
+    param=None,
+    sequence_number: int = 0,
+) -> str:
+    """Build a standard terminal Responses API ``error`` SSE event."""
+    event = {
+        "type": "error",
+        "code": code,
+        "message": message,
+        "param": param,
+        "sequence_number": sequence_number,
+    }
+    return f"event: error\ndata: {json.dumps(event)}\n\n"
+
+
 class RetryingResponsesResponse:
     """Replay a Responses request when it fails before producing output.
 
     Copilot occasionally returns a successful HTTP response whose SSE body is
-    just ``response.created`` followed by ``response.failed``. Buffer only that
-    non-output preamble so a fresh attempt can replace it transparently. Once
-    any substantive event is seen, lines pass through immediately and retries
-    are disabled so text and tool calls cannot be duplicated.
+    just ``response.created`` followed by ``response.failed``, or whose body is
+    interrupted before output starts. Buffer only that non-output preamble so a
+    fresh attempt can replace it transparently. Once any substantive event is
+    seen, lines pass through immediately and retries are disabled so text and
+    tool calls cannot be duplicated.
     """
 
     _PRE_OUTPUT_EVENTS = {
@@ -99,6 +117,24 @@ class RetryingResponsesResponse:
             return ""
         return event.get("type", "") if isinstance(event, dict) else ""
 
+    def _retry(self, response, retries: int, reason: str) -> bool:
+        try:
+            retry_response = self._response_factory()
+        except requests.exceptions.RequestException:
+            return False
+
+        if not retry_response.ok:
+            retry_response.close()
+            return False
+        if not self._replace_response(response, retry_response):
+            return False
+
+        print(
+            f"[Stream Responses] Retrying request {self._request_id} after "
+            f"{reason} ({retries + 1}/{self._max_retries})"
+        )
+        return True
+
     def iter_lines(self) -> Iterator[bytes]:
         retries = 0
 
@@ -110,46 +146,54 @@ class RetryingResponsesResponse:
             buffered = []
             output_started = False
             early_failure = False
+            transport_error = None
 
-            for line in lines:
-                if self._current_response() is None:
-                    return
-                if output_started:
-                    yield line
+            try:
+                for line in lines:
+                    if self._current_response() is None:
+                        return
+                    if output_started:
+                        yield line
+                        continue
+
+                    buffered.append(line)
+                    event_type = self._event_type(line)
+                    if event_type == "response.failed":
+                        early_failure = True
+                        break
+                    if event_type is not None and event_type not in self._PRE_OUTPUT_EVENTS:
+                        output_started = True
+                        yield from buffered
+                        buffered.clear()
+            except requests.exceptions.RequestException as exc:
+                transport_error = exc
+
+            # A transport failure is replay-safe only while the created / queued
+            # preamble is still buffered. Once any substantive event was yielded,
+            # retrying could duplicate text or execute a tool call twice.
+            if transport_error is not None:
+                if (
+                    not output_started
+                    and retries < self._max_retries
+                    and self._retry(response, retries, "an early transport failure")
+                ):
+                    retries += 1
                     continue
-
-                buffered.append(line)
-                event_type = self._event_type(line)
-                if event_type == "response.failed":
-                    early_failure = True
-                    break
-                if event_type is not None and event_type not in self._PRE_OUTPUT_EVENTS:
-                    output_started = True
-                    yield from buffered
-                    buffered.clear()
+                # Match the early_failure path: the buffered preamble (e.g.
+                # ``response.created``) is still delivered before the failure
+                # propagates, so clients always see a well-formed stream start.
+                yield from buffered
+                raise transport_error
 
             if early_failure and retries < self._max_retries:
-                try:
-                    retry_response = self._response_factory()
-                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
-                    # The original response.failed is more useful to the
-                    # downstream client than replacing it with an empty 504.
-                    retry_response = None
-
-                if retry_response is not None and retry_response.ok:
-                    if not self._replace_response(response, retry_response):
-                        return
+                if self._retry(response, retries, "an early stream failure"):
                     retries += 1
-                    print(
-                        f"[Stream Responses] Retrying request {self._request_id} "
-                        f"after an early stream failure ({retries}/{self._max_retries})"
-                    )
                     continue
 
-                # The retry could not establish a valid SSE stream. Preserve
-                # the original response.failed event for the downstream client.
-                if retry_response is not None:
-                    retry_response.close()
+            if not output_started and not early_failure and retries < self._max_retries:
+                if self._retry(response, retries, "an early incomplete stream"):
+                    retries += 1
+                    continue
 
             yield from buffered
             if early_failure:
@@ -174,8 +218,24 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     # We pass the event header through verbatim and emit only the data line
     # ourselves (the original handler's convention).
     emit_event_header = False
+    TERMINAL_EVENTS = frozenset({
+        "response.completed",
+        "response.incomplete",
+        "response.failed",
+        "error",
+    })
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._next_sequence_number = 0
 
     def on_event(self, event_type: str, event: Dict) -> None:
+        sequence_number = event.get("sequence_number")
+        if isinstance(sequence_number, int):
+            self._next_sequence_number = max(
+                self._next_sequence_number, sequence_number + 1
+            )
+
         if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
             usage = resp.get("usage", {}) or {}
@@ -195,3 +255,24 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
             # ghc-api would record the failure as 200/completed.
             self.error_occurred = True
             self.status_code = 502
+
+    def _format_transport_error(self, exc: Exception) -> str:
+        timed_out, detail = self._transport_failure(exc)
+        if timed_out:
+            code = "upstream_connection_error"
+            message = f"Upstream Responses connection was interrupted: {detail}"
+        else:
+            code = "upstream_stream_error"
+            message = f"Upstream Responses stream ended unexpectedly: {detail}"
+        return format_responses_error_event(
+            message,
+            code=code,
+            sequence_number=self._next_sequence_number,
+        )
+
+    def _format_generic_error(self, exc: Exception) -> str:
+        return format_responses_error_event(
+            "Internal Responses stream processing failed",
+            code="proxy_error",
+            sequence_number=self._next_sequence_number,
+        )
