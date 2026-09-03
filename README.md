@@ -25,7 +25,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Safe Backups**: Auto backup overwritten config files as `*.YYYYMMDD_HHMMSS.bak`
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
 - **Optional User-Token Auth**: Opt-in middleware gates LLM endpoints behind self-signup + admin-approved tokens; requests, stats, and token usage are then grouped per user
-- **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses and Chat Completions upstreams, with private auth commands, model/header mapping, and persisted affinity routing
+- **Configured Upstream Proxy**: Isolated `/proxy/<profile>/v1/...` routes for config-driven OpenAI Responses, Chat Completions, and native Anthropic Messages upstreams, with private auth commands, model/header mapping, and persisted affinity routing
 - **Microsoft Web IQ**: transparent proxies for all six Web IQ v3 REST APIs and its Streamable HTTP MCP server, backed by a server-held API key
 
 ## Maintenance Guides
@@ -581,6 +581,7 @@ Optional private upstream profiles expose isolated routes without changing the e
 
 - `POST /proxy/<profile>/v1/responses`
 - `POST /proxy/<profile>/v1/chat/completions`
+- `POST /proxy/<profile>/v1/messages`
 - `GET /proxy/<profile>/v1/models`
 - `GET /proxy/models` - First-party model catalog used by the built-in Chat page
 
@@ -724,7 +725,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`; `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |

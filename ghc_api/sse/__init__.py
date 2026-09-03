@@ -10,6 +10,7 @@ Available transports:
   - ``AnthropicDirectStreamHandlerWithRecovery`` -> /v1/messages with leaked-tool-call recovery
   - ``OpenAIResponsesStreamHandler``         -> /v1/responses (passthrough)
   - ``AnthropicResponsesStreamHandler``      -> Responses translated to /v1/messages
+  - ``ProxyAnthropicMessagesStreamHandler``  -> configured-proxy /v1/messages
 """
 
 from .base import SSEStreamHandler
@@ -23,6 +24,7 @@ from .anthropic_responses import (
     ResponsesAnthropicEventTranslator,
     StopSequenceScanner,
 )
+from .proxy_anthropic_messages import ProxyAnthropicMessagesStreamHandler
 from .proxy_chat_completions import ProxyChatCompletionsStreamHandler
 from .proxy_responses import ProxyResponsesStreamHandler
 
@@ -35,6 +37,7 @@ __all__ = [
     "AnthropicResponsesStreamHandler",
     "ResponsesAnthropicEventTranslator",
     "StopSequenceScanner",
+    "ProxyAnthropicMessagesStreamHandler",
     "ProxyChatCompletionsStreamHandler",
     "ProxyResponsesStreamHandler",
 ]
