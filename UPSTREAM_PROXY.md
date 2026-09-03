@@ -1,6 +1,6 @@
 # Configured Upstream Proxy
 
-The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests to private or self-hosted gateways.
+The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests, plus native Anthropic Messages requests, to private or self-hosted gateways.
 
 It does not modify or share model routing with ghc-api's existing Copilot endpoints.
 
@@ -11,6 +11,7 @@ For a profile named `example-llm`:
 ```text
 POST /proxy/example-llm/v1/responses
 POST /proxy/example-llm/v1/chat/completions
+POST /proxy/example-llm/v1/messages
 GET  /proxy/example-llm/v1/models
 GET  /proxy/models
 ```
@@ -19,7 +20,7 @@ GET  /proxy/models
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 
-The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`.
+The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`. `messages` is native Anthropic Messages passthrough; it is not translated to or from an OpenAI protocol.
 
 ## Private configuration
 
@@ -78,6 +79,14 @@ proxies:
         request_model: upstream
         response_model: public
 
+      messages:
+        upstream_url: https://api.anthropic.com/v1/messages
+        request_model: upstream
+        response_model: public
+        headers:
+          anthropic-version: "2023-06-01"
+          x-api-key: "${ANTHROPIC_API_KEY}"
+
     models:
       example-coding-model:
         display_name: Example Coding Model
@@ -92,6 +101,8 @@ proxies:
             upstream_model: null
           chat_completions:
             upstream_model: example-chat-deployment
+          messages:
+            upstream_model: claude-sonnet-4-5
 ```
 
 Profile names may contain only letters, digits, `.`, `_`, and `-`.
@@ -205,7 +216,7 @@ Supported scopes:
 - `proxy`: one token per profile/API/upstream URL.
 - `model`: one token per profile/API/public model/upstream URL.
 
-Responses and Chat Completions always use separate affinity keys. First-request discovery is serialized per key so concurrent cold requests do not establish conflicting routes.
+Responses, Chat Completions, and Messages always use separate affinity keys. First-request discovery is serialized per key so concurrent cold requests do not establish conflicting routes.
 
 Affinity values are persisted atomically and are not exposed through the API or dashboard.
 
@@ -217,8 +228,15 @@ Configured-proxy requests use the same request cache, request browser, in-memory
 
 - Responses: `input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens`.
 - Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
+- Anthropic Messages: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
 
-The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Error responses are recorded with zero usage, matching the existing endpoints.
+The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages is currently available through API clients rather than the built-in OpenAI-shaped Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+
+## Native Anthropic Messages
+
+The Messages API is passed through without OpenAI translation. Both JSON and Anthropic SSE responses are supported. When `response_model: public` is configured, the top-level model in a JSON response and `message_start.message.model` in a stream are rewritten to the public model id; use `preserve` for byte-equivalent model values.
+
+Incoming client headers are not forwarded. Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
 
 ## Client configuration
 
@@ -263,6 +281,24 @@ Add a provider to `~/.pi/agent/models.json`:
   }
 }
 ```
+
+### Anthropic SDK using Messages
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://127.0.0.1:8313/proxy/example-llm",
+    api_key="not-needed",
+)
+message = client.messages.create(
+    model="example-coding-model",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+When ghc-api authentication is enabled, the SDK's `api_key` must be the normal ghc-api user token. Upstream credentials remain private in `upstream-proxies.yaml`.
 
 ### Codex using Responses
 

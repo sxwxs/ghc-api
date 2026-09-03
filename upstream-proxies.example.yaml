@@ -55,6 +55,18 @@ proxies:
         headers:
           X-Protocol: chat-completions
 
+      # Native Anthropic Messages passthrough (no OpenAI translation).
+      messages:
+        enabled: true
+        upstream_url: https://api.anthropic.com/v1/messages
+        timeout_seconds: 180
+        max_connection_retries: 1
+        request_model: upstream
+        response_model: public
+        headers:
+          anthropic-version: "2023-06-01"
+          x-api-key: "${ANTHROPIC_API_KEY}"
+
     models:
       example-coding-model:
         display_name: Example Coding Model
@@ -75,3 +87,7 @@ proxies:
           chat_completions:
             enabled: true
             upstream_model: example-chat-deployment
+
+          messages:
+            enabled: true
+            upstream_model: claude-sonnet-4-5
