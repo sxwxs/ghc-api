@@ -1117,6 +1117,14 @@
                 const groups = {};
                 for (const model of configuredModels) {
                     if (!model.id || !model.profile || !model.base_url) continue;
+                    const supportedEndpoints = model.supported_endpoints || [];
+                    // Normal Chat mode speaks OpenAI request/stream shapes. Native
+                    // Anthropic-only models remain discoverable through /proxy/models
+                    // for API clients, but are not presented as unusable Chat options.
+                    if (!supportedEndpoints.some(e =>
+                        e === '/responses' || e === 'responses' ||
+                        e === '/chat/completions' || e === 'chat/completions'
+                    )) continue;
                     if (!groups[model.profile]) {
                         groups[model.profile] = document.createElement('optgroup');
                         groups[model.profile].label = 'Configured proxy: ' + model.profile;
@@ -1128,7 +1136,7 @@
                         id: model.id,
                         profile: model.profile,
                         baseUrl: model.base_url,
-                        supportedEndpoints: model.supported_endpoints || [],
+                        supportedEndpoints: supportedEndpoints,
                         contextWindow: model.context_window || null,
                     });
                 }

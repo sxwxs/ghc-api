@@ -94,7 +94,7 @@ def create_app() -> Flask:
             "JSON nesting is too deep: exceeds the maximum of "
             f"{MAX_JSON_NESTING_DEPTH} levels"
         )
-        if request.blueprint == "anthropic":
+        if request.blueprint == "anthropic" or request.endpoint == "configured_proxy.proxy_messages":
             return jsonify({
                 "type": "error",
                 "error": {"type": "invalid_request_error", "message": message},
