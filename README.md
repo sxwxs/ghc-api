@@ -34,6 +34,17 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 - [Responses pre-header keepalive](docs/decisions/RESPONSES_PRE_HEADER_KEEPALIVE.md) - review notes and decisions behind the `/v1/responses` pre-header keepalive (PR #42): why upstream errors keep their HTTP status, why the synthetic event is `error`, and what is still open
 
+### Responses streaming item IDs
+
+Copilot can return different opaque IDs for the same output item in successive
+`/v1/responses` streaming events. Clients that match messages by ID may then show
+the streamed text and completed answer as separate replies. ghc-api keeps the
+first upstream item ID for each `output_index` throughout that request, including
+the terminal response's `output` array. Text deltas still stream immediately;
+tool `call_id`, encrypted reasoning content, and response IDs are preserved.
+Events whose IDs are already consistent pass through unchanged, and request
+history retains the original upstream events for diagnosis.
+
 ## Installation
 
 Install the package using pip:

@@ -1,9 +1,9 @@
 """OpenAI Responses (``/v1/responses``) SSE stream handler.
 
-Pure passthrough. The upstream stream uses both ``event:`` and ``data:`` SSE
-lines; we forward the ``event:`` line verbatim (single newline) and the
-``data:`` JSON unchanged (double newline). Matches the wire format the
-pre-refactor ``stream_responses`` produced.
+The upstream stream uses both ``event:`` and ``data:`` SSE lines. Preserve
+their wire format, but keep output item IDs stable when Copilot rotates its
+opaque IDs between events. Unchanged events remain byte-for-byte passthrough;
+the base handler retains the original upstream payloads in the request cache.
 """
 
 import json
@@ -174,6 +174,57 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     # We pass the event header through verbatim and emit only the data line
     # ourselves (the original handler's convention).
     emit_event_header = False
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._item_ids: Dict[int, str] = {}
+
+    def _normalize_id(self, output_index, value: Dict, field: str) -> Dict:
+        """Keep the first upstream ID for an output slot, without inventing IDs.
+
+        The index correlates Copilot's independently wrapped IDs. Retain a real
+        upstream ID rather than generating one: clients may replay output items
+        in later requests. Do not touch call_id or encrypted reasoning content.
+        """
+        if type(output_index) is not int or output_index < 0:
+            return value
+        item_id = value.get(field)
+        if not isinstance(item_id, str) or not item_id:
+            return value
+        canonical_id = self._item_ids.setdefault(output_index, item_id)
+        if item_id == canonical_id:
+            return value
+        return {**value, field: canonical_id}
+
+    def forward_event(self, event_type: str, event: Dict, raw_data: str) -> Iterator[tuple]:
+        normalized = event
+        if event_type.startswith("response."):
+            output_index = event.get("output_index")
+            if event_type in ("response.output_item.added", "response.output_item.done"):
+                item = event.get("item")
+                if isinstance(item, dict):
+                    normalized_item = self._normalize_id(output_index, item, "id")
+                    if normalized_item is not item:
+                        normalized = {**normalized, "item": normalized_item}
+            normalized = self._normalize_id(output_index, normalized, "item_id")
+
+        if event_type in ("response.completed", "response.incomplete", "response.failed"):
+            response = event.get("response")
+            output = response.get("output") if isinstance(response, dict) else None
+            if isinstance(output, list):
+                normalized_output = [
+                    self._normalize_id(index, item, "id") if isinstance(item, dict) else item
+                    for index, item in enumerate(output)
+                ]
+                if any(new is not old for new, old in zip(normalized_output, output)):
+                    normalized = {
+                        **normalized,
+                        "response": {**response, "output": normalized_output},
+                    }
+
+        # Yield immediately, including deltas. Copy-on-write preserves both the
+        # parsed upstream event and the exact wire bytes for healthy streams.
+        yield (event_type, raw_data if normalized is event else json.dumps(normalized, ensure_ascii=False))
 
     def on_event(self, event_type: str, event: Dict) -> None:
         if event_type in ("response.completed", "response.incomplete"):
