@@ -227,6 +227,11 @@ class RequestCache:
                     "state": self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR,
                     "user_id": _coerce_user_id(data.get("user_id")),
                 }
+                # Long streams may outlive their seeded cache entry. Preserve
+                # sidecars (e.g. stream diagnostics) on the fallback path too.
+                for key, value in data.items():
+                    if key not in self.cache[request_id]:
+                        self.cache[request_id][key] = value
                 self._truncate_oversize_bodies(self.cache[request_id])
 
             self.request_count += 1

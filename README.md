@@ -193,6 +193,47 @@ auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns H
                               # Lossy; see "Encrypted Content Recovery" below.
 ```
 
+### SSE keepalive and stream diagnostics
+
+For `/v1/responses` and other shared SSE handlers, `sse_keepalive_interval`
+measures **downstream inactivity**, not just upstream silence. Upstream comments,
+blank lines, or events buffered/skipped by a translator cannot suppress the
+client's heartbeat. Normal output resets the deadline; `0` still disables all
+synthetic keepalives. A heartbeat between an SSE event header and its data does
+not terminate that unfinished event frame.
+
+These heartbeats go **from ghc-api to the client**, not back to Copilot. Responses
+SSE is a one-way response stream. This does not enable TCP keepalive or extend an
+upstream gateway's idle timeout or total request deadline.
+
+Shared SSE cache entries and daily request dumps include a small
+`stream_diagnostics` sidecar, retained even when bodies exceed the cache size
+limit:
+
+- `last_upstream_line_at`: Unix seconds when a line was read from the response
+  iterator, before queueing, including comments and blank lines.
+- `last_downstream_yield_at`: Unix seconds when bytes were last yielded to WSGI.
+- `finished_at`: Unix seconds at stream finalization, before writing the dump.
+- `upstream_comment_lines`, `keepalives_sent`: in-stream comment/local-heartbeat
+  counts. The latter does not include pre-header keepalives emitted by the route.
+- `last_event_type`, `terminal_event_type`: the last parsed upstream event and
+  observed terminal event (or `[DONE]` if no semantic terminal was seen).
+- `exception_type`: e.g. `ChunkedEncodingError`, `ReadTimeout`, or `GeneratorExit`;
+  `null` if no exception was caught. Exception messages and comment contents are
+  not copied into the sidecar.
+
+These are **application observations**, not packet timestamps or delivery ACKs:
+response wrappers can buffer the initial preamble, and a WSGI yield cannot prove
+that a server flushed or a client received it. Missing observations are `null`.
+Compare `finished_at` with the last upstream read to investigate idle versus
+whole-request timeouts; a total duration alone cannot distinguish them.
+
+A truncated upstream HTTP stream (`ChunkedEncodingError`) is recorded as **502**,
+not an internal 500. `/v1/responses` emits a standard `error` SSE event with code
+`upstream_stream_interrupted`; read/connection failures remain 504 and emit
+`upstream_connection_error`. The already-committed HTTP status cannot change.
+Neither path synthesizes `response.failed` or retries partially emitted output.
+
 ### Anthropic Messages → Responses wire profiles
 
 Responses backends do not all accept the same request dialect. Copilot's GPT

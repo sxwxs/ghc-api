@@ -7,14 +7,17 @@ proxy writes nothing to the client and the client's own read timeout fires.
 ``iter_lines_with_keepalive`` reads the upstream lines on a background daemon
 thread feeding a queue; the consumer blocks on ``queue.get(timeout=interval)``
 and yields the ``KEEPALIVE`` sentinel whenever the stream has been idle for
-longer than ``interval`` seconds. Callers translate ``KEEPALIVE`` into the
-endpoint-appropriate keepalive payload (Anthropic ``ping`` event or an SSE
-comment). Upstream exceptions are re-raised in the consumer so existing
-``ReadTimeout`` / ``ConnectionError`` handling is unchanged.
+longer than ``interval`` seconds. Shared SSE handlers supply the time of their
+last downstream yield so ignored upstream traffic cannot starve heartbeats.
+Callers translate ``KEEPALIVE`` into the endpoint-appropriate payload (Anthropic
+``ping`` event or an SSE comment). Upstream exceptions are re-raised in the
+consumer for endpoint-specific error handling.
 """
 
 import queue
 import threading
+import time
+from typing import Callable, Optional
 
 from ..counters import counters
 
@@ -137,16 +140,34 @@ def wait_result_with_keepalive(pending_result, interval):
             yield KEEPALIVE
 
 
-def iter_lines_with_keepalive(response, interval):
-    """Yield raw lines from ``response.iter_lines()``; yield ``KEEPALIVE`` when
-    the stream has been idle for more than ``interval`` seconds.
+def iter_lines_with_keepalive(
+    response,
+    interval,
+    *,
+    last_activity: Optional[Callable[[], float]] = None,
+    on_line: Optional[Callable[[bytes], None]] = None,
+):
+    """Yield upstream lines, with keepalives during downstream inactivity.
 
-    ``interval`` <= 0 disables keepalive entirely and is a pure passthrough to
-    ``response.iter_lines()`` (byte-identical to the old behavior).
+    By default inactivity means no upstream lines. Handlers which discard or
+    buffer lines supply ``last_activity``: the monotonic time of their last
+    downstream yield. Comments, blank lines and skipped events must not reset
+    that deadline. Emitting a heartbeat also advances the deadline, so even a
+    consumer that ignores the sentinel cannot cause a busy loop.
+
+    ``on_line`` observes reads before queueing (including comments/blank lines),
+    not consumer drain times. It must be lightweight and thread-safe. A response
+    wrapper may itself buffer lines; this is not a socket-byte timestamp.
+
+    ``interval`` <= 0 disables keepalive entirely; observers still run, but no
+    background reader or synthetic wire content is added.
     """
     if not interval or interval <= 0:
         try:
-            yield from response.iter_lines()
+            for line in response.iter_lines():
+                if on_line is not None:
+                    on_line(line)
+                yield line
         finally:
             response.close()
         return
@@ -170,6 +191,8 @@ def iter_lines_with_keepalive(response, interval):
             for line in response.iter_lines():
                 if stop.is_set():
                     break
+                if on_line is not None:
+                    on_line(line)
                 if not _put((False, line)):
                     break
         except Exception as exc:  # propagate to the consumer thread
@@ -178,12 +201,23 @@ def iter_lines_with_keepalive(response, interval):
             _put((False, _SENTINEL))
 
     threading.Thread(target=_reader, daemon=True).start()
+    last_keepalive = float("-inf")
 
     try:
         while True:
+            timeout = interval
+            if last_activity is not None:
+                timeout = max(last_activity(), last_keepalive) + interval - time.monotonic()
+                # Check before reading even a nonempty queue: a steady flow of
+                # ignored upstream lines must not starve the downstream client.
+                if timeout <= 0:
+                    last_keepalive = time.monotonic()
+                    yield KEEPALIVE
+                    continue
             try:
-                is_exc, item = q.get(timeout=interval)
+                is_exc, item = q.get(timeout=timeout)
             except queue.Empty:
+                last_keepalive = time.monotonic()
                 yield KEEPALIVE
                 continue
             if is_exc:

@@ -18,6 +18,7 @@ only in the recovery subclass so flipping the toggle off is truly a no-op.
 """
 
 import json
+import threading
 import time
 from typing import Any, Dict, Generator, Iterator, List, Optional
 
@@ -122,6 +123,20 @@ class SSEStreamHandler:
         self.status_code: int = response.status_code
         self.error_occurred: bool = False
 
+        # Heartbeats follow downstream yields, not upstream reads: some lines
+        # are intentionally discarded or buffered by protocol adapters.
+        self._last_downstream_activity = time.monotonic()
+        self._activity_lock = threading.Lock()
+        self._stream_diagnostics: Dict[str, Any] = {
+            "last_upstream_line_at": None,
+            "last_downstream_yield_at": None,
+            "upstream_comment_lines": 0,
+            "keepalives_sent": 0,
+            "last_event_type": None,
+            "terminal_event_type": None,
+            "exception_type": None,
+        }
+
         # Whether the cache entry has been started. Seeded eagerly from
         # :meth:`stream` so the request shows up in /api/requests before the
         # first byte streams (Flask iterates the generator lazily).
@@ -162,8 +177,8 @@ class SSEStreamHandler:
         return iter(())
 
     def keepalive_event(self) -> str:
-        """SSE payload emitted to the client when the upstream stream has been
-        idle past ``state.sse_keepalive_interval``. Default: an SSE comment line,
+        """SSE payload emitted when no downstream data has been yielded for
+        ``state.sse_keepalive_interval`` seconds. Default: an SSE comment line,
         which every SSE client ignores. Subclasses that need a protocol-specific
         keepalive (e.g. Anthropic's ``ping`` event) override this.
         """
@@ -188,6 +203,14 @@ class SSEStreamHandler:
             return
         target.append(value)
         self.raw_capture_bytes += size
+
+    def _record_upstream_line(self, line: bytes) -> None:
+        # Called by the reader before queueing, including for discarded lines.
+        # Store only timing/counts, never comment contents or exception text.
+        with self._activity_lock:
+            self._stream_diagnostics["last_upstream_line_at"] = time.time()
+            if line.startswith(b":"):
+                self._stream_diagnostics["upstream_comment_lines"] += 1
 
     # ----------------------------------------------------------- cache helpers
 
@@ -218,7 +241,10 @@ class SSEStreamHandler:
         if self._cache_completed:
             return
         self._cache_completed = True
-        duration = round(time.time() - self.start_time, 2)
+        finished_at = time.time()
+        duration = round(finished_at - self.start_time, 2)
+        with self._activity_lock:
+            diagnostics = {**self._stream_diagnostics, "finished_at": finished_at}
         response_size = self.response_wire_bytes
         record = {
             "request_body": self.request_body_for_cache,
@@ -239,6 +265,7 @@ class SSEStreamHandler:
             "cache_read_input_tokens": self.cache_read_input_tokens,
             "duration": duration,
             "user_id": self.user_id,
+            "stream_diagnostics": diagnostics,
         }
         record.update(self.extra_cache_fields())
         cache.complete_request(self.request_id, record)
@@ -262,18 +289,47 @@ class SSEStreamHandler:
         )
 
     def _generate(self) -> Generator[str, None, None]:
+        # Observe every downstream yield, including subclass output, malformed
+        # data, finalizers and error frames. This is a WSGI yield timestamp, not
+        # proof that a web server or client has flushed/received the bytes.
+        chunks = self._generate_chunks()
+        try:
+            for chunk in chunks:
+                if chunk:
+                    self._last_downstream_activity = time.monotonic()
+                    self._stream_diagnostics["last_downstream_yield_at"] = time.time()
+                yield chunk
+        finally:
+            # Closing the outer generator must still reach the inner 499 arm
+            # and persist the partial cache entry exactly once.
+            chunks.close()
+
+    def _generate_chunks(self) -> Generator[str, None, None]:
         # Idempotent -- normally seeded by stream(); kept here so tests that
         # drive _generate() directly still produce a complete cache entry.
         self._seed_cache()
         first_chunk_received = False
+        upstream_lines = iter_lines_with_keepalive(
+            self.response,
+            state.sse_keepalive_interval,
+            last_activity=lambda: self._last_downstream_activity,
+            on_line=self._record_upstream_line,
+        )
         try:
             cache.update_request_state(self.request_id, cache.STATE_SENDING)
             sse_event_type = ""
 
-            for line in iter_lines_with_keepalive(self.response, state.sse_keepalive_interval):
+            for line in upstream_lines:
                 if line is KEEPALIVE:
                     counters.incr("ping_sent")
-                    yield self.keepalive_event()
+                    self._stream_diagnostics["keepalives_sent"] += 1
+                    if not self.emit_event_header and sse_event_type:
+                        # The event header is already on the wire. A blank
+                        # line here would clear the client's pending event name
+                        # before its data arrives; a comment alone is enough.
+                        yield ": keepalive\n"
+                    else:
+                        yield self.keepalive_event()
                     continue
 
                 if not line:
@@ -312,6 +368,8 @@ class SSEStreamHandler:
                     if data.startswith(" "):
                         data = data[1:]
                     if data == "[DONE]":
+                        if self._stream_diagnostics["terminal_event_type"] is None:
+                            self._stream_diagnostics["terminal_event_type"] = "[DONE]"
                         if self.emit_done_sentinel:
                             yield "data: [DONE]\n\n"
                         break
@@ -336,6 +394,13 @@ class SSEStreamHandler:
 
                     event_type = sse_event_type or event.get("type", "")
                     sse_event_type = ""
+                    if isinstance(event_type, str):
+                        self._stream_diagnostics["last_event_type"] = event_type[:128]
+                        if event_type in (
+                            "response.completed", "response.incomplete", "response.failed",
+                            "error", "message_stop",
+                        ):
+                            self._stream_diagnostics["terminal_event_type"] = event_type
 
                     self.on_event(event_type, event)
 
@@ -356,22 +421,38 @@ class SSEStreamHandler:
                 else:
                     yield f"data: {out_data}\n\n"
 
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+        except (
+            requests.exceptions.ReadTimeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as e:
             self.error_occurred = True
-            self.status_code = 504
-            print(f"{self.log_prefix} Upstream timeout/connection error for request {self.request_id}: {type(e).__name__}")
-            formatted = self._format_transport_error(e)
+            interrupted = isinstance(e, requests.exceptions.ChunkedEncodingError)
+            self.status_code = 502 if interrupted else 504
+            self._stream_diagnostics["exception_type"] = type(e).__name__
+            print(f"{self.log_prefix} Upstream stream error for request {self.request_id}: {type(e).__name__}")
+            formatted = (
+                self._format_stream_interruption(e)
+                if interrupted else self._format_transport_error(e)
+            )
             if formatted:
-                yield formatted
+                try:
+                    yield formatted
+                except GeneratorExit:
+                    self.status_code = 499
+                    cache.update_request_state(self.request_id, cache.STATE_ERROR, status_code=499)
+                    return
         except GeneratorExit:
             self.error_occurred = True
             self.status_code = 499
+            self._stream_diagnostics["exception_type"] = "GeneratorExit"
             print(f"{self.log_prefix} Client disconnected for request {self.request_id}")
             cache.update_request_state(self.request_id, cache.STATE_ERROR, status_code=499)
             return
         except Exception as e:
             self.error_occurred = True
             self.status_code = 500
+            self._stream_diagnostics["exception_type"] = type(e).__name__
             print(f"{self.log_prefix} Error for request {self.request_id}: {type(e).__name__}: {e}")
             try:
                 yield self._format_generic_error(e)
@@ -384,12 +465,19 @@ class SSEStreamHandler:
             # disconnects or the generator exits early.  Replay callbacks only
             # run on a validated terminal event, so partial reasoning is never
             # promoted to reusable state here.
-            self._complete_cache()
+            try:
+                upstream_lines.close()
+            finally:
+                self._complete_cache()
 
     def _format_generic_error(self, e: Exception) -> str:
         """SSE payload for the generic-Exception arm. Subclasses can override
         to emit an API-specific shape (e.g. Anthropic ``error`` event)."""
         return f"data: {json.dumps({'error': str(e)})}\n\n"
+
+    def _format_stream_interruption(self, e: Exception) -> str:
+        """Protocol-specific error for a truncated upstream HTTP response."""
+        return self._format_generic_error(e)
 
     def _format_transport_error(self, e: Exception) -> Optional[str]:
         """Optional protocol-specific SSE error for an upstream timeout."""

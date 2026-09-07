@@ -159,10 +159,11 @@ upstream_read_timeout: 1800
 
 # SSE Keepalive
 # -------------
-# When a streaming response is idle (no data from upstream) for this many seconds,
-# the proxy sends a keepalive ping to the client so its read timeout does not fire.
-# This is what keeps clients like Claude Code connected while the model "thinks"
-# before emitting the first token. Set to 0 to disable keepalive.
+# Send a keepalive ping to the client during streaming inactivity. Shared SSE
+# handlers (including /responses) measure time since the last downstream yield,
+# so discarded upstream comments/blank lines cannot suppress client heartbeats.
+# This does not send heartbeats to Copilot or extend upstream request deadlines.
+# Set to 0 to disable keepalive.
 sse_keepalive_interval: 30
 
 # How long a streaming Responses request waits for upstream response headers before

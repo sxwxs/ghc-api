@@ -178,6 +178,7 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._item_ids: Dict[int, str] = {}
+        self._next_sequence_number = 0
 
     def _normalize_id(self, output_index, value: Dict, field: str) -> Dict:
         """Keep the first upstream ID for an output slot, without inventing IDs.
@@ -226,7 +227,34 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
         # parsed upstream event and the exact wire bytes for healthy streams.
         yield (event_type, raw_data if normalized is event else json.dumps(normalized, ensure_ascii=False))
 
+    def _format_responses_error(self, code: str, message: str) -> str:
+        # Use the documented flat Responses error shape, never response.failed:
+        # a chained proxy must not replay an already partially emitted stream.
+        event = {
+            "type": "error",
+            "code": code,
+            "message": message,
+            "param": None,
+            "sequence_number": self._next_sequence_number,
+        }
+        return f"event: error\ndata: {json.dumps(event)}\n\n"
+
+    def _format_stream_interruption(self, e: Exception) -> str:
+        return self._format_responses_error(
+            "upstream_stream_interrupted",
+            "Upstream response connection ended unexpectedly.",
+        )
+
+    def _format_transport_error(self, e: Exception) -> str:
+        return self._format_responses_error(
+            "upstream_connection_error",
+            "Upstream response stream timed out or lost its connection.",
+        )
+
     def on_event(self, event_type: str, event: Dict) -> None:
+        sequence_number = event.get("sequence_number")
+        if type(sequence_number) is int and sequence_number >= 0:
+            self._next_sequence_number = max(self._next_sequence_number, sequence_number + 1)
         if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
             usage = resp.get("usage", {}) or {}
