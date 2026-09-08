@@ -127,6 +127,17 @@ auth:
 
 The command is executed directly without a shell. Its trimmed stdout is used as the token. A non-zero exit code or empty stdout fails only the affected proxy request. Tokens are never placed in the request cache or returned by the model-list endpoint.
 
+For upstreams that require a credential in a custom header, use `header_command` instead. The command output is sent as-is, without a `Bearer` prefix:
+
+```yaml
+auth:
+  type: header_command
+  header: api-key
+  command:
+    - cat
+    - /path/to/private-key.txt
+```
+
 A 401 response invalidates a command-backed token and retries once.
 
 ## Headers

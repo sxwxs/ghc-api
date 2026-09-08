@@ -15,6 +15,7 @@ proxies:
     #   type: none
     #   type: bearer_env + env: VARIABLE_NAME
     #   type: bearer_command + command: [executable, arg1, ...]
+    #   type: header_command + header: Header-Name + command: [executable, arg1, ...]
     auth:
       type: bearer_env
       env: EXAMPLE_LLM_TOKEN
