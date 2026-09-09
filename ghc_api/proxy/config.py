@@ -14,10 +14,10 @@ import yaml
 from ..utils import get_config_dir
 
 
-SUPPORTED_APIS = frozenset({"responses", "chat_completions"})
+SUPPORTED_APIS = frozenset({"responses", "chat_completions", "messages"})
 MODEL_REQUEST_MODES = frozenset({"preserve", "omit", "upstream"})
 MODEL_RESPONSE_MODES = frozenset({"preserve", "public"})
-AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
+AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command", "header_command"})
 AFFINITY_SCOPES = frozenset({"proxy", "model"})
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -32,6 +32,7 @@ class ProxyAuthConfig:
     type: str = "none"
     env: Optional[str] = None
     command: Tuple[str, ...] = ()
+    header: str = "Authorization"
     cache_ttl_seconds: int = 300
     command_timeout_seconds: int = 30
 
@@ -40,6 +41,7 @@ class ProxyAuthConfig:
             self.type,
             self.env,
             self.command,
+            self.header,
             self.cache_ttl_seconds,
             self.command_timeout_seconds,
         )
@@ -170,6 +172,7 @@ def _parse_auth(value, field_name: str) -> ProxyAuthConfig:
         raise ProxyConfigError(f"'{field_name}.type' must be one of: {', '.join(sorted(AUTH_TYPES))}")
 
     env_name = raw.get("env")
+    header_name = raw.get("header", "Authorization")
     command_value = raw.get("command", [])
     if command_value is None:
         command_value = []
@@ -184,11 +187,18 @@ def _parse_auth(value, field_name: str) -> ProxyAuthConfig:
 
     if auth_type == "bearer_command" and not command_value:
         raise ProxyConfigError(f"'{field_name}.command' is required for bearer_command auth")
+    if auth_type == "header_command" and not command_value:
+        raise ProxyConfigError(f"'{field_name}.command' is required for header_command auth")
+    if auth_type == "header_command" and (not isinstance(header_name, str) or not header_name.strip()):
+        raise ProxyConfigError(f"'{field_name}.header' is required for header_command auth")
+    if not isinstance(header_name, str) or not header_name.strip():
+        raise ProxyConfigError(f"'{field_name}.header' must be a non-empty string")
 
     return ProxyAuthConfig(
         type=auth_type,
         env=env_name,
         command=tuple(command_value),
+        header=header_name.strip(),
         cache_ttl_seconds=_parse_positive_int(
             raw.get("cache_ttl_seconds"), 300, f"{field_name}.cache_ttl_seconds"
         ),

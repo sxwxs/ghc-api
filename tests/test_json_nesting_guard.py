@@ -133,6 +133,7 @@ class DeepJsonRequestRejectionTests(unittest.TestCase):
         paths = {
             "/v1/messages": '{"model":"gpt-5.6-sol","messages":[],"max_tokens":16,"nested":%s}',
             "/v1/messages/count_tokens": '{"model":"gpt-5.6-sol","messages":[],"nested":%s}',
+            "/proxy/demo/v1/messages": '{"model":"m","messages":[],"max_tokens":16,"nested":%s}',
         }
         for path, template in paths.items():
             for depth in (MAX_JSON_NESTING_DEPTH + 1, 2000, 100000):

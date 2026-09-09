@@ -103,7 +103,10 @@ class ProxyRuntime:
         headers = _merge_headers(profile.headers, api.headers, model.headers, model_api.headers)
         token = auth_provider.get_token()
         if token:
-            headers["Authorization"] = f"Bearer {token}"
+            if profile.auth.type == "header_command":
+                headers[profile.auth.header] = token
+            else:
+                headers["Authorization"] = f"Bearer {token}"
         if profile.affinity.enabled and affinity_token:
             headers[profile.affinity.request_header] = affinity_token
         return headers
@@ -162,7 +165,11 @@ class ProxyRuntime:
 
             self._capture_affinity(profile, affinity_key_value, response)
 
-            if response.status_code == 401 and profile.auth.type == "bearer_command" and not auth_retry_attempted:
+            if (
+                response.status_code == 401
+                and profile.auth.type in ("bearer_command", "header_command")
+                and not auth_retry_attempted
+            ):
                 auth_retry_attempted = True
                 auth_provider.invalidate()
                 response.close()
