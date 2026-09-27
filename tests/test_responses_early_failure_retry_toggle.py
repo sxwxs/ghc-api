@@ -1,8 +1,7 @@
 """The early-stream-failure retry is enabled by default but remains configurable.
 
-When ``state.enable_responses_early_failure_retry`` is off, the retry wrapper
-is never constructed, so the upstream ``requests.Response`` reaches the stream
-handler untouched and the feature is a true no-op.
+When both retry and encrypted-content recovery are off, the upstream
+``requests.Response`` reaches the stream handler untouched.
 """
 
 import unittest
@@ -31,6 +30,8 @@ class ResponsesEarlyFailureRetryToggleTest(unittest.TestCase):
         self.state = ghc_api.state.state
         self._saved_flag = self.state.enable_responses_early_failure_retry
         self._saved_models = self.state.models
+        self._saved_recovery = self.state.auto_remove_encrypted_content_on_parse_error
+        self.state.auto_remove_encrypted_content_on_parse_error = False
         self.state.models = {"data": [
             {"id": "gpt-5", "supported_endpoints": ["/responses"]},
         ]}
@@ -39,6 +40,7 @@ class ResponsesEarlyFailureRetryToggleTest(unittest.TestCase):
     def tearDown(self):
         self.state.enable_responses_early_failure_retry = self._saved_flag
         self.state.models = self._saved_models
+        self.state.auto_remove_encrypted_content_on_parse_error = self._saved_recovery
 
     def _post_streaming_request(self):
         """Drive /v1/responses and return the ``response`` the handler received."""

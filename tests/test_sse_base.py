@@ -542,6 +542,44 @@ class RetryingResponsesResponseTest(unittest.TestCase):
         self.assertTrue(first.closed)
         self.assertTrue(second.closed)
 
+    def test_failed_response_with_output_is_never_replayed(self):
+        failed_line = self._event("response.failed", response={
+            "output": [{"type": "function_call", "call_id": "call_1"}],
+            "error": {"code": "invalid_request_body", "message": "invalid"},
+        })
+        upstream = _FakeResponse([failed_line])
+        retry, recover = mock.Mock(), mock.Mock()
+        output = list(RetryingResponsesResponse(
+            upstream, retry, 3, "req-terminal-output", recover,
+        ).iter_lines())
+        self.assertEqual(output, [failed_line])
+        retry.assert_not_called()
+        recover.assert_not_called()
+
+    def test_failure_survives_connection_error_while_reading_diagnostic(self):
+        failed_line = self._event("response.failed", response={"error": None})
+        upstream = _FakeResponse([failed_line, requests.ConnectionError("closed")])
+        output = list(RetryingResponsesResponse(upstream, mock.Mock(), 0, "req-tail").iter_lines())
+        self.assertEqual(output, [failed_line])
+
+    def test_compact_data_line_commits_output_before_failure(self):
+        delta = b'data:{"type":"response.output_text.delta","delta":"partial"}'
+        failure = self._event("response.failed", response={"error": None})
+        retry = mock.Mock()
+        output = list(RetryingResponsesResponse(
+            _FakeResponse([delta, failure]), retry, 3, "req-compact",
+        ).iter_lines())
+        self.assertEqual(output, [delta, failure])
+        retry.assert_not_called()
+
+    def test_oversized_preamble_is_forwarded_and_disables_retries(self):
+        lines = [b":" + b"x" * RetryingResponsesResponse._MAX_BUFFERED_BYTES,
+                 self._event("response.failed", response={"error": None})]
+        retry = mock.Mock()
+        output = list(RetryingResponsesResponse(_FakeResponse(lines), retry, 3, "req-large").iter_lines())
+        self.assertEqual(output, lines)
+        retry.assert_not_called()
+
 
 class SSEKeepaliveIntegrationTest(unittest.TestCase):
     """The base handler must translate an idle stream into a client keepalive.

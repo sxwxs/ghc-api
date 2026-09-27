@@ -188,6 +188,7 @@ responses_pre_header_grace: 0.5 # How long a Responses request waits for upstrea
 
 # Recover from undecryptable encrypted content (disabled by default)
 auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
+                              # or an SSE error before any model output
                               # because encrypted reasoning or tool output content cannot
                               # be decrypted, clean request.input and retry once.
                               # Lossy; see "Encrypted Content Recovery" below.
@@ -222,14 +223,15 @@ forged signature never reaches `/v1/messages` upstream.
 
 ### Encrypted Content Recovery
 
-Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 because encrypted
+Copilot's `/v1/responses` sometimes rejects a conversation with HTTP 400 or an SSE error
+inside an HTTP 200 stream because encrypted
 reasoning blobs (`encrypted_content` on a `reasoning` item) or encrypted tool output can no
 longer be decrypted — typically after a token rotation or a server-side key change. The
 conversation is then permanently stuck: every follow-up turn replays the same history and
 fails again.
 
-Set `auto_remove_encrypted_content_on_parse_error: true` to let ghc-api react to such a 400
-exactly once per request:
+Set `auto_remove_encrypted_content_on_parse_error: true` to let ghc-api recover from either
+form exactly once per request, before any model output has been forwarded:
 
 - Items whose encrypted payload *is* the content (reasoning items, messages) are dropped.
 - Tool output items (`function_call_output`, `custom_tool_call_output`, ...) are **kept** with
@@ -238,6 +240,11 @@ exactly once per request:
 - If a tool *call* itself must be dropped, its paired output is dropped with it.
 - The cleaned request is retried once; the retry does not consume the connection-retry budget,
   and a second identical failure is returned to the client as-is.
+- Streaming recovery reads the diagnostic that can follow `response.failed` with `error: null`.
+  It also handles a standalone `error` or an error inside `response.failed`. It works even
+  when `enable_responses_early_failure_retry` is false or `max_connection_retries` is zero.
+- Explicit invalid-request errors are not retried with the same input. Once text, reasoning,
+  or tool-call output has been forwarded, the stream is never replayed.
 
 The option is **off by default** because it is lossy — the model loses that reasoning/tool
 context — and costs one extra upstream request. Every recovery is counted

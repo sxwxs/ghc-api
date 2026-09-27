@@ -174,8 +174,9 @@ sse_keepalive_interval: 30
 # sse_keepalive_interval: 0 disables the behavior entirely.
 responses_pre_header_grace: 0.5
 
-# If true, when /v1/responses gets HTTP 400 because encrypted reasoning or function
-# output content cannot be decrypted, the request is cleaned and retried exactly once:
+# If true, when /v1/responses gets HTTP 400 or an SSE error before any model output
+# because encrypted reasoning or function output content cannot be decrypted, the
+# request is cleaned and retried exactly once (independent of connection retries):
 # reasoning/message items carrying encrypted_content are dropped, while tool output
 # items (function_call_output etc.) keep their place with a placeholder body so the
 # paired function_call is not orphaned. This loses context and costs one extra upstream
@@ -223,7 +224,8 @@ anthropic_responses_model_profiles:
 # response.failed before any model output (text, reasoning, or tool call). Retries stop
 # as soon as real output has been forwarded, so content is never duplicated, and are
 # capped by max_connection_retries. Each retry is a fresh upstream request and consumes
-# quota. Enabled by default; set false to forward the upstream stream untouched.
+# quota. Invalid-request diagnostics are not retried with unchanged input. Enabled by
+# default; set false to disable this retry. Encrypted-content recovery is independent.
 enable_responses_early_failure_retry: true
 
 # Session File Flush Interval
