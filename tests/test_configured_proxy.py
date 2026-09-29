@@ -41,6 +41,13 @@ proxies:
         response_model: public
         headers:
           X-API: chat
+      messages:
+        upstream_url: https://gateway.example.test/messages
+        request_model: upstream
+        response_model: public
+        headers:
+          X-API: messages
+          anthropic-version: "2023-06-01"
     models:
       demo-model:
         display_name: Demo Model
@@ -55,6 +62,8 @@ proxies:
             upstream_model: null
           chat_completions:
             upstream_model: chat-deployment
+          messages:
+            upstream_model: claude-deployment
 """
 
 
@@ -87,16 +96,20 @@ class FakeResponse:
 
 
 class ConfiguredProxyConfigTest(unittest.TestCase):
-    def test_parses_responses_and_chat_completions(self):
+    def test_parses_responses_chat_completions_and_messages(self):
         snapshot = parse_proxy_config(__import__("yaml").safe_load(CONFIG))
         profile = snapshot.profiles["demo-profile"]
 
-        self.assertEqual(set(profile.apis), {"responses", "chat_completions"})
+        self.assertEqual(set(profile.apis), {"responses", "chat_completions", "messages"})
         self.assertEqual(profile.apis["responses"].request_model, "omit")
         self.assertEqual(profile.apis["chat_completions"].request_model, "upstream")
         self.assertEqual(
             profile.models["demo-model"].apis["chat_completions"].upstream_model,
             "chat-deployment",
+        )
+        self.assertEqual(
+            profile.models["demo-model"].apis["messages"].upstream_model,
+            "claude-deployment",
         )
 
     def test_rejects_upstream_mode_without_upstream_model(self):
@@ -112,8 +125,10 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
             ("affinity", "enabled"),
             ("affinity", "persist"),
             ("apis", "responses", "enabled"),
+            ("apis", "messages", "enabled"),
             ("models", "demo-model", "reasoning"),
             ("models", "demo-model", "apis", "responses", "enabled"),
+            ("models", "demo-model", "apis", "messages", "enabled"),
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -142,6 +157,7 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         config = __import__("yaml").safe_load(CONFIG)
         profile = config["proxies"]["demo-profile"]
         profile["apis"]["chat_completions"]["request_model"] = "preserve"
+        profile["apis"]["messages"]["request_model"] = "preserve"
         profile["models"]["demo-model"]["apis"] = {
             "responses": {"upstream_model": None},
         }
@@ -149,7 +165,7 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         parsed = parse_proxy_config(config).profiles["demo-profile"]
         self.assertEqual(
             set(parsed.models["demo-model"].apis),
-            {"responses", "chat_completions"},
+            {"responses", "chat_completions", "messages"},
         )
 
     def test_registry_keeps_last_known_good_config(self):
@@ -360,6 +376,97 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
             1,
         )
 
+    def test_messages_proxy_passes_anthropic_request_and_non_stream_response(self):
+        upstream_payload = {
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-deployment",
+            "content": [{"type": "text", "text": "Hello"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 1,
+            },
+        }
+        upstream = FakeResponse(payload=upstream_payload)
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/messages", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 128,
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["model"], "demo-model")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "claude-deployment")
+        self.assertEqual(post.call_args.kwargs["headers"]["anthropic-version"], "2023-06-01")
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["input_tokens"], 5)
+        self.assertEqual(cached["output_tokens"], 2)
+        self.assertEqual(cached["cache_creation_input_tokens"], 3)
+        self.assertEqual(cached["cache_read_input_tokens"], 1)
+        self.assertEqual(cached["upstream_api"], "messages")
+
+    def test_messages_stream_preserves_anthropic_events_and_rewrites_model(self):
+        lines = [
+            b'event: message_start',
+            b'data: {"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","model":"claude-deployment","content":[],"usage":{"input_tokens":4,"cache_creation_input_tokens":2,"cache_read_input_tokens":1,"output_tokens":0}}}',
+            b'event: content_block_start',
+            b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            b'event: content_block_delta',
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}',
+            b'event: message_delta',
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+            b'event: message_stop',
+            b'data: {"type":"message_stop"}',
+        ]
+        upstream = FakeResponse(
+            headers={"Content-Type": "text/event-stream"},
+            lines=lines,
+            content=b"unused",
+        )
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/messages", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 128,
+                    "stream": True,
+                })
+                body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: message_start", body)
+        self.assertIn('"model":"demo-model"', body)
+        self.assertNotIn('"model":"claude-deployment"', body)
+        self.assertIn("event: message_stop", body)
+        self.assertNotIn("[DONE]", body)
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["input_tokens"], 4)
+        self.assertEqual(cached["output_tokens"], 2)
+        self.assertEqual(cached["cache_creation_input_tokens"], 2)
+        self.assertEqual(cached["cache_read_input_tokens"], 1)
+        self.assertEqual(cached["upstream_api"], "messages")
+        self.assertIn('"model":"claude-deployment"', cached["raw_events"][0])
+
+    def test_messages_proxy_errors_use_anthropic_shape(self):
+        with self.app.test_client() as client:
+            response = client.post("/proxy/missing/v1/messages", json={
+                "model": "demo-model",
+                "messages": [],
+                "max_tokens": 16,
+            })
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["type"], "error")
+        self.assertEqual(response.get_json()["error"]["type"], "not_found_error")
+
     def test_responses_stream_rewrites_nested_model_and_extracts_usage(self):
         lines = [
             b'data: {"type":"response.created","response":{"id":"resp-1","model":"private-deployment"}}',
@@ -472,7 +579,10 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(model["id"], "demo-model")
         self.assertEqual(model["profile"], "demo-profile")
         self.assertEqual(model["base_url"], "/proxy/demo-profile/v1")
-        self.assertEqual(model["supported_endpoints"], ["/responses", "/chat/completions"])
+        self.assertEqual(
+            model["supported_endpoints"],
+            ["/responses", "/chat/completions", "/messages"],
+        )
         self.assertNotIn("headers", model)
         self.assertNotIn("upstream_url", model)
 
@@ -497,7 +607,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(model["id"], "demo-model")
         self.assertEqual(
             model["supported_endpoints"],
-            ["/responses", "/chat/completions"],
+            ["/responses", "/chat/completions", "/messages"],
         )
         self.assertNotIn("headers", model)
         self.assertNotIn("upstream_url", model)

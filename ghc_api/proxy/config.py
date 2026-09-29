@@ -14,7 +14,7 @@ import yaml
 from ..utils import get_config_dir
 
 
-SUPPORTED_APIS = frozenset({"responses", "chat_completions"})
+SUPPORTED_APIS = frozenset({"responses", "chat_completions", "messages"})
 MODEL_REQUEST_MODES = frozenset({"preserve", "omit", "upstream"})
 MODEL_RESPONSE_MODES = frozenset({"preserve", "public"})
 AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
