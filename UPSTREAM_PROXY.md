@@ -161,7 +161,7 @@ headers:
   X-Tenant: "${PRIVATE_LLM_TENANT}"
 ```
 
-Incoming client headers are not forwarded. In particular, a ghc-api user token is never reused as an upstream credential.
+Incoming client credential headers are not forwarded. In particular, a ghc-api user token is never reused as an upstream credential.
 
 ## Model field handling
 
@@ -219,13 +219,13 @@ Configured-proxy requests use the same request cache, request browser, in-memory
 - Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
 - Anthropic Messages: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
 
-The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages is currently available through API clients rather than the built-in OpenAI-shaped Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages-only models are also available in the built-in Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
 
 ## Native Anthropic Messages
 
 The Messages API is passed through without OpenAI translation. Both JSON and Anthropic SSE responses are supported. When `response_model: public` is configured, the top-level model in a JSON response and `message_start.message.model` in a stream are rewritten to the public model id; use `preserve` for byte-equivalent model values.
 
-Incoming client headers are not forwarded. Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
+Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
 
 ## Client configuration
 

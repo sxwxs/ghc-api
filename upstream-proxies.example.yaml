@@ -19,7 +19,7 @@ proxies:
       type: bearer_env
       env: EXAMPLE_LLM_TOKEN
 
-    # Shared outbound headers. Client-supplied headers are not forwarded.
+    # Shared outbound headers. Client credentials are not forwarded.
     headers:
       X-Client-Type: coding-agent
       X-Quota-Id: ""

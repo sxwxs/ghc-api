@@ -21,6 +21,11 @@ AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
 AFFINITY_SCOPES = frozenset({"proxy", "model"})
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+DYNAMIC_HEADER_FORBIDDEN = frozenset({
+    "authorization", "proxy-authorization", "cookie", "set-cookie",
+    "host", "content-type", "content-length", "transfer-encoding", "connection", "x-api-key",
+})
 
 
 class ProxyConfigError(ValueError):
@@ -55,6 +60,13 @@ class ProxyAffinityConfig:
 
 
 @dataclass(frozen=True)
+class ProxyHeaderBinding:
+    client_name: str
+    upstream_name: str
+    value_type: str
+
+
+@dataclass(frozen=True)
 class ProxyApiConfig:
     name: str
     upstream_url: str
@@ -63,6 +75,7 @@ class ProxyApiConfig:
     request_model: str = "preserve"
     response_model: str = "preserve"
     headers: Dict[str, str] = field(default_factory=dict)
+    header_bindings: Tuple[ProxyHeaderBinding, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -223,6 +236,38 @@ def _parse_affinity(value, field_name: str) -> ProxyAffinityConfig:
     )
 
 
+def _parse_header_bindings(value, field_name: str) -> Tuple[ProxyHeaderBinding, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ProxyConfigError(f"'{field_name}' must be a list")
+    bindings = []
+    client_names = set()
+    upstream_names = set()
+    for index, item in enumerate(value):
+        name = f"{field_name}[{index}]"
+        raw = _require_mapping(item, name)
+        client_name = raw.get("client_name")
+        upstream_name = raw.get("upstream_name")
+        for header_name, label in ((client_name, "client_name"), (upstream_name, "upstream_name")):
+            if (not isinstance(header_name, str)
+                    or not HEADER_NAME_RE.fullmatch(header_name)
+                    or header_name.lower() in DYNAMIC_HEADER_FORBIDDEN):
+                raise ProxyConfigError(f"'{name}.{label}' must be a non-credential HTTP header name")
+        if client_name.lower() == upstream_name.lower():
+            raise ProxyConfigError(f"'{name}' must use different client and upstream header names")
+        if (client_name.lower() in client_names or upstream_name.lower() in upstream_names
+                or client_name.lower() in upstream_names or upstream_name.lower() in client_names):
+            raise ProxyConfigError(f"'{field_name}' contains overlapping client or upstream header names")
+        value_type = raw.get("value_type")
+        if value_type != "uuid_v4":
+            raise ProxyConfigError(f"'{name}.value_type' must be uuid_v4")
+        client_names.add(client_name.lower())
+        upstream_names.add(upstream_name.lower())
+        bindings.append(ProxyHeaderBinding(client_name, upstream_name, value_type))
+    return tuple(bindings)
+
+
 def _parse_apis(value, field_name: str) -> Dict[str, ProxyApiConfig]:
     raw_apis = _require_mapping(value, field_name)
     apis: Dict[str, ProxyApiConfig] = {}
@@ -262,6 +307,9 @@ def _parse_apis(value, field_name: str) -> Dict[str, ProxyApiConfig]:
             request_model=request_model,
             response_model=response_model,
             headers=_parse_headers(raw.get("headers"), f"{field_name}.{api_name}.headers"),
+            header_bindings=_parse_header_bindings(
+                raw.get("header_bindings"), f"{field_name}.{api_name}.header_bindings"
+            ),
         )
     if not apis:
         raise ProxyConfigError(f"'{field_name}' must enable at least one supported API")
