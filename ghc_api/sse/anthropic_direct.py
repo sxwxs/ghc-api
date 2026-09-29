@@ -34,6 +34,10 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
     # bare ``[DONE]`` sentinel is OpenAI-specific and would break clients that
     # try to JSON-decode every SSE data line.
     emit_done_sentinel = False
+    # An upstream ``error`` event also terminates an Anthropic stream, so it
+    # counts as terminal too -- otherwise a transport hiccup after a definitive
+    # upstream error would be reported to the client twice.
+    TERMINAL_EVENTS = frozenset({"message_stop", "error"})
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -57,10 +61,30 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         elif event_type == "message_delta":
             usage = event.get("usage", {}) or {}
             self.output_tokens = usage.get("output_tokens", 0)
+        elif event_type == "error":
+            # A definitive upstream error event: record it as a failure so
+            # request history does not file it as 200/completed.
+            self.error_occurred = True
+            self.status_code = 502
 
     def _format_generic_error(self, e: Exception) -> str:
         # Match the existing handler: emit ``event: error\ndata: {...}\n\n``.
         error_event = {"type": "error", "error": {"type": "api_error", "message": str(e)}}
+        return f"event: error\ndata: {json.dumps(error_event)}\n\n"
+
+    def _format_transport_error(self, exc: Exception) -> str:
+        timed_out, _ = self._transport_failure(exc)
+        error_event = {
+            "type": "error",
+            "error": {
+                "type": "timeout_error" if timed_out else "api_error",
+                "message": (
+                    "Upstream Anthropic stream timed out"
+                    if timed_out
+                    else "Upstream Anthropic stream ended unexpectedly"
+                ),
+            },
+        }
         return f"event: error\ndata: {json.dumps(error_event)}\n\n"
 
 
