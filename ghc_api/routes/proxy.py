@@ -92,14 +92,21 @@ def _error_payload(
     return {"error": error}
 
 
+def _with_client_headers(response: Response, client_headers: Optional[Dict[str, str]]) -> Response:
+    for name, value in (client_headers or {}).items():
+        response.headers[name] = value
+    return response
+
+
 def _error(
     message: str,
     code: str,
     status: int,
     param: Optional[str] = None,
     api_name: Optional[str] = None,
+    client_headers: Optional[Dict[str, str]] = None,
 ):
-    return jsonify(_error_payload(message, code, status, param, api_name)), status
+    return _with_client_headers(jsonify(_error_payload(message, code, status, param, api_name)), client_headers), status
 
 
 def _resolve_target(
@@ -238,9 +245,30 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         )
 
     profile, api, model, model_api = target
+    client_headers: Dict[str, str] = {}
+    dynamic_headers: Dict[str, str] = {}
+    for binding in api.header_bindings:
+        supplied = request.headers.get(binding.client_name)
+        if supplied is None:
+            value = str(uuid.uuid4())
+        else:
+            try:
+                parsed = uuid.UUID(supplied)
+            except ValueError:
+                return _error("Configured header must be a UUID v4.", "invalid_header_value", 400, api_name=api_name)
+            if parsed.version != 4:
+                return _error("Configured header must be a UUID v4.", "invalid_header_value", 400, api_name=api_name)
+            value = str(parsed)
+        client_headers[binding.client_name] = value
+        dynamic_headers[binding.upstream_name] = value
+
     original_request_body = copy.deepcopy(payload)
     request_id = str(uuid.uuid4())
-    request_headers = redact_auth_headers(dict(request.headers))
+    client_header_names = {name.lower() for name in client_headers}
+    request_headers = {
+        name: value for name, value in redact_auth_headers(dict(request.headers)).items()
+        if name.lower() not in client_header_names
+    }
     client_ip = get_client_ip(request)
     user_id = _current_user_id()
     use_streaming = bool(payload.get("stream", False))
@@ -259,6 +287,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             model_api=model_api,
             payload=payload,
             stream=use_streaming,
+            dynamic_headers=dynamic_headers,
         )
     except ProxyRequestError as exc:
         print(f"[Configured Proxy] Request {request_id} could not start: {exc}")
@@ -267,6 +296,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             "upstream_unavailable",
             503,
             api_name=api_name,
+            client_headers=client_headers,
         )
 
     response = upstream.response
@@ -283,13 +313,13 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             response.close()
             return _error(
                 "The configured upstream returned an empty streaming response.",
-                "empty_upstream_response", 502, api_name=api_name,
+                "empty_upstream_response", 502, api_name=api_name, client_headers=client_headers,
             )
         if "text/event-stream" not in content_type.lower():
             response.close()
             return _error(
                 "The configured upstream did not return an event stream.",
-                "invalid_upstream_stream", 502, api_name=api_name,
+                "invalid_upstream_stream", 502, api_name=api_name, client_headers=client_headers,
             )
 
         common = {
@@ -310,10 +340,10 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             "rewrite_model": api.response_model == "public",
         }
         if api_name == "responses":
-            return ProxyResponsesStreamHandler(**common).stream()
+            return _with_client_headers(ProxyResponsesStreamHandler(**common).stream(), client_headers)
         if api_name == "messages":
-            return ProxyAnthropicMessagesStreamHandler(**common).stream()
-        return ProxyChatCompletionsStreamHandler(**common).stream()
+            return _with_client_headers(ProxyAnthropicMessagesStreamHandler(**common).stream(), client_headers)
+        return _with_client_headers(ProxyChatCompletionsStreamHandler(**common).stream(), client_headers)
 
     duration = round(time.time() - start_time, 2)
     response_content = response.content
@@ -332,7 +362,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             translated_model, original_request_body, upstream_payload, request_headers, client_ip,
             user_id, 502, result, request_size, 0, duration,
         )
-        return jsonify(result), 502
+        return _with_client_headers(jsonify(result), client_headers), 502
 
     try:
         result = response.json()
@@ -353,16 +383,16 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     )
 
     if result_is_json:
-        return Response(
+        return _with_client_headers(Response(
             json.dumps(result, ensure_ascii=False),
             status=response.status_code,
             content_type=response.headers.get("Content-Type", "application/json"),
-        )
-    return Response(
+        ), client_headers)
+    return _with_client_headers(Response(
         response_content,
         status=response.status_code,
         content_type=response.headers.get("Content-Type", "text/plain"),
-    )
+    ), client_headers)
 
 
 @proxy_bp.route("/proxy/<profile_name>/v1/responses", methods=["POST"])
@@ -413,6 +443,13 @@ def _model_data(
     if include_profile:
         data["profile"] = profile_name
         data["base_url"] = f"/proxy/{profile_name}/v1"
+        # Publish only client-facing rules the built-in Chat needs.
+        messages_api = profile.apis.get("messages")
+        if messages_api and model.api_config("messages") and messages_api.header_bindings:
+            data["request_headers"] = {"/messages": [
+                {"name": binding.client_name, "value_type": binding.value_type}
+                for binding in messages_api.header_bindings
+            ]}
     return data
 
 

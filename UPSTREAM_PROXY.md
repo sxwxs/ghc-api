@@ -150,9 +150,10 @@ Outbound headers are merged in this order:
 4. Model `headers`
 5. Model API `headers`
 6. Upstream authentication
-7. Affinity header
+7. Dynamic header bindings
+8. Affinity header
 
-Later values override earlier values. Empty string values are preserved.
+Later values override earlier values, case-insensitively for steps 7 and 8. Empty string values are preserved.
 
 Header values support `${ENV_VAR}` interpolation:
 
@@ -161,7 +162,43 @@ headers:
   X-Tenant: "${PRIVATE_LLM_TENANT}"
 ```
 
-Incoming client headers are not forwarded. In particular, a ghc-api user token is never reused as an upstream credential.
+Incoming client headers are not forwarded, except for the names explicitly listed in `header_bindings` below. In particular, a ghc-api user token is never reused as an upstream credential.
+
+## Dynamic header bindings
+
+Forwarding a client-supplied header stays opt-in: an API config may declare `header_bindings`, and only those exact client header names are ever read from the incoming request.
+
+```yaml
+apis:
+  messages:
+    upstream_url: https://private-llm.example.com/v1/messages
+    header_bindings:
+      - client_name: X-Client-Session
+        upstream_name: X-Upstream-Session
+        value_type: uuid_v4
+```
+
+Fields, all required:
+
+- `client_name`: the header name read from the client request and echoed on the ghc-api response.
+- `upstream_name`: the header name sent upstream with the same value.
+- `value_type`: currently only `uuid_v4`.
+
+Behavior:
+
+- If the client sends `client_name`, the value must parse as a UUID version 4. It is normalized to canonical lower-case form, so a re-sent value keeps the same upstream session. An invalid value fails the request with HTTP 400 before any upstream call.
+- If the client omits the header, ghc-api generates a fresh UUID v4 per request.
+- The resolved value is returned to the client in `client_name` on success and on proxy-generated errors, so a client can capture it and reuse it.
+- The value replaces any static header of the same `upstream_name`, including a differently-cased spelling, and an unused `${ENV_VAR}` placeholder on that static header is not resolved.
+- `client_name` is omitted from the request cache, the request browser and exports; the upstream value is never published by `/proxy/models`.
+- `/proxy/models` publishes only the client-facing names for the built-in Chat page, as `request_headers: {"/messages": [{"name": ..., "value_type": ...}]}`.
+
+Validation rejects the configuration when:
+
+- a name is not a valid HTTP token, or is a structural header such as `host` or `content-type`;
+- a name is a credential header (for example `authorization`, `x-api-key`, `api-key`, `x-auth-token`, or any `*-api-key`, `*-auth-token`, `*-access-token`, `*-secret` name), using the same predicate that redacts credentials from the cache;
+- `client_name` and `upstream_name` are equal, or two bindings of one API overlap;
+- a name reuses the profile's affinity `request_header` or `response_header`, which would otherwise overwrite the affinity token.
 
 ## Model field handling
 
@@ -219,13 +256,13 @@ Configured-proxy requests use the same request cache, request browser, in-memory
 - Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
 - Anthropic Messages: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
 
-The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages is currently available through API clients rather than the built-in OpenAI-shaped Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages-only models are also available in the built-in Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
 
 ## Native Anthropic Messages
 
 The Messages API is passed through without OpenAI translation. Both JSON and Anthropic SSE responses are supported. When `response_model: public` is configured, the top-level model in a JSON response and `message_start.message.model` in a stream are rewritten to the public model id; use `preserve` for byte-equivalent model values.
 
-Incoming client headers are not forwarded. Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
+Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
 
 ## Client configuration
 
