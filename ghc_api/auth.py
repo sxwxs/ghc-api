@@ -334,6 +334,25 @@ REDACTED_HEADERS = frozenset({
 })
 
 
+def is_credential_header_name(name: Any) -> bool:
+    """True when a header's value must be treated as a credential.
+
+    Single source of truth for 'this header carries a secret': used both by
+    redact_auth_headers() before anything is persisted and by the configured
+    proxy when validating which header names may be bound to client-supplied
+    values."""
+    if not isinstance(name, str):
+        return False
+    lower = name.lower().strip()
+    return (
+        lower in REDACTED_HEADERS
+        or lower.endswith("-access-token")
+        or lower.endswith("-auth-token")
+        or lower.endswith("-api-key")
+        or lower.endswith("-secret")
+    )
+
+
 def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
     """Return a copy of `headers` with auth values replaced by '***REDACTED***'.
     Used before persisting request headers to the cache, so the dashboard
@@ -342,14 +361,7 @@ def redact_auth_headers(headers: Dict[str, Any]) -> Dict[str, Any]:
         return headers
     redacted = dict(headers)
     for key in list(redacted.keys()):
-        lower = key.lower().strip()
-        if (
-            lower in REDACTED_HEADERS
-            or lower.endswith("-access-token")
-            or lower.endswith("-auth-token")
-            or lower.endswith("-api-key")
-            or lower.endswith("-secret")
-        ):
+        if is_credential_header_name(key):
             redacted[key] = "***REDACTED***"
     return redacted
 

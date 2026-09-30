@@ -123,7 +123,10 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         parsed = parse_proxy_config(config).profiles["demo-profile"].apis["messages"].header_bindings[0]
         self.assertEqual((parsed.client_name, parsed.upstream_name, parsed.value_type), tuple(binding.values()))
         for field in ("client_name", "upstream_name"):
-            for invalid in ("Authorization", "x-api-key", "bad header", "X-Bad\nHeader", ""):
+            for invalid in ("Authorization", "x-api-key", "api-key", "X-ApiKey", "x-auth-token",
+                            "x-access-token", "Tenant-Api-Key", "Vendor-Secret", "cookie",
+                            "Ocp-Apim-Subscription-Key", "Content-Type", "Connection",
+                            "bad header", "X-Bad\nHeader", ""):
                 with self.subTest(field=field, invalid=invalid):
                     binding[field] = invalid
                     with self.assertRaises(ProxyConfigError):
@@ -140,6 +143,28 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         api["header_bindings"].append(dict(binding))
         with self.assertRaises(ProxyConfigError):
             parse_proxy_config(config)
+
+    def test_rejects_header_binding_that_shadows_the_affinity_header(self):
+        for field in ("client_name", "upstream_name"):
+            for affinity_header in ("X-Route-Token", "x-route-token"):
+                with self.subTest(field=field, affinity_header=affinity_header):
+                    config = __import__("yaml").safe_load(CONFIG)
+                    binding = {"client_name": "X-Test-Client-Context",
+                               "upstream_name": "X-Test-Upstream-Context",
+                               "value_type": "uuid_v4"}
+                    binding[field] = affinity_header
+                    config["proxies"]["demo-profile"]["apis"]["messages"]["header_bindings"] = [binding]
+                    with self.assertRaises(ProxyConfigError):
+                        parse_proxy_config(config)
+
+    def test_allows_affinity_header_name_when_affinity_is_disabled(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["affinity"]["enabled"] = False
+        config["proxies"]["demo-profile"]["apis"]["messages"]["header_bindings"] = [{
+            "client_name": "X-Client-Route", "upstream_name": "X-Route-Token", "value_type": "uuid_v4",
+        }]
+        parsed = parse_proxy_config(config).profiles["demo-profile"].apis["messages"].header_bindings[0]
+        self.assertEqual(parsed.upstream_name, "X-Route-Token")
 
     def test_rejects_upstream_mode_without_upstream_model(self):
         config = __import__("yaml").safe_load(CONFIG)
@@ -229,6 +254,21 @@ class ConfiguredProxyAffinityTest(unittest.TestCase):
 
             second = ProxyAffinityStore(path)
             self.assertEqual(second.get("route-key"), "route-token")
+
+    def test_affinity_header_survives_a_conflicting_dynamic_binding(self):
+        # Config validation rejects this overlap; a stale last-known-good config
+        # must still send the affinity token rather than a per-request UUID.
+        profile = parse_proxy_config(__import__("yaml").safe_load(CONFIG)).profiles["demo-profile"]
+        api, model, model_api = profile.resolve("messages", "demo-model")
+        runtime = ProxyRuntime(registry=ProxyRegistry(Path("missing-config.yaml")))
+
+        headers = runtime._build_headers(
+            profile, api, model, model_api, ProxyAuthProvider(profile.auth),
+            "route-token", {"x-route-token": str(uuid.uuid4())},
+        )
+
+        self.assertEqual([name for name in headers if name.lower() == "x-route-token"], ["X-Route-Token"])
+        self.assertEqual(headers["X-Route-Token"], "route-token")
 
 
 class ConfiguredProxyAuthTest(unittest.TestCase):

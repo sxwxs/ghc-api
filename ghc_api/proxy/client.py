@@ -59,6 +59,14 @@ def _merge_headers(*header_sets: Dict[str, str], overridden_names: Optional[set]
     return merged
 
 
+def _set_header(headers: Dict[str, str], name: str, value: str) -> None:
+    """Set `name` to `value`, dropping any differently-cased duplicate."""
+    for existing in list(headers):
+        if existing != name and existing.lower() == name.lower():
+            del headers[existing]
+    headers[name] = value
+
+
 def transform_payload(
     payload: dict,
     api: ProxyApiConfig,
@@ -112,14 +120,14 @@ class ProxyRuntime:
         token = auth_provider.get_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        if profile.affinity.enabled and affinity_token:
-            headers[profile.affinity.request_header] = affinity_token
         for name, value in dynamic_headers.items():
             # Dynamic values win even when a static header uses different casing.
-            for existing in list(headers):
-                if existing.lower() == name.lower():
-                    del headers[existing]
-            headers[name] = value
+            _set_header(headers, name, value)
+        if profile.affinity.enabled and affinity_token:
+            # Affinity is applied last so it always wins: config validation
+            # rejects a binding that reuses this name, but a last-known-good
+            # config loaded before that rule must not lose the token either.
+            _set_header(headers, profile.affinity.request_header, affinity_token)
         return headers
 
     def _capture_affinity(

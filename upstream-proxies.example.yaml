@@ -65,6 +65,14 @@ proxies:
         headers:
           anthropic-version: "2023-06-01"
           x-api-key: "${ANTHROPIC_API_KEY}"
+        # Optional, opt-in forwarding of one client header per binding.
+        # A missing client value is generated; a supplied one must be a UUID v4
+        # and is echoed back on the response. Credential names, structural
+        # names, and the affinity headers above are rejected.
+        header_bindings:
+          - client_name: X-Client-Session
+            upstream_name: X-Upstream-Session
+            value_type: uuid_v4
 
     models:
       example-coding-model:

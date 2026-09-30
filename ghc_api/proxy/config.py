@@ -11,6 +11,7 @@ from typing import Dict, Optional, Tuple
 
 import yaml
 
+from ..auth import is_credential_header_name
 from ..utils import get_config_dir
 
 
@@ -22,9 +23,12 @@ AFFINITY_SCOPES = frozenset({"proxy", "model"})
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]+$")
+# Structural/hop-by-hop names a binding must never take over. Credential names
+# are rejected separately through auth.is_credential_header_name(), so the two
+# lists cannot drift apart.
 DYNAMIC_HEADER_FORBIDDEN = frozenset({
-    "authorization", "proxy-authorization", "cookie", "set-cookie",
-    "host", "content-type", "content-length", "transfer-encoding", "connection", "x-api-key",
+    "host", "content-type", "content-length", "transfer-encoding", "connection",
+    "keep-alive", "te", "trailer", "upgrade", "expect",
 })
 
 
@@ -252,7 +256,8 @@ def _parse_header_bindings(value, field_name: str) -> Tuple[ProxyHeaderBinding, 
         for header_name, label in ((client_name, "client_name"), (upstream_name, "upstream_name")):
             if (not isinstance(header_name, str)
                     or not HEADER_NAME_RE.fullmatch(header_name)
-                    or header_name.lower() in DYNAMIC_HEADER_FORBIDDEN):
+                    or header_name.lower() in DYNAMIC_HEADER_FORBIDDEN
+                    or is_credential_header_name(header_name)):
                 raise ProxyConfigError(f"'{name}.{label}' must be a non-credential HTTP header name")
         if client_name.lower() == upstream_name.lower():
             raise ProxyConfigError(f"'{name}' must use different client and upstream header names")
@@ -266,6 +271,35 @@ def _parse_header_bindings(value, field_name: str) -> Tuple[ProxyHeaderBinding, 
         upstream_names.add(upstream_name.lower())
         bindings.append(ProxyHeaderBinding(client_name, upstream_name, value_type))
     return tuple(bindings)
+
+
+def _validate_bindings_against_affinity(
+    affinity: ProxyAffinityConfig,
+    apis: Dict[str, ProxyApiConfig],
+    field_name: str,
+) -> None:
+    """A binding must not shadow the profile's affinity header.
+
+    Without this check an `upstream_name` equal to `affinity.request_header`
+    would silently replace the stored affinity token with a per-request UUID."""
+    if not affinity.enabled:
+        return
+    reserved = {
+        header.strip().lower()
+        for header in (affinity.request_header, affinity.response_header)
+        if isinstance(header, str) and header.strip()
+    }
+    for api_name, api in apis.items():
+        for index, binding in enumerate(api.header_bindings):
+            for header_name, label in (
+                (binding.client_name, "client_name"),
+                (binding.upstream_name, "upstream_name"),
+            ):
+                if header_name.lower() in reserved:
+                    raise ProxyConfigError(
+                        f"'{field_name}.apis.{api_name}.header_bindings[{index}].{label}' must not reuse "
+                        f"the profile affinity header '{header_name}'"
+                    )
 
 
 def _parse_apis(value, field_name: str) -> Dict[str, ProxyApiConfig]:
@@ -395,11 +429,13 @@ def parse_proxy_config(data) -> ProxyConfigSnapshot:
         if not _parse_bool(raw.get("enabled", True), f"proxies.{profile_name}.enabled"):
             continue
         apis = _parse_apis(raw.get("apis"), f"proxies.{profile_name}.apis")
+        affinity = _parse_affinity(raw.get("affinity"), f"proxies.{profile_name}.affinity")
+        _validate_bindings_against_affinity(affinity, apis, f"proxies.{profile_name}")
         profiles[profile_name] = ProxyProfileConfig(
             name=profile_name,
             auth=_parse_auth(raw.get("auth"), f"proxies.{profile_name}.auth"),
             headers=_parse_headers(raw.get("headers"), f"proxies.{profile_name}.headers"),
-            affinity=_parse_affinity(raw.get("affinity"), f"proxies.{profile_name}.affinity"),
+            affinity=affinity,
             apis=apis,
             models=_parse_models(raw.get("models"), apis, f"proxies.{profile_name}.models"),
         )
