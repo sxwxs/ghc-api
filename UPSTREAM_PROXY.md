@@ -1,6 +1,6 @@
 # Configured Upstream Proxy
 
-The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests to private or self-hosted gateways.
+The configured upstream proxy is an isolated, optional subsystem for forwarding OpenAI-compatible Responses and Chat Completions requests, plus native Anthropic Messages requests, to private or self-hosted gateways.
 
 It does not modify or share model routing with ghc-api's existing Copilot endpoints.
 
@@ -11,6 +11,7 @@ For a profile named `example-llm`:
 ```text
 POST /proxy/example-llm/v1/responses
 POST /proxy/example-llm/v1/chat/completions
+POST /proxy/example-llm/v1/messages
 GET  /proxy/example-llm/v1/models
 GET  /proxy/models
 ```
@@ -19,7 +20,7 @@ GET  /proxy/models
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 
-The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`.
+The legacy text Completions API (`/v1/completions`) is not part of this feature. `chat_completions` refers to `/v1/chat/completions`. `messages` is native Anthropic Messages passthrough; it is not translated to or from an OpenAI protocol.
 
 ## Private configuration
 
@@ -78,6 +79,14 @@ proxies:
         request_model: upstream
         response_model: public
 
+      messages:
+        upstream_url: https://api.anthropic.com/v1/messages
+        request_model: upstream
+        response_model: public
+        headers:
+          anthropic-version: "2023-06-01"
+          x-api-key: "${ANTHROPIC_API_KEY}"
+
     models:
       example-coding-model:
         display_name: Example Coding Model
@@ -92,6 +101,8 @@ proxies:
             upstream_model: null
           chat_completions:
             upstream_model: example-chat-deployment
+          messages:
+            upstream_model: claude-sonnet-4-5
 ```
 
 Profile names may contain only letters, digits, `.`, `_`, and `-`.
@@ -139,9 +150,10 @@ Outbound headers are merged in this order:
 4. Model `headers`
 5. Model API `headers`
 6. Upstream authentication
-7. Affinity header
+7. Dynamic header bindings
+8. Affinity header
 
-Later values override earlier values. Empty string values are preserved.
+Later values override earlier values, case-insensitively for steps 7 and 8. Empty string values are preserved.
 
 Header values support `${ENV_VAR}` interpolation:
 
@@ -150,7 +162,43 @@ headers:
   X-Tenant: "${PRIVATE_LLM_TENANT}"
 ```
 
-Incoming client headers are not forwarded. In particular, a ghc-api user token is never reused as an upstream credential.
+Incoming client headers are not forwarded, except for the names explicitly listed in `header_bindings` below. In particular, a ghc-api user token is never reused as an upstream credential.
+
+## Dynamic header bindings
+
+Forwarding a client-supplied header stays opt-in: an API config may declare `header_bindings`, and only those exact client header names are ever read from the incoming request.
+
+```yaml
+apis:
+  messages:
+    upstream_url: https://private-llm.example.com/v1/messages
+    header_bindings:
+      - client_name: X-Client-Session
+        upstream_name: X-Upstream-Session
+        value_type: uuid_v4
+```
+
+Fields, all required:
+
+- `client_name`: the header name read from the client request and echoed on the ghc-api response.
+- `upstream_name`: the header name sent upstream with the same value.
+- `value_type`: currently only `uuid_v4`.
+
+Behavior:
+
+- If the client sends `client_name`, the value must parse as a UUID version 4. It is normalized to canonical lower-case form, so a re-sent value keeps the same upstream session. An invalid value fails the request with HTTP 400 before any upstream call.
+- If the client omits the header, ghc-api generates a fresh UUID v4 per request.
+- The resolved value is returned to the client in `client_name` on success and on proxy-generated errors, so a client can capture it and reuse it.
+- The value replaces any static header of the same `upstream_name`, including a differently-cased spelling, and an unused `${ENV_VAR}` placeholder on that static header is not resolved.
+- `client_name` is omitted from the request cache, the request browser and exports; the upstream value is never published by `/proxy/models`.
+- `/proxy/models` publishes only the client-facing names for the built-in Chat page, as `request_headers: {"/messages": [{"name": ..., "value_type": ...}]}`.
+
+Validation rejects the configuration when:
+
+- a name is not a valid HTTP token, or is a structural header such as `host` or `content-type`;
+- a name is a credential header (for example `authorization`, `x-api-key`, `api-key`, `x-auth-token`, or any `*-api-key`, `*-auth-token`, `*-access-token`, `*-secret` name), using the same predicate that redacts credentials from the cache;
+- `client_name` and `upstream_name` are equal, or two bindings of one API overlap;
+- a name reuses the profile's affinity `request_header` or `response_header`, which would otherwise overwrite the affinity token.
 
 ## Model field handling
 
@@ -194,7 +242,7 @@ Supported scopes:
 - `proxy`: one token per profile/API/upstream URL.
 - `model`: one token per profile/API/public model/upstream URL.
 
-Responses and Chat Completions always use separate affinity keys. First-request discovery is serialized per key so concurrent cold requests do not establish conflicting routes.
+Responses, Chat Completions, and Messages always use separate affinity keys. First-request discovery is serialized per key so concurrent cold requests do not establish conflicting routes.
 
 Affinity values are persisted atomically and are not exposed through the API or dashboard.
 
@@ -206,8 +254,15 @@ Configured-proxy requests use the same request cache, request browser, in-memory
 
 - Responses: `input_tokens`, `output_tokens`, and `input_tokens_details.cached_tokens`.
 - Chat Completions: `prompt_tokens`, `completion_tokens`, and `prompt_tokens_details.cached_tokens`.
+- Anthropic Messages: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, and `cache_read_input_tokens`.
 
-The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Error responses are recorded with zero usage, matching the existing endpoints.
+The Chat page requests streaming usage from Chat Completions backends with `stream_options.include_usage`, since standards-compliant OpenAI-compatible servers otherwise commonly omit usage from streaming chunks. Messages-only models are also available in the built-in Chat page. Error responses are recorded with zero usage, matching the existing endpoints.
+
+## Native Anthropic Messages
+
+The Messages API is passed through without OpenAI translation. Both JSON and Anthropic SSE responses are supported. When `response_model: public` is configured, the top-level model in a JSON response and `message_start.message.model` in a stream are rewritten to the public model id; use `preserve` for byte-equivalent model values.
+
+Configure required Anthropic headers such as `anthropic-version`, `anthropic-beta`, and `x-api-key` in the profile/API/model header sections. There is currently no configured-proxy `/v1/messages/count_tokens` route.
 
 ## Client configuration
 
@@ -252,6 +307,24 @@ Add a provider to `~/.pi/agent/models.json`:
   }
 }
 ```
+
+### Anthropic SDK using Messages
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="http://127.0.0.1:8313/proxy/example-llm",
+    api_key="not-needed",
+)
+message = client.messages.create(
+    model="example-coding-model",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Hello"}],
+)
+```
+
+When ghc-api authentication is enabled, the SDK's `api_key` must be the normal ghc-api user token. Upstream credentials remain private in `upstream-proxies.yaml`.
 
 ### Codex using Responses
 

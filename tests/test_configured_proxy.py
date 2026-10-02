@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -41,6 +42,13 @@ proxies:
         response_model: public
         headers:
           X-API: chat
+      messages:
+        upstream_url: https://gateway.example.test/messages
+        request_model: upstream
+        response_model: public
+        headers:
+          X-API: messages
+          anthropic-version: "2023-06-01"
     models:
       demo-model:
         display_name: Demo Model
@@ -55,6 +63,8 @@ proxies:
             upstream_model: null
           chat_completions:
             upstream_model: chat-deployment
+          messages:
+            upstream_model: claude-deployment
 """
 
 
@@ -87,17 +97,74 @@ class FakeResponse:
 
 
 class ConfiguredProxyConfigTest(unittest.TestCase):
-    def test_parses_responses_and_chat_completions(self):
+    def test_parses_responses_chat_completions_and_messages(self):
         snapshot = parse_proxy_config(__import__("yaml").safe_load(CONFIG))
         profile = snapshot.profiles["demo-profile"]
 
-        self.assertEqual(set(profile.apis), {"responses", "chat_completions"})
+        self.assertEqual(set(profile.apis), {"responses", "chat_completions", "messages"})
         self.assertEqual(profile.apis["responses"].request_model, "omit")
         self.assertEqual(profile.apis["chat_completions"].request_model, "upstream")
         self.assertEqual(
             profile.models["demo-model"].apis["chat_completions"].upstream_model,
             "chat-deployment",
         )
+        self.assertEqual(
+            profile.models["demo-model"].apis["messages"].upstream_model,
+            "claude-deployment",
+        )
+
+    def test_header_bindings_are_opt_in_and_reject_credential_names(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        api = config["proxies"]["demo-profile"]["apis"]["messages"]
+        self.assertEqual(parse_proxy_config(config).profiles["demo-profile"].apis["messages"].header_bindings, ())
+        binding = {"client_name": "X-Test-Client-Context", "upstream_name": "X-Test-Upstream-Context",
+                   "value_type": "uuid_v4"}
+        api["header_bindings"] = [binding]
+        parsed = parse_proxy_config(config).profiles["demo-profile"].apis["messages"].header_bindings[0]
+        self.assertEqual((parsed.client_name, parsed.upstream_name, parsed.value_type), tuple(binding.values()))
+        for field in ("client_name", "upstream_name"):
+            for invalid in ("Authorization", "x-api-key", "api-key", "X-ApiKey", "x-auth-token",
+                            "x-access-token", "Tenant-Api-Key", "Vendor-Secret", "cookie",
+                            "Ocp-Apim-Subscription-Key", "Content-Type", "Connection",
+                            "bad header", "X-Bad\nHeader", ""):
+                with self.subTest(field=field, invalid=invalid):
+                    binding[field] = invalid
+                    with self.assertRaises(ProxyConfigError):
+                        parse_proxy_config(config)
+            binding[field] = getattr(parsed, field)
+        binding["client_name"] = parsed.upstream_name.lower()
+        with self.assertRaises(ProxyConfigError):
+            parse_proxy_config(config)
+        binding["client_name"] = parsed.client_name
+        binding["value_type"] = "arbitrary"
+        with self.assertRaises(ProxyConfigError):
+            parse_proxy_config(config)
+        binding["value_type"] = "uuid_v4"
+        api["header_bindings"].append(dict(binding))
+        with self.assertRaises(ProxyConfigError):
+            parse_proxy_config(config)
+
+    def test_rejects_header_binding_that_shadows_the_affinity_header(self):
+        for field in ("client_name", "upstream_name"):
+            for affinity_header in ("X-Route-Token", "x-route-token"):
+                with self.subTest(field=field, affinity_header=affinity_header):
+                    config = __import__("yaml").safe_load(CONFIG)
+                    binding = {"client_name": "X-Test-Client-Context",
+                               "upstream_name": "X-Test-Upstream-Context",
+                               "value_type": "uuid_v4"}
+                    binding[field] = affinity_header
+                    config["proxies"]["demo-profile"]["apis"]["messages"]["header_bindings"] = [binding]
+                    with self.assertRaises(ProxyConfigError):
+                        parse_proxy_config(config)
+
+    def test_allows_affinity_header_name_when_affinity_is_disabled(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["affinity"]["enabled"] = False
+        config["proxies"]["demo-profile"]["apis"]["messages"]["header_bindings"] = [{
+            "client_name": "X-Client-Route", "upstream_name": "X-Route-Token", "value_type": "uuid_v4",
+        }]
+        parsed = parse_proxy_config(config).profiles["demo-profile"].apis["messages"].header_bindings[0]
+        self.assertEqual(parsed.upstream_name, "X-Route-Token")
 
     def test_rejects_upstream_mode_without_upstream_model(self):
         config = __import__("yaml").safe_load(CONFIG)
@@ -112,8 +179,10 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
             ("affinity", "enabled"),
             ("affinity", "persist"),
             ("apis", "responses", "enabled"),
+            ("apis", "messages", "enabled"),
             ("models", "demo-model", "reasoning"),
             ("models", "demo-model", "apis", "responses", "enabled"),
+            ("models", "demo-model", "apis", "messages", "enabled"),
         ]
         for path in paths:
             with self.subTest(path=path):
@@ -142,6 +211,7 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         config = __import__("yaml").safe_load(CONFIG)
         profile = config["proxies"]["demo-profile"]
         profile["apis"]["chat_completions"]["request_model"] = "preserve"
+        profile["apis"]["messages"]["request_model"] = "preserve"
         profile["models"]["demo-model"]["apis"] = {
             "responses": {"upstream_model": None},
         }
@@ -149,7 +219,7 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
         parsed = parse_proxy_config(config).profiles["demo-profile"]
         self.assertEqual(
             set(parsed.models["demo-model"].apis),
-            {"responses", "chat_completions"},
+            {"responses", "chat_completions", "messages"},
         )
 
     def test_registry_keeps_last_known_good_config(self):
@@ -185,6 +255,21 @@ class ConfiguredProxyAffinityTest(unittest.TestCase):
             second = ProxyAffinityStore(path)
             self.assertEqual(second.get("route-key"), "route-token")
 
+    def test_affinity_header_survives_a_conflicting_dynamic_binding(self):
+        # Config validation rejects this overlap; a stale last-known-good config
+        # must still send the affinity token rather than a per-request UUID.
+        profile = parse_proxy_config(__import__("yaml").safe_load(CONFIG)).profiles["demo-profile"]
+        api, model, model_api = profile.resolve("messages", "demo-model")
+        runtime = ProxyRuntime(registry=ProxyRegistry(Path("missing-config.yaml")))
+
+        headers = runtime._build_headers(
+            profile, api, model, model_api, ProxyAuthProvider(profile.auth),
+            "route-token", {"x-route-token": str(uuid.uuid4())},
+        )
+
+        self.assertEqual([name for name in headers if name.lower() == "x-route-token"], ["X-Route-Token"])
+        self.assertEqual(headers["X-Route-Token"], "route-token")
+
 
 class ConfiguredProxyAuthTest(unittest.TestCase):
     def test_command_token_is_cached(self):
@@ -208,6 +293,11 @@ class ConfiguredProxyAuthTest(unittest.TestCase):
             "command": ["credential-helper"],
             "cache_ttl_seconds": 300,
         }
+        config["proxies"]["demo-profile"]["apis"]["responses"]["header_bindings"] = [{
+            "client_name": "X-Test-Client-Context", "upstream_name": "X-Test-Upstream-Context",
+            "value_type": "uuid_v4",
+        }]
+        session_id = str(uuid.uuid4())
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "proxies.yaml"
             path.write_text(__import__("yaml").safe_dump(config), encoding="utf-8")
@@ -226,13 +316,18 @@ class ConfiguredProxyAuthTest(unittest.TestCase):
 
             with mock.patch("ghc_api.proxy.auth.subprocess.run", side_effect=command_results) as run, \
                     mock.patch("ghc_api.proxy.client.requests.post", side_effect=[unauthorized, success]) as post:
-                result = runtime.post(profile, api, model, model_api, {"model": "demo-model"}, False)
+                result = runtime.post(profile, api, model, model_api, {"model": "demo-model"}, False,
+                                      dynamic_headers={"X-Test-Upstream-Context": session_id})
 
         self.assertIs(result.response, success)
         self.assertTrue(unauthorized.closed)
         self.assertEqual(run.call_count, 2)
         self.assertEqual(post.call_args_list[0].kwargs["headers"]["Authorization"], "Bearer token-one")
         self.assertEqual(post.call_args_list[1].kwargs["headers"]["Authorization"], "Bearer token-two")
+        self.assertEqual(
+            [call.kwargs["headers"]["X-Test-Upstream-Context"] for call in post.call_args_list],
+            [session_id, session_id],
+        )
 
 
 class ConfiguredProxyRouteTest(unittest.TestCase):
@@ -360,6 +455,192 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
             1,
         )
 
+    def test_messages_proxy_passes_anthropic_request_and_non_stream_response(self):
+        upstream_payload = {
+            "id": "msg-1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-deployment",
+            "content": [{"type": "text", "text": "Hello"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 1,
+            },
+        }
+        upstream = FakeResponse(payload=upstream_payload)
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/messages", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 128,
+                })
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["model"], "demo-model")
+        self.assertNotIn("X-Test-Client-Context", response.headers)  # Disabled unless configured.
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "claude-deployment")
+        self.assertEqual(post.call_args.kwargs["headers"]["anthropic-version"], "2023-06-01")
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["input_tokens"], 5)
+        self.assertEqual(cached["output_tokens"], 2)
+        self.assertEqual(cached["cache_creation_input_tokens"], 3)
+        self.assertEqual(cached["cache_read_input_tokens"], 1)
+        self.assertEqual(cached["upstream_api"], "messages")
+
+    def _enable_header_binding(self, additional=()):
+        config = __import__("yaml").safe_load(CONFIG)
+        api = config["proxies"]["demo-profile"]["apis"]["messages"]
+        api["header_bindings"] = [{
+            "client_name": "X-Test-Client-Context", "upstream_name": "X-Test-Upstream-Context",
+            "value_type": "uuid_v4",
+        }]
+        api["header_bindings"].extend(additional)
+        api["headers"]["x-test-upstream-context"] = "${GHC_API_TEST_UNSET_DYNAMIC_HEADER}"
+        path = self.root / "session-proxies.yaml"
+        path.write_text(__import__("yaml").safe_dump(config), encoding="utf-8")
+        self.runtime.registry = ProxyRegistry(path)
+
+    def test_messages_header_value_is_generated_or_reused_without_logging_client_header(self):
+        self._enable_header_binding()
+        upstream = FakeResponse(payload={"type": "message", "content": []})
+        body = {"model": "demo-model", "messages": [], "max_tokens": 16}
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+            with self.app.test_client() as client:
+                first = client.post("/proxy/demo-profile/v1/messages", json=body)
+                second = client.post("/proxy/demo-profile/v1/messages", json=body)
+                first_id = first.headers["X-Test-Client-Context"]
+                reused = client.post("/proxy/demo-profile/v1/messages", json=body,
+                                     headers={"X-Test-Client-Context": first_id.upper()})
+
+        self.assertEqual([first.status_code, second.status_code, reused.status_code], [200] * 3)
+        self.assertEqual(uuid.UUID(first_id).version, 4)
+        self.assertNotEqual(first_id, second.headers["X-Test-Client-Context"])
+        self.assertEqual(reused.headers["X-Test-Client-Context"], first_id)
+        self.assertEqual(
+            [call.kwargs["headers"]["X-Test-Upstream-Context"] for call in post.call_args_list],
+            [first_id, second.headers["X-Test-Client-Context"], first_id],
+        )
+        self.assertNotIn("X-Test-Client-Context", post.call_args.kwargs["headers"])
+        self.assertNotIn("x-test-upstream-context", post.call_args.kwargs["headers"])
+        for entry in cache.cache.values():
+            self.assertNotIn("X-Test-Client-Context", entry["request_headers"])
+
+    def test_multiple_header_bindings_are_independent(self):
+        self._enable_header_binding([{
+            "client_name": "X-Test-Client-Trace", "upstream_name": "X-Test-Upstream-Trace",
+            "value_type": "uuid_v4",
+        }])
+        supplied = str(uuid.uuid4())
+        upstream = FakeResponse(payload={"type": "message", "content": []})
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/messages",
+                                       json={"model": "demo-model", "messages": [], "max_tokens": 16},
+                                       headers={"X-Test-Client-Trace": supplied})
+                catalog = client.get("/proxy/models")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["X-Test-Client-Trace"], supplied)
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Test-Upstream-Trace"], supplied)
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Test-Upstream-Context"],
+                         response.headers["X-Test-Client-Context"])
+        self.assertNotIn("X-Test-Client-Trace", next(iter(cache.cache.values()))["request_headers"])
+        model = catalog.get_json()["data"][0]
+        self.assertEqual(model["request_headers"]["/messages"], [
+            {"name": "X-Test-Client-Context", "value_type": "uuid_v4"},
+            {"name": "X-Test-Client-Trace", "value_type": "uuid_v4"},
+        ])
+        self.assertNotIn("X-Test-Upstream-Trace", catalog.get_data(as_text=True))
+
+    def test_messages_invalid_header_value_never_contacts_upstream(self):
+        self._enable_header_binding()
+        body = {"model": "demo-model", "messages": [], "max_tokens": 16}
+        with mock.patch("ghc_api.proxy.client.requests.post") as post:
+            with self.app.test_client() as client:
+                for bad in ("not-a-uuid", str(uuid.uuid1()), ""):
+                    with self.subTest(bad=bad):
+                        response = client.post("/proxy/demo-profile/v1/messages", json=body,
+                                               headers={"X-Test-Client-Context": bad})
+                        self.assertEqual(response.status_code, 400)
+                        self.assertEqual(response.get_json()["type"], "error")
+        post.assert_not_called()
+
+    def test_messages_stream_echoes_the_configured_client_header(self):
+        self._enable_header_binding()
+        session_id = str(uuid.uuid4())
+        upstream = FakeResponse(
+            headers={"Content-Type": "text/event-stream"},
+            lines=[b'event: message_stop', b'data: {"type":"message_stop"}'],
+            content=b"unused",
+        )
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/messages",
+                    json={"model": "demo-model", "messages": [], "max_tokens": 16, "stream": True},
+                    headers={"X-Test-Client-Context": session_id})
+                self.assertIn("event: message_stop", response.get_data(as_text=True))
+        self.assertEqual(response.headers["X-Test-Client-Context"], session_id)
+        self.assertEqual(post.call_args.kwargs["headers"]["X-Test-Upstream-Context"], session_id)
+
+    def test_messages_stream_preserves_anthropic_events_and_rewrites_model(self):
+        lines = [
+            b'event: message_start',
+            b'data: {"type":"message_start","message":{"id":"msg-1","type":"message","role":"assistant","model":"claude-deployment","content":[],"usage":{"input_tokens":4,"cache_creation_input_tokens":2,"cache_read_input_tokens":1,"output_tokens":0}}}',
+            b'event: content_block_start',
+            b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            b'event: content_block_delta',
+            b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}',
+            b'event: message_delta',
+            b'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+            b'event: message_stop',
+            b'data: {"type":"message_stop"}',
+        ]
+        upstream = FakeResponse(
+            headers={"Content-Type": "text/event-stream"},
+            lines=lines,
+            content=b"unused",
+        )
+
+        with mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream):
+            with self.app.test_client() as client:
+                response = client.post("/proxy/demo-profile/v1/messages", json={
+                    "model": "demo-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 128,
+                    "stream": True,
+                })
+                body = response.get_data(as_text=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event: message_start", body)
+        self.assertIn('"model":"demo-model"', body)
+        self.assertNotIn('"model":"claude-deployment"', body)
+        self.assertIn("event: message_stop", body)
+        self.assertNotIn("[DONE]", body)
+        cached = next(iter(cache.cache.values()))
+        self.assertEqual(cached["input_tokens"], 4)
+        self.assertEqual(cached["output_tokens"], 2)
+        self.assertEqual(cached["cache_creation_input_tokens"], 2)
+        self.assertEqual(cached["cache_read_input_tokens"], 1)
+        self.assertEqual(cached["upstream_api"], "messages")
+        self.assertIn('"model":"claude-deployment"', cached["raw_events"][0])
+
+    def test_messages_proxy_errors_use_anthropic_shape(self):
+        with self.app.test_client() as client:
+            response = client.post("/proxy/missing/v1/messages", json={
+                "model": "demo-model",
+                "messages": [],
+                "max_tokens": 16,
+            })
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["type"], "error")
+        self.assertEqual(response.get_json()["error"]["type"], "not_found_error")
+
     def test_responses_stream_rewrites_nested_model_and_extracts_usage(self):
         lines = [
             b'data: {"type":"response.created","response":{"id":"resp-1","model":"private-deployment"}}',
@@ -472,9 +753,26 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(model["id"], "demo-model")
         self.assertEqual(model["profile"], "demo-profile")
         self.assertEqual(model["base_url"], "/proxy/demo-profile/v1")
-        self.assertEqual(model["supported_endpoints"], ["/responses", "/chat/completions"])
+        self.assertEqual(
+            model["supported_endpoints"],
+            ["/responses", "/chat/completions", "/messages"],
+        )
         self.assertNotIn("headers", model)
         self.assertNotIn("upstream_url", model)
+        self.assertNotIn("request_headers", model)
+
+    def test_catalog_exposes_only_the_configured_client_header(self):
+        self._enable_header_binding()
+        with self.app.test_client() as client:
+            response = client.get("/proxy/models")
+            per_profile = client.get("/proxy/demo-profile/v1/models")
+        self.assertEqual(response.status_code, 200)
+        model = response.get_json()["data"][0]
+        self.assertEqual(model["request_headers"], {"/messages": [{
+            "name": "X-Test-Client-Context", "value_type": "uuid_v4",
+        }]})
+        self.assertNotIn("X-Test-Upstream-Context", response.get_data(as_text=True))
+        self.assertNotIn("X-Test-Upstream-Context", per_profile.get_data(as_text=True))
 
     def test_chat_ui_discovers_and_routes_configured_proxy_models(self):
         with self.app.test_client() as client:
@@ -497,7 +795,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(model["id"], "demo-model")
         self.assertEqual(
             model["supported_endpoints"],
-            ["/responses", "/chat/completions"],
+            ["/responses", "/chat/completions", "/messages"],
         )
         self.assertNotIn("headers", model)
         self.assertNotIn("upstream_url", model)

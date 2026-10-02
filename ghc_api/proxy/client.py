@@ -47,12 +47,24 @@ def _resolve_header_value(value: str) -> str:
     return _ENV_PATTERN.sub(replace, value)
 
 
-def _merge_headers(*header_sets: Dict[str, str]) -> Dict[str, str]:
+def _merge_headers(*header_sets: Dict[str, str], overridden_names: Optional[set] = None) -> Dict[str, str]:
     merged: Dict[str, str] = {"Content-Type": "application/json"}
     for headers in header_sets:
         for name, value in headers.items():
+            # A dynamic value replaces this header entirely; do not resolve an
+            # unused environment placeholder that could fail the request.
+            if overridden_names and name.lower() in overridden_names:
+                continue
             merged[name] = _resolve_header_value(value)
     return merged
+
+
+def _set_header(headers: Dict[str, str], name: str, value: str) -> None:
+    """Set `name` to `value`, dropping any differently-cased duplicate."""
+    for existing in list(headers):
+        if existing != name and existing.lower() == name.lower():
+            del headers[existing]
+    headers[name] = value
 
 
 def transform_payload(
@@ -99,13 +111,23 @@ class ProxyRuntime:
         model_api: ProxyModelApiConfig,
         auth_provider: ProxyAuthProvider,
         affinity_token: Optional[str],
+        dynamic_headers: Dict[str, str],
     ) -> Dict[str, str]:
-        headers = _merge_headers(profile.headers, api.headers, model.headers, model_api.headers)
+        headers = _merge_headers(
+            profile.headers, api.headers, model.headers, model_api.headers,
+            overridden_names={name.lower() for name in dynamic_headers},
+        )
         token = auth_provider.get_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        for name, value in dynamic_headers.items():
+            # Dynamic values win even when a static header uses different casing.
+            _set_header(headers, name, value)
         if profile.affinity.enabled and affinity_token:
-            headers[profile.affinity.request_header] = affinity_token
+            # Affinity is applied last so it always wins: config validation
+            # rejects a binding that reuses this name, but a last-known-good
+            # config loaded before that rule must not lose the token either.
+            _set_header(headers, profile.affinity.request_header, affinity_token)
         return headers
 
     def _capture_affinity(
@@ -130,6 +152,7 @@ class ProxyRuntime:
         stream: bool,
         affinity_key_value: Optional[str],
         initial_affinity_token: Optional[str],
+        dynamic_headers: Dict[str, str],
     ) -> requests.Response:
         auth_provider = self._auth_provider(profile)
         connection_attempt = 0
@@ -140,7 +163,7 @@ class ProxyRuntime:
             if profile.affinity.enabled and affinity_key_value is not None:
                 affinity_token = self.affinity_store.get(affinity_key_value) or affinity_token
             headers = self._build_headers(
-                profile, api, model, model_api, auth_provider, affinity_token
+                profile, api, model, model_api, auth_provider, affinity_token, dynamic_headers
             )
             try:
                 response = requests.post(
@@ -178,6 +201,7 @@ class ProxyRuntime:
         model_api: ProxyModelApiConfig,
         payload: dict,
         stream: bool,
+        dynamic_headers: Optional[Dict[str, str]] = None,
     ) -> ProxyUpstreamResult:
         upstream_payload = transform_payload(payload, api, model, model_api)
         key: Optional[str] = None
@@ -201,6 +225,7 @@ class ProxyRuntime:
                         stream,
                         key,
                         affinity_token,
+                        dynamic_headers or {},
                     )
             else:
                 response = self._post_with_retries(
@@ -212,6 +237,7 @@ class ProxyRuntime:
                     stream,
                     key,
                     affinity_token,
+                    dynamic_headers or {},
                 )
         except ProxyAuthError as exc:
             raise ProxyRequestError(str(exc)) from exc

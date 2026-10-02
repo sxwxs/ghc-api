@@ -15,7 +15,11 @@ from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
 from ..cache import cache
 from ..proxy import ProxyRequestError, ProxyRuntime
 from ..proxy.config import ProxyApiConfig, ProxyModelApiConfig, ProxyModelConfig, ProxyProfileConfig
-from ..sse import ProxyChatCompletionsStreamHandler, ProxyResponsesStreamHandler
+from ..sse import (
+    ProxyAnthropicMessagesStreamHandler,
+    ProxyChatCompletionsStreamHandler,
+    ProxyResponsesStreamHandler,
+)
 from ..state import state
 from ..utils import get_client_ip
 
@@ -33,6 +37,13 @@ def _proxy_auth_gate():
 
     result = require_auth(request)
     if result.user_id is None:
+        if request.path.endswith("/v1/messages"):
+            return _error(
+                result.error_message,
+                result.error_code,
+                result.http_status,
+                api_name="messages",
+            )
         return jsonify({
             "error": result.error_code,
             "message": result.error_message,
@@ -46,7 +57,31 @@ def _current_user_id() -> str:
     return getattr(g, "user_id", ANONYMOUS_USER_ID) or ANONYMOUS_USER_ID
 
 
-def _error(message: str, code: str, status: int, param: Optional[str] = None):
+def _error_payload(
+    message: str,
+    code: str,
+    status: int,
+    param: Optional[str] = None,
+    api_name: Optional[str] = None,
+) -> Dict:
+    if api_name == "messages":
+        if status == 401:
+            error_type = "authentication_error"
+        elif status == 403:
+            error_type = "permission_error"
+        elif status == 404:
+            error_type = "not_found_error"
+        elif status == 429:
+            error_type = "rate_limit_error"
+        elif status < 500:
+            error_type = "invalid_request_error"
+        else:
+            error_type = "api_error"
+        return {
+            "type": "error",
+            "error": {"type": error_type, "message": message},
+        }
+
     error = {
         "message": message,
         "type": "invalid_request_error" if status < 500 else "proxy_error",
@@ -54,7 +89,24 @@ def _error(message: str, code: str, status: int, param: Optional[str] = None):
     }
     if param:
         error["param"] = param
-    return jsonify({"error": error}), status
+    return {"error": error}
+
+
+def _with_client_headers(response: Response, client_headers: Optional[Dict[str, str]]) -> Response:
+    for name, value in (client_headers or {}).items():
+        response.headers[name] = value
+    return response
+
+
+def _error(
+    message: str,
+    code: str,
+    status: int,
+    param: Optional[str] = None,
+    api_name: Optional[str] = None,
+    client_headers: Optional[Dict[str, str]] = None,
+):
+    return _with_client_headers(jsonify(_error_payload(message, code, status, param, api_name)), client_headers), status
 
 
 def _resolve_target(
@@ -92,6 +144,13 @@ def _usage_for_api(api_name: str, result) -> Tuple[int, int, int, int]:
             usage.get("output_tokens", 0),
             details.get("cached_tokens", 0),
             0,
+        )
+    if api_name == "messages":
+        return (
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            usage.get("cache_creation_input_tokens", 0),
+            usage.get("cache_read_input_tokens", 0),
         )
     details = usage.get("prompt_tokens_details", {}) or {}
     return (
@@ -152,36 +211,73 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     start_time = time.time()
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return _error("Request body must be a JSON object.", "invalid_json", 400)
+        return _error(
+            "Request body must be a JSON object.", "invalid_json", 400,
+            api_name=api_name,
+        )
 
     original_model = payload.get("model")
     if not isinstance(original_model, str) or not original_model:
-        return _error("The 'model' field is required.", "missing_model", 400, "model")
+        return _error(
+            "The 'model' field is required.", "missing_model", 400, "model",
+            api_name=api_name,
+        )
 
     target = _resolve_target(profile_name, api_name, original_model)
     if target is None:
         profile = proxy_runtime.registry.get_profile(profile_name)
         if profile is None:
             if proxy_runtime.registry.last_error:
-                return _error("The configured proxy is unavailable because its private configuration is invalid.", "proxy_config_error", 503)
-            return _error("Configured proxy profile not found.", "proxy_not_found", 404)
+                return _error(
+                    "The configured proxy is unavailable because its private configuration is invalid.",
+                    "proxy_config_error", 503, api_name=api_name,
+                )
+            return _error(
+                "Configured proxy profile not found.", "proxy_not_found", 404,
+                api_name=api_name,
+            )
         return _error(
             f"Model '{original_model}' does not support this endpoint in the configured proxy profile.",
             "unsupported_model",
             400,
             "model",
+            api_name=api_name,
         )
 
     profile, api, model, model_api = target
+    client_headers: Dict[str, str] = {}
+    dynamic_headers: Dict[str, str] = {}
+    for binding in api.header_bindings:
+        supplied = request.headers.get(binding.client_name)
+        if supplied is None:
+            value = str(uuid.uuid4())
+        else:
+            try:
+                parsed = uuid.UUID(supplied)
+            except ValueError:
+                return _error("Configured header must be a UUID v4.", "invalid_header_value", 400, api_name=api_name)
+            if parsed.version != 4:
+                return _error("Configured header must be a UUID v4.", "invalid_header_value", 400, api_name=api_name)
+            value = str(parsed)
+        client_headers[binding.client_name] = value
+        dynamic_headers[binding.upstream_name] = value
+
     original_request_body = copy.deepcopy(payload)
     request_id = str(uuid.uuid4())
-    request_headers = redact_auth_headers(dict(request.headers))
+    client_header_names = {name.lower() for name in client_headers}
+    request_headers = {
+        name: value for name, value in redact_auth_headers(dict(request.headers)).items()
+        if name.lower() not in client_header_names
+    }
     client_ip = get_client_ip(request)
     user_id = _current_user_id()
     use_streaming = bool(payload.get("stream", False))
-    endpoint = f"/proxy/{profile_name}/v1/" + (
-        "responses" if api_name == "responses" else "chat/completions"
-    )
+    api_paths = {
+        "responses": "responses",
+        "chat_completions": "chat/completions",
+        "messages": "messages",
+    }
+    endpoint = f"/proxy/{profile_name}/v1/{api_paths[api_name]}"
 
     try:
         upstream = proxy_runtime.post(
@@ -191,10 +287,17 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             model_api=model_api,
             payload=payload,
             stream=use_streaming,
+            dynamic_headers=dynamic_headers,
         )
     except ProxyRequestError as exc:
         print(f"[Configured Proxy] Request {request_id} could not start: {exc}")
-        return _error("Configured upstream request could not be started.", "upstream_unavailable", 503)
+        return _error(
+            "Configured upstream request could not be started.",
+            "upstream_unavailable",
+            503,
+            api_name=api_name,
+            client_headers=client_headers,
+        )
 
     response = upstream.response
     upstream_payload = upstream.payload
@@ -208,10 +311,16 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         content_type = response.headers.get("Content-Type", "")
         if content_length == "0":
             response.close()
-            return _error("The configured upstream returned an empty streaming response.", "empty_upstream_response", 502)
+            return _error(
+                "The configured upstream returned an empty streaming response.",
+                "empty_upstream_response", 502, api_name=api_name, client_headers=client_headers,
+            )
         if "text/event-stream" not in content_type.lower():
             response.close()
-            return _error("The configured upstream did not return an event stream.", "invalid_upstream_stream", 502)
+            return _error(
+                "The configured upstream did not return an event stream.",
+                "invalid_upstream_stream", 502, api_name=api_name, client_headers=client_headers,
+            )
 
         common = {
             "response": response,
@@ -231,8 +340,10 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             "rewrite_model": api.response_model == "public",
         }
         if api_name == "responses":
-            return ProxyResponsesStreamHandler(**common).stream()
-        return ProxyChatCompletionsStreamHandler(**common).stream()
+            return _with_client_headers(ProxyResponsesStreamHandler(**common).stream(), client_headers)
+        if api_name == "messages":
+            return _with_client_headers(ProxyAnthropicMessagesStreamHandler(**common).stream(), client_headers)
+        return _with_client_headers(ProxyChatCompletionsStreamHandler(**common).stream(), client_headers)
 
     duration = round(time.time() - start_time, 2)
     response_content = response.content
@@ -240,19 +351,18 @@ def _handle_proxy_request(profile_name: str, api_name: str):
 
     if response.ok and not response_content:
         response.close()
-        result = {
-            "error": {
-                "message": "The configured upstream returned an empty response body.",
-                "type": "proxy_error",
-                "code": "empty_upstream_response",
-            }
-        }
+        result = _error_payload(
+            "The configured upstream returned an empty response body.",
+            "empty_upstream_response",
+            502,
+            api_name=api_name,
+        )
         _cache_non_stream(
             request_id, endpoint, profile_name, api_name, original_model,
             translated_model, original_request_body, upstream_payload, request_headers, client_ip,
             user_id, 502, result, request_size, 0, duration,
         )
-        return jsonify(result), 502
+        return _with_client_headers(jsonify(result), client_headers), 502
 
     try:
         result = response.json()
@@ -273,16 +383,16 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     )
 
     if result_is_json:
-        return Response(
+        return _with_client_headers(Response(
             json.dumps(result, ensure_ascii=False),
             status=response.status_code,
             content_type=response.headers.get("Content-Type", "application/json"),
-        )
-    return Response(
+        ), client_headers)
+    return _with_client_headers(Response(
         response_content,
         status=response.status_code,
         content_type=response.headers.get("Content-Type", "text/plain"),
-    )
+    ), client_headers)
 
 
 @proxy_bp.route("/proxy/<profile_name>/v1/responses", methods=["POST"])
@@ -293,6 +403,11 @@ def proxy_responses(profile_name: str):
 @proxy_bp.route("/proxy/<profile_name>/v1/chat/completions", methods=["POST"])
 def proxy_chat_completions(profile_name: str):
     return _handle_proxy_request(profile_name, "chat_completions")
+
+
+@proxy_bp.route("/proxy/<profile_name>/v1/messages", methods=["POST"])
+def proxy_messages(profile_name: str):
+    return _handle_proxy_request(profile_name, "messages")
 
 
 def _model_data(
@@ -306,6 +421,8 @@ def _model_data(
         supported_endpoints.append("/responses")
     if model.api_config("chat_completions") is not None and "chat_completions" in profile.apis:
         supported_endpoints.append("/chat/completions")
+    if model.api_config("messages") is not None and "messages" in profile.apis:
+        supported_endpoints.append("/messages")
     if not supported_endpoints:
         return None
 
@@ -326,6 +443,13 @@ def _model_data(
     if include_profile:
         data["profile"] = profile_name
         data["base_url"] = f"/proxy/{profile_name}/v1"
+        # Publish only client-facing rules the built-in Chat needs.
+        messages_api = profile.apis.get("messages")
+        if messages_api and model.api_config("messages") and messages_api.header_bindings:
+            data["request_headers"] = {"/messages": [
+                {"name": binding.client_name, "value_type": binding.value_type}
+                for binding in messages_api.header_bindings
+            ]}
     return data
 
 

@@ -767,6 +767,29 @@
             return sessions.find(s => s.id === activeSessionId);
         }
 
+        function conversationHeaderValue(session, modelKey, name) {
+            if (!session.headerValues) session.headerValues = {};
+            if (!session.headerValues[modelKey]) session.headerValues[modelKey] = Object.create(null);
+            const values = session.headerValues[modelKey];
+            if (!Object.prototype.hasOwnProperty.call(values, name)) {
+                Object.defineProperty(values, name, {
+                    value: crypto.randomUUID(), enumerable: true, writable: true, configurable: true,
+                });
+                saveSessions();
+            }
+            return values[name];
+        }
+
+        function configuredRequestHeaders(session, modelKey, target, endpoint) {
+            const headers = Object.create(null);
+            for (const rule of target.requestHeaders?.[endpoint] || []) {
+                if (rule.value_type === 'uuid_v4') {
+                    headers[rule.name] = conversationHeaderValue(session, modelKey, rule.name);
+                }
+            }
+            return headers;
+        }
+
         function renderSessionList() {
             const container = document.getElementById('session-list');
             container.innerHTML = '';
@@ -1032,7 +1055,8 @@
         function endpointForModel(selectionKey, apiStyle) {
             const target = selectedModelTarget(selectionKey);
             const baseUrl = target ? target.baseUrl : '/v1';
-            return baseUrl + (apiStyle === 'responses' ? '/responses' : '/chat/completions');
+            return baseUrl + (apiStyle === 'responses' ? '/responses' :
+                apiStyle === 'messages' ? '/messages' : '/chat/completions');
         }
 
         function addModelOption(group, key, model, target) {
@@ -1117,6 +1141,12 @@
                 const groups = {};
                 for (const model of configuredModels) {
                     if (!model.id || !model.profile || !model.base_url) continue;
+                    const supportedEndpoints = model.supported_endpoints || [];
+                    if (!supportedEndpoints.some(e =>
+                        e === '/responses' || e === 'responses' ||
+                        e === '/chat/completions' || e === 'chat/completions' ||
+                        e === '/messages' || e === 'messages'
+                    )) continue;
                     if (!groups[model.profile]) {
                         groups[model.profile] = document.createElement('optgroup');
                         groups[model.profile].label = 'Configured proxy: ' + model.profile;
@@ -1128,8 +1158,10 @@
                         id: model.id,
                         profile: model.profile,
                         baseUrl: model.base_url,
-                        supportedEndpoints: model.supported_endpoints || [],
+                        supportedEndpoints: supportedEndpoints,
                         contextWindow: model.context_window || null,
+                        maxOutputTokens: model.max_output_tokens || null,
+                        requestHeaders: model.request_headers || {},
                     });
                 }
             } else if (configuredModelsError && copilotModels.length) {
@@ -1189,6 +1221,9 @@
                 if (target.supportedEndpoints.some(e => e === '/chat/completions' || e === 'chat/completions')) {
                     endpoints.push({ value: endpointForModel(null, 'chat'), label: endpointForModel(null, 'chat') });
                 }
+                if (target.supportedEndpoints.some(e => e === '/messages' || e === 'messages')) {
+                    endpoints.push({ value: endpointForModel(null, 'messages'), label: endpointForModel(null, 'messages') });
+                }
             } else {
                 endpoints.push({ value: '/v1/responses', label: '/v1/responses' });
                 endpoints.push({ value: '/v1/chat/completions', label: '/v1/chat/completions' });
@@ -1218,6 +1253,13 @@
 
         function shouldUseResponses(selectionKey) {
             return supportsResponses(selectionKey);
+        }
+
+        function shouldUseMessages(selectionKey) {
+            const target = selectedModelTarget(selectionKey);
+            return target?.type === 'configured_proxy' && !supportsResponses(selectionKey) &&
+                !target.supportedEndpoints.some(e => e === '/chat/completions' || e === 'chat/completions') &&
+                target.supportedEndpoints.some(e => e === '/messages' || e === 'messages');
         }
 
         function canUseWebSearch(selectionKey) {
@@ -1343,6 +1385,8 @@
                 let result;
                 if (shouldUseResponses(modelSelection)) {
                     result = await streamResponses(modelSelection, session.messages, assistantDiv, contentDiv);
+                } else if (shouldUseMessages(modelSelection)) {
+                    result = await streamAnthropicMessages(modelSelection, session, assistantDiv, contentDiv);
                 } else {
                     result = await streamChatCompletions(modelSelection, session.messages, assistantDiv, contentDiv);
                 }
@@ -1364,6 +1408,9 @@
                 // replayed on later turns or the model loses its evidence.
                 if (result.toolCalls && result.toolCalls.length) {
                     msgData.toolCalls = result.toolCalls;
+                }
+                if (result.nativeMessages && result.nativeMessages.length) {
+                    msgData.nativeMessages = result.nativeMessages;
                 }
                 if (result.sources && result.sources.length) {
                     msgData.sources = result.sources;
@@ -1476,7 +1523,12 @@
                 tools.push({ type: 'web_search' });
             }
             if (isWebIqSearchEnabled(model)) {
-                tools.push(apiStyle === 'responses' ? WEBIQ_TOOL_RESPONSES : WEBIQ_TOOL_CHAT);
+                if (apiStyle === 'messages') {
+                    const fn = WEBIQ_TOOL_CHAT.function;
+                    tools.push({ name: fn.name, description: fn.description, input_schema: fn.parameters });
+                } else {
+                    tools.push(apiStyle === 'responses' ? WEBIQ_TOOL_RESPONSES : WEBIQ_TOOL_CHAT);
+                }
             }
             return tools;
         }
@@ -1628,6 +1680,194 @@
                 }
             }
             return msgs;
+        }
+
+        function buildAnthropicMessages(messages) {
+            const history = [];
+            for (const m of conversationTurns(messages)) {
+                // Keep tool_use and tool_result in their original order, not
+                // flattened into the displayed final answer for that turn.
+                if (m.role === 'assistant' && Array.isArray(m.nativeMessages) && m.nativeMessages.length) {
+                    history.push(...m.nativeMessages);
+                } else if (m.content) {
+                    history.push({ role: m.role, content: m.content });
+                }
+            }
+            return history;
+        }
+
+        // ---- Streaming: native Anthropic /v1/messages ----
+
+        async function streamAnthropicMessages(modelSelection, session, assistantDiv, contentDiv) {
+            const target = selectedModelTarget(modelSelection);
+            const history = buildAnthropicMessages(session.messages);
+            const firstNewMessage = history.length;
+            const tools = webIqTools(modelSelection, 'messages');
+            const extraHeaders = configuredRequestHeaders(session, modelSelection, target, '/messages');
+            const acc = newTurnAccumulator();
+            const indicator = { el: null };
+            let toolChoice = 'auto';
+
+            try {
+                for (let round = 0; round <= WEBIQ_MAX_TOOL_ROUNDS; round++) {
+                    const turn = await streamAnthropicRound(
+                        endpointForModel(modelSelection, 'messages'), target, history,
+                        tools, toolChoice, extraHeaders, contentDiv, acc);
+                    if (turn.blocks.length) history.push({ role: 'assistant', content: turn.blocks });
+                    if (!turn.toolCalls.length) break;
+                    if (toolChoice === 'none' || !tools.length) {
+                        throw new Error('Unexpected Messages tool call');
+                    }
+
+                    const results = [];
+                    for (const call of turn.toolCalls) {
+                        const argumentsJson = JSON.stringify(call.input);
+                        const query = safeParseQuery(argumentsJson);
+                        setToolIndicator(indicator, assistantDiv, contentDiv,
+                            query ? 'Searching the web: ' + query : 'Searching the web...');
+                        const result = await executeWebIqCall(argumentsJson);
+                        mergeSources(acc.sources, result.results);
+                        results.push({ type: 'tool_result', tool_use_id: call.id, content: result.output });
+                        acc.toolCalls.push({
+                            id: call.id, name: call.name, arguments: argumentsJson, output: result.output,
+                        });
+                    }
+                    history.push({ role: 'user', content: results });
+                    clearToolIndicator(indicator);
+                    if (round + 1 >= WEBIQ_MAX_TOOL_ROUNDS) toolChoice = 'none';
+                }
+            } finally {
+                clearToolIndicator(indicator);
+            }
+
+            acc.nativeMessages = history.slice(firstNewMessage);
+            finalizeAssistantView(acc, assistantDiv, contentDiv);
+            return acc;
+        }
+
+        async function streamAnthropicRound(endpoint, target, history, tools, toolChoice, extraHeaders, contentDiv, acc) {
+            const body = {
+                model: target.id,
+                messages: history.slice(),
+                max_tokens: Math.min(target.maxOutputTokens || 4096, 4096),
+                stream: true,
+            };
+            if (tools.length) {
+                body.tools = tools;
+                body.tool_choice = { type: toolChoice };
+            }
+            const headers = { 'Content-Type': 'application/json', ...extraHeaders };
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: headers,
+                body: JSON.stringify(body),
+                signal: abortController.signal,
+            });
+            if (!res.ok) {
+                const errBody = await res.text();
+                throw new Error('HTTP ' + res.status + ': ' + errBody.substring(0, 200));
+            }
+
+            const blocks = new Map();
+            let thinkingStartTime = null;
+            let sawStop = false;
+            let frameData = [];
+            let buffer = '';
+            const handleFrame = () => {
+                if (!frameData.length) return;
+                const event = JSON.parse(frameData.join('\n'));
+                frameData = [];
+                if (event.type === 'error') {
+                    throw new Error(event.error?.message || 'Upstream stream error');
+                }
+                if (event.type === 'content_block_start') {
+                    const block = event.content_block || {};
+                    if (block.type === 'text') {
+                        blocks.set(event.index, { type: 'text', text: block.text || '' });
+                        acc.text += block.text || '';
+                    } else if (block.type === 'tool_use') {
+                        blocks.set(event.index, {
+                            type: 'tool_use', id: block.id, name: block.name,
+                            input: block.input || {}, partialJson: '',
+                        });
+                    } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+                        // Tool-result turns must echo thinking blocks (including
+                        // signatures and redacted data) in their original order.
+                        blocks.set(event.index, { ...block });
+                    }
+                } else if (event.type === 'content_block_delta') {
+                    const delta = event.delta || {};
+                    if (delta.type === 'text_delta') {
+                        if (!blocks.has(event.index)) blocks.set(event.index, { type: 'text', text: '' });
+                        blocks.get(event.index).text += delta.text || '';
+                        acc.text += delta.text || '';
+                        contentDiv.innerHTML = renderMarkdown(acc.text);
+                        scrollToBottom();
+                    } else if (delta.type === 'input_json_delta') {
+                        const block = blocks.get(event.index);
+                        if (!block || block.type !== 'tool_use') throw new Error('Invalid Messages tool stream');
+                        block.partialJson += delta.partial_json || '';
+                    } else if (delta.type === 'thinking_delta' || delta.type === 'signature_delta') {
+                        const block = blocks.get(event.index);
+                        if (!block || block.type !== 'thinking') throw new Error('Invalid Messages thinking stream');
+                        if (delta.type === 'thinking_delta') {
+                            if (thinkingStartTime === null) thinkingStartTime = performance.now();
+                            block.thinking = (block.thinking || '') + (delta.thinking || '');
+                            acc.thinking += delta.thinking || '';
+                        } else {
+                            block.signature = (block.signature || '') + (delta.signature || '');
+                        }
+                    }
+                } else if (event.type === 'message_stop') {
+                    sawStop = true;
+                }
+            };
+            const processLine = (line) => {
+                if (!line) {
+                    handleFrame();
+                } else if (line.startsWith('data:')) {
+                    frameData.push(line.slice(5).trimStart());
+                }
+            };
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+                for (const line of lines) processLine(line.replace(/\r$/, ''));
+            }
+            buffer += decoder.decode();
+            if (buffer) processLine(buffer.replace(/\r$/, ''));
+            handleFrame();
+            if (!sawStop) throw new Error('Messages stream ended before message_stop');
+            if (acc.text) contentDiv.innerHTML = renderMarkdown(acc.text);
+            if (thinkingStartTime !== null) {
+                acc.thinkingTime = (acc.thinkingTime || 0) + (performance.now() - thinkingStartTime) / 1000;
+            }
+
+            const turn = { blocks: [], toolCalls: [] };
+            for (const [, block] of [...blocks.entries()].sort((a, b) => a[0] - b[0])) {
+                if (block.type === 'text' && block.text) {
+                    turn.blocks.push(block);
+                } else if (block.type === 'thinking' || block.type === 'redacted_thinking') {
+                    turn.blocks.push(block);
+                } else if (block.type === 'tool_use') {
+                    if (block.name !== WEBIQ_TOOL_NAME || !block.id || !tools.length) {
+                        throw new Error('Unsupported Messages tool call');
+                    }
+                    const input = block.partialJson ? JSON.parse(block.partialJson) : block.input;
+                    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+                        throw new Error('Invalid Messages tool input');
+                    }
+                    const tool = { type: 'tool_use', id: block.id, name: block.name, input: input };
+                    turn.blocks.push(tool);
+                    turn.toolCalls.push(tool);
+                }
+            }
+            return turn;
         }
 
         // ---- Streaming: /v1/responses ----
@@ -2048,7 +2288,8 @@
             if (selectedModelTarget(selectionKey)) {
                 return endpointForModel(
                     selectionKey,
-                    shouldUseResponses(selectionKey) ? 'responses' : 'chat'
+                    shouldUseResponses(selectionKey) ? 'responses' :
+                        shouldUseMessages(selectionKey) ? 'messages' : 'chat'
                 );
             }
             return '/v1/chat/completions';
@@ -2142,9 +2383,15 @@
             const startTime = performance.now();
 
             try {
+                let headers = { 'Content-Type': 'application/json' };
+                const target = selectedModelTarget();
+                if (target?.type === 'configured_proxy' && endpoint === endpointForModel(null, 'messages')) {
+                    const modelKey = 'raw:' + document.getElementById('model-select').value + ':' + payload.model;
+                    headers = { ...headers, ...configuredRequestHeaders(session, modelKey, target, '/messages') };
+                }
                 const res = await fetch(endpoint, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: headers,
                     body: JSON.stringify(payload),
                     signal: abortController.signal,
                 });
