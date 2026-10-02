@@ -558,9 +558,58 @@ class RetryingResponsesResponseTest(unittest.TestCase):
 
     def test_failure_survives_connection_error_while_reading_diagnostic(self):
         failed_line = self._event("response.failed", response={"error": None})
-        upstream = _FakeResponse([failed_line, requests.ConnectionError("closed")])
-        output = list(RetryingResponsesResponse(upstream, mock.Mock(), 0, "req-tail").iter_lines())
-        self.assertEqual(output, [failed_line])
+        # A stream cut mid-body surfaces as ChunkedEncodingError far more often
+        # than as ConnectionError; both must keep the terminal failure.
+        for broken in (
+            requests.ConnectionError("closed"),
+            requests.exceptions.ChunkedEncodingError("broken"),
+        ):
+            with self.subTest(error=type(broken).__name__):
+                upstream = _FakeResponse([failed_line, broken])
+                output = list(
+                    RetryingResponsesResponse(upstream, mock.Mock(), 0, "req-tail").iter_lines()
+                )
+                self.assertEqual(output, [failed_line])
+
+    def test_nested_error_envelope_is_unwrapped_for_recovery(self):
+        """The live service nests the error object instead of using the flat,
+        documented shape (see anthropic_error_from_responses). Recovery must see
+        the same error dict either way, and neither shape may be replayed blind.
+        """
+        detail = {"code": "invalid_request_body", "message": "encrypted content"}
+        for shape, payload in (
+            ("flat", {"type": "error", **detail}),
+            ("nested", {"type": "error", "error": detail}),
+        ):
+            with self.subTest(shape=shape):
+                error_line = f"data: {json.dumps(payload)}".encode()
+                lines = [self._event("response.created"), error_line]
+                retry, recover = mock.Mock(), mock.Mock(return_value=None)
+                output = list(RetryingResponsesResponse(
+                    _FakeResponse(lines), retry, 3, "req-envelope", recover,
+                ).iter_lines())
+
+                self.assertEqual(output, lines)
+                received = recover.call_args.args[0]
+                self.assertEqual({key: received.get(key) for key in detail}, detail)
+                retry.assert_not_called()
+
+    def test_failed_recovery_never_discards_the_upstream_diagnostic(self):
+        """Recovery runs ``ensure_copilot_token`` first, which raises RuntimeError
+        on a bad token response -- and token trouble is what triggers this path.
+        The buffered diagnostic is the useful answer, so it must still arrive.
+        """
+        error_line = self._event("error", code="invalid_request_body", message="encrypted")
+        for failure in (RuntimeError("Failed to get Copilot token: HTTP 401"),
+                        requests.ConnectionError("offline")):
+            with self.subTest(error=type(failure).__name__):
+                def explode(_error, exc=failure):
+                    raise exc
+
+                output = list(RetryingResponsesResponse(
+                    _FakeResponse([error_line]), mock.Mock(), 0, "req-recover-fail", explode,
+                ).iter_lines())
+                self.assertEqual(output, [error_line])
 
     def test_compact_data_line_commits_output_before_failure(self):
         delta = b'data:{"type":"response.output_text.delta","delta":"partial"}'

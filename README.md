@@ -241,7 +241,8 @@ form exactly once per request, before any model output has been forwarded:
 - The cleaned request is retried once; the retry does not consume the connection-retry budget,
   and a second identical failure is returned to the client as-is.
 - Streaming recovery reads the diagnostic that can follow `response.failed` with `error: null`.
-  It also handles a standalone `error` or an error inside `response.failed`. It works even
+  It also handles a standalone `error` — in both the documented flat shape and the nested
+  `error` object the live service sends — or an error inside `response.failed`. It works even
   when `enable_responses_early_failure_retry` is false or `max_connection_retries` is zero.
 - Explicit invalid-request errors are not retried with the same input. Once text, reasoning,
   or tool-call output has been forwarded, the stream is never replayed.

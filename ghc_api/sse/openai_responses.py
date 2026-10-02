@@ -108,6 +108,19 @@ class RetryingResponsesResponse:
             return {}
         return event if isinstance(event, dict) else {}
 
+    @staticmethod
+    def _error_payload(event: Dict) -> Dict:
+        """Return the error object of a standalone ``error`` event.
+
+        The API reference documents a flat event, but the live service wraps
+        the error in a nested ``error`` object instead. Both shapes occur in
+        practice, which is why ``anthropic_error_from_responses`` has unwrapped
+        them the same way since the Anthropic bridge shipped. Matching only the
+        flat shape here would silently skip recovery on the nested one.
+        """
+        nested = event.get("error")
+        return nested if isinstance(nested, dict) else event
+
     def iter_lines(self) -> Iterator[bytes]:
         retries = 0
 
@@ -128,11 +141,13 @@ class RetryingResponsesResponse:
                     line = next(lines)
                 except StopIteration:
                     break
-                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
+                except requests.exceptions.RequestException:
                     if not early_failure:
                         raise
                     # A broken connection while reading the optional diagnostic
                     # must not discard the terminal failure already received.
+                    # Mid-stream breaks usually surface as ChunkedEncodingError
+                    # rather than ConnectionError, so catch the common base.
                     lines = iter(())
                     break
                 if self._current_response() is None:
@@ -154,7 +169,7 @@ class RetryingResponsesResponse:
                     buffered.clear()
                     continue
                 if event_type == "error":
-                    error = event
+                    error = self._error_payload(event)
                     terminal_error = True
                     break
                 if early_failure:
@@ -190,14 +205,27 @@ class RetryingResponsesResponse:
             if isinstance(error, dict) and self._error_response_factory is not None:
                 try:
                     retry_response = self._error_response_factory(error)
-                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
-                    # Keep the upstream diagnostic if recovery cannot connect.
-                    pass
+                except Exception as exc:
+                    # Recovery is best effort. A transport failure or a failed
+                    # token refresh (RuntimeError) must not discard the buffered
+                    # upstream diagnostic, which is the more useful answer --
+                    # and token trouble is exactly what triggers this path.
+                    print(
+                        f"[Stream Responses] Error recovery failed for request "
+                        f"{self._request_id}: {type(exc).__name__}: {exc}"
+                    )
+                    retry_response = None
 
             invalid_request = (
                 isinstance(error, dict)
-                and error.get("code") in self._INVALID_REQUEST_CODES
+                and (
+                    error.get("code") in self._INVALID_REQUEST_CODES
+                    or error.get("type") in self._INVALID_REQUEST_CODES
+                )
             )
+            # A diagnostic means upstream stated a reason, so replaying the same
+            # input mostly burns quota on a request that cannot succeed; only an
+            # unexplained failure (``error: null`` and no diagnostic) is replayed.
             generic_retry = (
                 retry_response is None and early_failure and not terminal_error
                 and not invalid_request and retries < self._max_retries
@@ -205,9 +233,13 @@ class RetryingResponsesResponse:
             if generic_retry:
                 try:
                     retry_response = self._response_factory()
-                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
+                except Exception as exc:
                     # The original response.failed is more useful to the
                     # downstream client than replacing it with an empty 504.
+                    print(
+                        f"[Stream Responses] Early-failure retry failed for request "
+                        f"{self._request_id}: {type(exc).__name__}: {exc}"
+                    )
                     retry_response = None
 
             if retry_response is not None and retry_response.ok:

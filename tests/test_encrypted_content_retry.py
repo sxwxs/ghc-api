@@ -423,7 +423,12 @@ class EncryptedContentStreamRetryTest(EncryptedContentTestCase):
                 "error": error if shape == "nested" else None,
             }})
         if shape != "nested":
-            events.append({"type": "error", **error})
+            # "envelope" is the nested shape the live service sends instead of
+            # the flat one the API reference documents.
+            events.append(
+                {"type": "error", "error": error} if shape == "envelope"
+                else {"type": "error", **error}
+            )
         return FakeStreamResponse(events)
 
     @staticmethod
@@ -458,7 +463,7 @@ class EncryptedContentStreamRetryTest(EncryptedContentTestCase):
 
     def test_recovers_stream_error_on_direct_immediate_and_pending_paths(self):
         for path in ("direct", "immediate", "pending"):
-            for shape in ("trailing", "nested", "standalone"):
+            for shape in ("trailing", "nested", "standalone", "envelope"):
                 with self.subTest(path=path, shape=shape):
                     cache.cache.clear()
                     counters.reset()
