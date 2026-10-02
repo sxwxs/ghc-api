@@ -163,13 +163,18 @@ anthropic_responses_model_profiles: # Per-model overrides of the profile above. 
   gpt-5.6-sol: copilot_responses_lite # ending in '*' is a prefix rule, so 'gpt-5.*'
                               # covers a whole family; the longest matching prefix wins.
 
-# Retry /v1/responses streams that fail before any output (enabled by default)
-enable_responses_early_failure_retry: true # Transparently retry a stream that returns
-                              # HTTP 200 then response.failed before any text, reasoning,
-                              # or tool call. Retries stop once real output has been sent
-                              # (never duplicates content) and are capped by
-                              # max_connection_retries. Each retry costs upstream quota.
-                              # Set false to disable.
+# Retry /v1/responses streams that fail before visible output (enabled by default)
+enable_responses_early_failure_retry: true # Retry response.failed or broken streams
+                              # (e.g. "Response ended prematurely"). Buffer the preamble
+                              # and encrypted-only reasoning with empty content/summary
+                              # up to 1 MiB; keepalives continue while buffering.
+                              # Text, visible reasoning, tool calls, unknown events, or
+                              # the buffer limit permanently disable retries, preventing
+                              # duplicate output. Capped by max_connection_retries;
+                              # 0 disables transient retries (and buffering when no
+                              # independent error recovery is enabled). Each retry
+                              # consumes upstream quota. Set false to disable this retry;
+                              # encrypted-content recovery remains independent.
 
 # Streaming reliability
 upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot request

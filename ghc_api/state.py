@@ -59,12 +59,13 @@ class State:
             "grok-*": "copilot_public_responses",
         }
 
-        # Copilot intermittently answers /v1/responses with HTTP 200 whose SSE body is
-        # just response.created followed by response.failed, before any model output.
-        # When enabled, such a stream is transparently retried (up to
-        # max_connection_retries) as long as nothing has been forwarded to the client
-        # yet. Explicit invalid-request diagnostics are not replayed unchanged.
-        # Enabled by default; encrypted-content recovery has its own opt-in flag.
+        # Retry /v1/responses failures before visible output. Buffer the preamble
+        # and encrypted-only reasoning (up to 1 MiB) so response.failed or transport
+        # errors can be transparently retried, capped by max_connection_retries.
+        # Text, visible reasoning, tool calls, unknown events, or the buffer limit
+        # permanently disable retries. Enabled by default; invalid-request
+        # diagnostics are not replayed unchanged.
+        # Encrypted-content recovery remains independent.
         self.enable_responses_early_failure_retry: bool = True
 
         # Retry settings
