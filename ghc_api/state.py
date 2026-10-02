@@ -63,8 +63,8 @@ class State:
         # just response.created followed by response.failed, before any model output.
         # When enabled, such a stream is transparently retried (up to
         # max_connection_retries) as long as nothing has been forwarded to the client
-        # yet. Enabled by default; it can be disabled to hand the upstream response
-        # object to the stream handler untouched (see ghc_api/sse/openai_responses.py).
+        # yet. Explicit invalid-request diagnostics are not replayed unchanged.
+        # Enabled by default; encrypted-content recovery has its own opt-in flag.
         self.enable_responses_early_failure_retry: bool = True
 
         # Retry settings
@@ -85,7 +85,8 @@ class State:
         self.responses_pre_header_grace: float = 0.5
         # When /v1/responses rejects a request because encrypted reasoning or tool
         # output content cannot be decrypted, clean the input and retry once instead
-        # of surfacing the 400. Lossy by design (see remove_encrypted_content_items),
+        # of surfacing the HTTP 400 or pre-output SSE error. Lossy by design
+        # (see remove_encrypted_content_items),
         # so it is opt-in.
         self.auto_remove_encrypted_content_on_parse_error: bool = False
         self.save_request_to_file: bool = False

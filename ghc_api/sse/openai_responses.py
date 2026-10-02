@@ -23,6 +23,11 @@ class RetryingResponsesResponse:
     non-output preamble so a fresh attempt can replace it transparently. Once
     any substantive event is seen, lines pass through immediately and retries
     are disabled so text and tool calls cannot be duplicated.
+
+    An optional error_response_factory can recover a specific upstream error
+    independently of the transient retry budget. It must bound its own retries.
+    Keep a trailing error diagnostic with the failed preamble so invalid input
+    is never blindly retried, and the original error survives failed recovery.
     """
 
     _PRE_OUTPUT_EVENTS = {
@@ -30,6 +35,8 @@ class RetryingResponsesResponse:
         "response.in_progress",
         "response.queued",
     }
+    _INVALID_REQUEST_CODES = ("invalid_request_body", "invalid_request_error")
+    _MAX_BUFFERED_BYTES = 256 * 1024
 
     def __init__(
         self,
@@ -37,11 +44,13 @@ class RetryingResponsesResponse:
         response_factory: Callable[[], requests.Response],
         max_retries: int,
         request_id: str,
+        error_response_factory: Optional[Callable[[Dict], Optional[requests.Response]]] = None,
     ) -> None:
         self._response = response
         self._response_factory = response_factory
         self._max_retries = max(0, max_retries)
         self._request_id = request_id
+        self._error_response_factory = error_response_factory
         self._lock = threading.Lock()
         self._closed = False
 
@@ -80,24 +89,62 @@ class RetryingResponsesResponse:
         return accepted
 
     @staticmethod
-    def _event_type(line) -> Optional[str]:
+    def _event(line) -> Optional[Dict]:
         if isinstance(line, bytes):
             try:
                 line = line.decode("utf-8")
             except UnicodeDecodeError:
                 return None
-        if not isinstance(line, str) or not line.startswith("data: "):
+        if not isinstance(line, str) or not line.startswith("data:"):
             return None
-        data = line[6:]
+        data = line[5:].lstrip(" ")
         if data == "[DONE]":
-            return "response.done"
+            return {"type": "response.done"}
         try:
             event = json.loads(data)
         except (json.JSONDecodeError, TypeError):
             # A malformed data payload is still downstream-visible output and
             # therefore commits the stream; represent it as an unknown event.
-            return ""
-        return event.get("type", "") if isinstance(event, dict) else ""
+            return {}
+        return event if isinstance(event, dict) else {}
+
+    @staticmethod
+    def _error_payload(event: Dict) -> Dict:
+        """Return the error object of a standalone ``error`` event.
+
+        The API reference documents a flat event, but the live service wraps
+        the error in a nested ``error`` object instead. Both shapes occur in
+        practice, which is why ``anthropic_error_from_responses`` has unwrapped
+        them the same way since the Anthropic bridge shipped. Matching only the
+        flat shape here would silently skip recovery on the nested one.
+        """
+        nested = event.get("error")
+        return nested if isinstance(nested, dict) else event
+
+    def _recover_from_http_error(self, response) -> Optional[requests.Response]:
+        """Offer error recovery a replay that upstream rejected in HTTP form.
+
+        The same rejection arrives either as a pre-output SSE failure or as an
+        HTTP 4xx, and the two can interleave across attempts. Dropping the HTTP
+        body here would leave recovery unattempted and send the client the
+        earlier, diagnostic-free ``response.failed`` instead.
+        """
+        if self._error_response_factory is None:
+            return None
+        try:
+            error = response.json().get("error")
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not isinstance(error, dict):
+            return None
+        try:
+            return self._error_response_factory(error)
+        except Exception as exc:
+            print(
+                f"[Stream Responses] Error recovery failed for request "
+                f"{self._request_id}: {type(exc).__name__}: {exc}"
+            )
+            return None
 
     def iter_lines(self) -> Iterator[bytes]:
         retries = 0
@@ -108,10 +155,26 @@ class RetryingResponsesResponse:
                 return
             lines = iter(response.iter_lines())
             buffered = []
+            buffered_bytes = 0
             output_started = False
             early_failure = False
+            terminal_error = False
+            error = None
 
-            for line in lines:
+            while True:
+                try:
+                    line = next(lines)
+                except StopIteration:
+                    break
+                except requests.exceptions.RequestException:
+                    if not early_failure:
+                        raise
+                    # A broken connection while reading the optional diagnostic
+                    # must not discard the terminal failure already received.
+                    # Mid-stream breaks usually surface as ChunkedEncodingError
+                    # rather than ConnectionError, so catch the common base.
+                    lines = iter(())
+                    break
                 if self._current_response() is None:
                     return
                 if output_started:
@@ -119,40 +182,118 @@ class RetryingResponsesResponse:
                     continue
 
                 buffered.append(line)
-                event_type = self._event_type(line)
-                if event_type == "response.failed":
-                    early_failure = True
+                buffered_bytes += len(line) + 1
+                event = self._event(line)
+                event_type = event.get("type", "") if event is not None else None
+                # Bound the preamble, including comments/diagnostics after a
+                # failure. Once anything is forwarded it cannot be replaced.
+                if buffered_bytes > self._MAX_BUFFERED_BYTES:
+                    output_started = True
+                    early_failure = False
+                    yield from buffered
+                    buffered.clear()
+                    continue
+                if event_type == "error":
+                    error = self._error_payload(event)
+                    terminal_error = True
                     break
+                if early_failure:
+                    # Copilot can put error=null on response.failed and send
+                    # the actual rejection in a following standalone error.
+                    # Read that diagnostic before deciding to replay history.
+                    if event_type is None:
+                        continue
+                    if event_type == "response.done":
+                        break
+                    # Unexpected content after failure must remain visible.
+                    early_failure = False
+                    output_started = True
+                    yield from buffered
+                    buffered.clear()
+                    continue
+                if event_type == "response.failed":
+                    failed = event.get("response") or {}
+                    if isinstance(failed, dict) and not failed.get("output"):
+                        early_failure = True
+                        error = failed.get("error")
+                        if isinstance(error, dict) and error:
+                            break
+                        continue
                 if event_type is not None and event_type not in self._PRE_OUTPUT_EVENTS:
                     output_started = True
                     yield from buffered
                     buffered.clear()
 
-            if early_failure and retries < self._max_retries:
+            retry_response = None
+            if self._current_response() is None:
+                return
+            if isinstance(error, dict) and self._error_response_factory is not None:
                 try:
-                    retry_response = self._response_factory()
-                except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError):
-                    # The original response.failed is more useful to the
-                    # downstream client than replacing it with an empty 504.
+                    retry_response = self._error_response_factory(error)
+                except Exception as exc:
+                    # Recovery is best effort. A transport failure or a failed
+                    # token refresh (RuntimeError) must not discard the buffered
+                    # upstream diagnostic, which is the more useful answer --
+                    # and token trouble is exactly what triggers this path.
+                    print(
+                        f"[Stream Responses] Error recovery failed for request "
+                        f"{self._request_id}: {type(exc).__name__}: {exc}"
+                    )
                     retry_response = None
 
-                if retry_response is not None and retry_response.ok:
-                    if not self._replace_response(response, retry_response):
-                        return
+            invalid_request = (
+                isinstance(error, dict)
+                and (
+                    error.get("code") in self._INVALID_REQUEST_CODES
+                    or error.get("type") in self._INVALID_REQUEST_CODES
+                )
+            )
+            # A diagnostic means upstream stated a reason, so replaying the same
+            # input mostly burns quota on a request that cannot succeed; only an
+            # unexplained failure (``error: null`` and no diagnostic) is replayed.
+            generic_retry = (
+                retry_response is None and early_failure and not terminal_error
+                and not invalid_request and retries < self._max_retries
+            )
+            if generic_retry:
+                try:
+                    retry_response = self._response_factory()
+                except Exception as exc:
+                    # The original response.failed is more useful to the
+                    # downstream client than replacing it with an empty 504.
+                    print(
+                        f"[Stream Responses] Early-failure retry failed for request "
+                        f"{self._request_id}: {type(exc).__name__}: {exc}"
+                    )
+                    retry_response = None
+
+                if retry_response is not None and not retry_response.ok:
+                    recovered = self._recover_from_http_error(retry_response)
+                    if recovered is not None:
+                        retry_response.close()
+                        retry_response = recovered
+                        # Recovery has its own one-shot budget; this attempt
+                        # must not be charged to the connection retries.
+                        generic_retry = False
+
+            if retry_response is not None and retry_response.ok:
+                if not self._replace_response(response, retry_response):
+                    return
+                if generic_retry:
                     retries += 1
                     print(
                         f"[Stream Responses] Retrying request {self._request_id} "
                         f"after an early stream failure ({retries}/{self._max_retries})"
                     )
-                    continue
+                continue
 
-                # The retry could not establish a valid SSE stream. Preserve
-                # the original response.failed event for the downstream client.
-                if retry_response is not None:
-                    retry_response.close()
+            # The retry could not establish a valid SSE stream. Preserve the
+            # original failure and diagnostic for the downstream client.
+            if retry_response is not None:
+                retry_response.close()
 
             yield from buffered
-            if early_failure:
+            if early_failure or terminal_error:
                 # Preserve any sentinel or diagnostic lines following the
                 # terminal failure on the final attempt.
                 yield from lines

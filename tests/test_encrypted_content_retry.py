@@ -1,7 +1,10 @@
 import contextlib
 import json
+import queue
 import unittest
 from unittest import mock
+
+import requests
 
 from ghc_api.app import create_app
 from ghc_api.cache import cache
@@ -56,6 +59,19 @@ class FakeResponse:
 
     def close(self):
         self.closed = True
+
+
+class FakeStreamResponse(FakeResponse):
+    def __init__(self, events):
+        super().__init__(200, {})
+        self.events = events
+
+    def iter_lines(self):
+        for event in self.events:
+            yield f"event: {event['type']}".encode()
+            yield f"data: {json.dumps(event)}".encode()
+            yield b""
+        yield b"data: [DONE]"
 
 
 class EncryptedContentHelpersTest(unittest.TestCase):
@@ -218,18 +234,23 @@ class EncryptedContentHelpersTest(unittest.TestCase):
         self.assertEqual(remove_encrypted_content_items("hello"), ("hello", 0))
 
 
-class EncryptedContentRouteRetryTest(unittest.TestCase):
+class EncryptedContentTestCase(unittest.TestCase):
     def setUp(self):
         self.saved_models = state.models
         self.saved_auto_remove = state.auto_remove_encrypted_content_on_parse_error
         self.saved_connection_retries = state.max_connection_retries
         self.saved_enable_auth = state.enable_auth
+        self.saved_early_retry = state.enable_responses_early_failure_retry
+        self.saved_keepalive = state.sse_keepalive_interval
+        self.saved_grace = state.responses_pre_header_grace
         state.models = {
             "data": [{"id": "gpt-test", "supported_endpoints": ["/responses"]}]
         }
         state.auto_remove_encrypted_content_on_parse_error = True
         state.max_connection_retries = 0
         state.enable_auth = False
+        state.enable_responses_early_failure_retry = False
+        state.sse_keepalive_interval = 0
         cache.cache.clear()
         counters.reset()
 
@@ -238,6 +259,9 @@ class EncryptedContentRouteRetryTest(unittest.TestCase):
         state.auto_remove_encrypted_content_on_parse_error = self.saved_auto_remove
         state.max_connection_retries = self.saved_connection_retries
         state.enable_auth = self.saved_enable_auth
+        state.enable_responses_early_failure_retry = self.saved_early_retry
+        state.sse_keepalive_interval = self.saved_keepalive
+        state.responses_pre_header_grace = self.saved_grace
         cache.cache.clear()
         counters.reset()
 
@@ -257,6 +281,8 @@ class EncryptedContentRouteRetryTest(unittest.TestCase):
         )
         return stack, post
 
+
+class EncryptedContentRouteRetryTest(EncryptedContentTestCase):
     def test_retries_nested_function_output_error_when_connection_retries_disabled(self):
         error_response = FakeResponse(400, FUNCTION_OUTPUT_ERROR)
         upstream_responses = [
@@ -368,6 +394,222 @@ class EncryptedContentRouteRetryTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(post.call_count, 1)
+
+
+class EncryptedContentStreamRetryTest(EncryptedContentTestCase):
+    """Reproduce an HTTP 200 rejection with the observed trailing diagnostic."""
+
+    @staticmethod
+    def _payload():
+        return {
+            "model": "gpt-test", "stream": True,
+            "input": [
+                {"type": "message", "role": "user", "content": "keep"},
+                {"type": "function_call", "call_id": "call_1", "name": "ls", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "call_1", "output": [
+                    {"type": "output_text", "text": "visible tool result"},
+                    {"type": "encrypted_content", "encrypted_content": "bad"},
+                ]},
+            ],
+        }
+
+    @staticmethod
+    def _failure(error=None, shape="trailing"):
+        error = FUNCTION_OUTPUT_ERROR["error"] if error is None else error
+        events = [{"type": "response.created", "response": {"status": "in_progress"}}]
+        if shape != "standalone":
+            events.append({"type": "response.failed", "response": {
+                "status": "failed", "output": [], "usage": None,
+                "error": error if shape == "nested" else None,
+            }})
+        if shape != "nested":
+            # "envelope" is the nested shape the live service sends instead of
+            # the flat one the API reference documents.
+            events.append(
+                {"type": "error", "error": error} if shape == "envelope"
+                else {"type": "error", **error}
+            )
+        return FakeStreamResponse(events)
+
+    @staticmethod
+    def _success():
+        return FakeStreamResponse([
+            {"type": "response.output_text.delta", "delta": "recovered"},
+            {"type": "response.completed", "response": {
+                "status": "completed", "usage": {"input_tokens": 10, "output_tokens": 2},
+            }},
+        ])
+
+    def _run_stream(self, upstream, payload=None, pending=False):
+        stack, post = self._patched_upstream(upstream)
+        if pending:
+            state.sse_keepalive_interval = 1
+            state.responses_pre_header_grace = 0
+
+            def delayed_headers(headers, payload):
+                response = post(json=payload, headers=headers, stream=True)
+                result = mock.Mock()
+                result.get.side_effect = [queue.Empty(), response]
+                return result
+
+            stack.enter_context(mock.patch(
+                "ghc_api.routes.openai._start_responses_post", side_effect=delayed_headers,
+            ))
+        with stack:
+            response = create_app().test_client().post(
+                "/v1/responses", json=payload or self._payload(), buffered=True,
+            )
+        return response, post
+
+    def test_recovers_stream_error_on_direct_immediate_and_pending_paths(self):
+        for path in ("direct", "immediate", "pending"):
+            for shape in ("trailing", "nested", "standalone", "envelope"):
+                with self.subTest(path=path, shape=shape):
+                    cache.cache.clear()
+                    counters.reset()
+                    state.sse_keepalive_interval = 0 if path == "direct" else 1
+                    state.responses_pre_header_grace = 1
+                    failure, success = self._failure(shape=shape), self._success()
+                    response, post = self._run_stream([failure, success], pending=path == "pending")
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(post.call_count, 2)
+                    self.assertIn(b"recovered", response.data)
+                    self.assertNotIn(b"response.failed", response.data)
+                    self.assertNotIn(b"invalid_request_body", response.data)
+                    sent = post.call_args_list[1].kwargs["json"]
+                    self.assertEqual(sent["input"][1], self._payload()["input"][1])
+                    self.assertEqual(sent["input"][2], {
+                        "type": "function_call_output", "call_id": "call_1",
+                        "output": [{"type": "output_text", "text": "visible tool result"}],
+                    })
+                    self.assertIn("encrypted_content", json.dumps(post.call_args_list[0].kwargs["json"]))
+                    self.assertTrue(failure.closed)
+                    self.assertTrue(success.closed)
+                    record = cache.get_recent_requests(1)[0]
+                    self.assertEqual(record["status_code"], 200)
+                    self.assertEqual(record["input_tokens"], 10)
+                    self.assertEqual(record["request_body"], sent)
+                    self.assertEqual(record["request_size"], len(json.dumps(sent)))
+                    self.assertEqual(record["original_request_body"], self._payload())
+                    self.assertEqual(counters.snapshot()["mod.encrypted_content_removal"], 1)
+
+    def test_invalid_input_is_not_replayed_with_recovery_disabled_or_inapplicable(self):
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 3
+        for case in ("disabled", "no-encrypted-input", "unrelated-error"):
+            with self.subTest(case=case):
+                state.auto_remove_encrypted_content_on_parse_error = case != "disabled"
+                payload = self._payload()
+                error = None
+                if case == "no-encrypted-input":
+                    payload["input"] = payload["input"][:1]
+                if case == "unrelated-error":
+                    error = {"code": "invalid_request_body", "message": "bad tool schema"}
+                response, post = self._run_stream([self._failure(error)], payload)
+                self.assertEqual(post.call_count, 1)
+                self.assertIn(b"invalid_request_body", response.data)
+                self.assertEqual(cache.get_recent_requests(1)[0]["status_code"], 502)
+
+    def test_recovery_happens_only_once_even_with_generic_retries_enabled(self):
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 3
+        response, post = self._run_stream([self._failure(), self._failure()])
+        self.assertEqual(post.call_count, 2)
+        self.assertIn(b"Encrypted function output", response.data)
+        self.assertEqual(cache.get_recent_requests(1)[0]["status_code"], 502)
+
+    def test_encrypted_recovery_and_transient_retries_have_independent_budgets(self):
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 1
+        for recovery_first in (False, True):
+            with self.subTest(recovery_first=recovery_first):
+                transient = FakeStreamResponse([
+                    {"type": "response.failed", "response": {"error": None}},
+                ])
+                failures = [self._failure(), transient] if recovery_first else [transient, self._failure()]
+                response, post = self._run_stream([*failures, self._success()])
+                self.assertEqual(post.call_count, 3)
+                self.assertIn(b"recovered", response.data)
+                self.assertNotIn("encrypted_content", json.dumps(post.call_args_list[-1].kwargs["json"]))
+
+    def test_http_recovery_cannot_be_repeated_by_stream_recovery(self):
+        for pending in (False, True):
+            with self.subTest(pending=pending):
+                counters.reset()
+                response, post = self._run_stream(
+                    [FakeResponse(400, FUNCTION_OUTPUT_ERROR), self._failure()], pending=pending,
+                )
+                self.assertEqual(post.call_count, 2)
+                self.assertIn(b"Encrypted function output", response.data)
+                self.assertEqual(counters.snapshot()["mod.encrypted_content_removal"], 1)
+
+    def test_recovery_never_replays_partial_output(self):
+        for output in (
+            {"type": "response.output_text.delta", "delta": "partial"},
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "function_call", "id": "fc_1", "call_id": "call_1"}},
+        ):
+            with self.subTest(output=output["type"]):
+                failure = self._failure()
+                failure.events.insert(1, output)
+                response, post = self._run_stream([failure])
+                self.assertEqual(post.call_count, 1)
+                self.assertIn(b"Encrypted function output", response.data)
+
+    def test_recovers_when_the_replay_surfaces_the_rejection_as_http_400(self):
+        """Upstream reports the same rejection as HTTP 400 or as a pre-output SSE
+        failure, and the forms can interleave across attempts. A diagnostic-free
+        ``response.failed`` triggers the transient replay, whose 400 is the first
+        time the real reason is stated -- so recovery has to see it. Dropping it
+        leaves the conversation stuck and sends the client ``error: null``.
+        """
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 1
+        transient = FakeStreamResponse([
+            {"type": "response.failed", "response": {"output": [], "error": None}},
+        ])
+        rejected = FakeResponse(400, FUNCTION_OUTPUT_ERROR)
+        response, post = self._run_stream([transient, rejected, self._success()])
+
+        self.assertEqual(post.call_count, 3)
+        self.assertIn(b"recovered", response.data)
+        self.assertNotIn(b"response.failed", response.data)
+        self.assertTrue(rejected.closed)
+        self.assertNotIn("encrypted_content", json.dumps(post.call_args_list[-1].kwargs["json"]))
+        self.assertEqual(counters.snapshot()["mod.encrypted_content_removal"], 1)
+        self.assertEqual(cache.get_recent_requests(1)[0]["status_code"], 200)
+
+    def test_http_rejection_of_a_replay_does_not_consume_the_retry_budget(self):
+        """Recovery keeps its own one-shot budget: the 400 replay is not charged
+        to max_connection_retries, and an unrecoverable 400 still falls back to
+        the buffered SSE failure rather than being replayed again.
+        """
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 1
+        transient = FakeStreamResponse([
+            {"type": "response.failed", "response": {"output": [], "error": None}},
+        ])
+        unrelated = FakeResponse(400, {"error": {"code": "invalid_request_body",
+                                                 "message": "bad tool schema"}})
+        response, post = self._run_stream([transient, unrelated])
+
+        self.assertEqual(post.call_count, 2)
+        self.assertIn(b"response.failed", response.data)
+        self.assertTrue(unrelated.closed)
+        self.assertEqual(counters.snapshot().get("mod.encrypted_content_removal", 0), 0)
+
+    def test_failed_recovery_preserves_the_original_diagnostic(self):
+        for retry in (FakeResponse(503, {"error": "unavailable"}), requests.ConnectionError("offline")):
+            with self.subTest(retry=type(retry).__name__):
+                failure = self._failure()
+                response, post = self._run_stream([failure, retry])
+                self.assertEqual(post.call_count, 2)
+                self.assertIn(b"Encrypted function output", response.data)
+                self.assertEqual(cache.get_recent_requests(1)[0]["status_code"], 502)
+                self.assertTrue(failure.closed)
+                if isinstance(retry, FakeResponse):
+                    self.assertTrue(retry.closed)
 
 
 if __name__ == "__main__":

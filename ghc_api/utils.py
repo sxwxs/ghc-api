@@ -367,6 +367,11 @@ def is_encrypted_content_parse_error(status_code: int, response_text: str) -> bo
     except (AttributeError, json.JSONDecodeError, TypeError):
         return False
 
+    return is_encrypted_content_error(error)
+
+
+def is_encrypted_content_error(error: Any) -> bool:
+    """Match the upstream error object shared by HTTP and SSE failures."""
     if not isinstance(error, dict) or error.get("code") != "invalid_request_body":
         return False
 

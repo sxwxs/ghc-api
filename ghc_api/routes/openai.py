@@ -37,6 +37,7 @@ from ..streaming import reconstruct_openai_response_from_chunks
 from ..translator import translate_model_name
 from ..utils import (
     get_client_ip,
+    is_encrypted_content_error,
     is_encrypted_content_parse_error,
     log_connection_retry,
     log_error_request,
@@ -154,9 +155,14 @@ def _build_responses_stream_handler(
     client_ip: str,
     user_id: str,
     enable_vision: bool,
+    encrypted_content_retry_attempted: bool = False,
 ) -> OpenAIResponsesStreamHandler:
     upstream_response = response
-    if state.enable_responses_early_failure_retry:
+    recover_encrypted_content = (
+        state.auto_remove_encrypted_content_on_parse_error
+        and not encrypted_content_retry_attempted
+    )
+    if state.enable_responses_early_failure_retry or recover_encrypted_content:
         def retry_streaming_response():
             ensure_copilot_token()
             retry_headers = get_copilot_headers(enable_vision)
@@ -168,14 +174,39 @@ def _build_responses_stream_handler(
                 timeout=state.upstream_read_timeout,
             )
 
+        def retry_encrypted_content(error):
+            nonlocal payload, encrypted_content_retry_attempted
+            if encrypted_content_retry_attempted or not is_encrypted_content_error(error):
+                return None
+            cleaned_input, removed_count = remove_encrypted_content_items(payload.get("input"))
+            if not removed_count:
+                return None
+
+            encrypted_content_retry_attempted = True
+            payload = {**payload, "input": cleaned_input}
+            handler.request_body_for_cache = payload
+            handler.request_size = len(json.dumps(payload))
+            cache.update_request_state(
+                request_id, cache.STATE_SENDING,
+                request_body=payload, request_size=handler.request_size,
+            )
+            counters.incr("mod.encrypted_content_removal")
+            print(
+                f"[Stream Responses] Retrying request {request_id} after removing "
+                f"encrypted content from {removed_count} input items; "
+                "encrypted context is lost."
+            )
+            return retry_streaming_response()
+
         upstream_response = RetryingResponsesResponse(
             response=response,
             response_factory=retry_streaming_response,
-            max_retries=state.max_connection_retries,
+            max_retries=state.max_connection_retries if state.enable_responses_early_failure_retry else 0,
             request_id=request_id,
+            error_response_factory=retry_encrypted_content if recover_encrypted_content else None,
         )
 
-    return OpenAIResponsesStreamHandler(
+    handler = OpenAIResponsesStreamHandler(
         response=upstream_response,
         request_id=request_id,
         request_size=request_size,
@@ -188,6 +219,7 @@ def _build_responses_stream_handler(
         client_ip=client_ip,
         user_id=user_id,
     )
+    return handler
 
 
 def _stream_pending_responses_request(
@@ -289,6 +321,7 @@ def _stream_pending_responses_request(
                         start_time, original_model, translated_model,
                         original_request_body, request_headers, client_ip, user_id,
                         enable_vision,
+                        encrypted_content_retry_attempted=encrypted_content_retry_attempted,
                     )
                     response = None  # ownership transferred to the stream handler
                     handler._cache_seeded = True
@@ -1815,6 +1848,7 @@ def responses():
                         start_time, original_model, translated_model,
                         original_request_body, request_headers, client_ip, user_id,
                         enable_vision,
+                        encrypted_content_retry_attempted=encrypted_content_retry_attempted,
                     ).stream()
                 if not response.ok:
                     print(f"Received error response for request {request_id}: {response.status_code} - {response.text}")
