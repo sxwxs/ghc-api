@@ -220,11 +220,14 @@ anthropic_responses_model_profiles:
 # thinking.signature envelopes. No replay database, session identity, or
 # encryption key is required.
 
-# If true, transparently retry a /v1/responses stream that returns HTTP 200 but emits
-# response.failed before any model output (text, reasoning, or tool call). Retries stop
-# as soon as real output has been forwarded, so content is never duplicated, and are
-# capped by max_connection_retries. Each retry is a fresh upstream request and consumes
-# quota. Invalid-request diagnostics are not retried with unchanged input. Enabled by
+# If true, transparently retry /v1/responses streams that emit response.failed or
+# break (e.g. "Response ended prematurely") before visible output. The preamble and
+# encrypted-only reasoning with empty content/summary are buffered up to 1 MiB; client
+# keepalives continue while buffering. Text, visible reasoning, tool calls, unknown
+# events, or exceeding that limit permanently disable retries, so content is never
+# duplicated. Retries are capped by max_connection_retries; 0 disables transient
+# retries and buffering unless independent error recovery is enabled. Invalid-request
+# diagnostics are not retried unchanged. Each retry consumes upstream quota. Enabled by
 # default; set false to disable this retry. Encrypted-content recovery is independent.
 enable_responses_early_failure_retry: true
 
