@@ -121,6 +121,31 @@ class RetryingResponsesResponse:
         nested = event.get("error")
         return nested if isinstance(nested, dict) else event
 
+    def _recover_from_http_error(self, response) -> Optional[requests.Response]:
+        """Offer error recovery a replay that upstream rejected in HTTP form.
+
+        The same rejection arrives either as a pre-output SSE failure or as an
+        HTTP 4xx, and the two can interleave across attempts. Dropping the HTTP
+        body here would leave recovery unattempted and send the client the
+        earlier, diagnostic-free ``response.failed`` instead.
+        """
+        if self._error_response_factory is None:
+            return None
+        try:
+            error = response.json().get("error")
+        except (AttributeError, TypeError, ValueError):
+            return None
+        if not isinstance(error, dict):
+            return None
+        try:
+            return self._error_response_factory(error)
+        except Exception as exc:
+            print(
+                f"[Stream Responses] Error recovery failed for request "
+                f"{self._request_id}: {type(exc).__name__}: {exc}"
+            )
+            return None
+
     def iter_lines(self) -> Iterator[bytes]:
         retries = 0
 
@@ -241,6 +266,15 @@ class RetryingResponsesResponse:
                         f"{self._request_id}: {type(exc).__name__}: {exc}"
                     )
                     retry_response = None
+
+                if retry_response is not None and not retry_response.ok:
+                    recovered = self._recover_from_http_error(retry_response)
+                    if recovered is not None:
+                        retry_response.close()
+                        retry_response = recovered
+                        # Recovery has its own one-shot budget; this attempt
+                        # must not be charged to the connection retries.
+                        generic_retry = False
 
             if retry_response is not None and retry_response.ok:
                 if not self._replace_response(response, retry_response):

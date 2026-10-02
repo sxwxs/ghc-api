@@ -244,6 +244,8 @@ form exactly once per request, before any model output has been forwarded:
   It also handles a standalone `error` — in both the documented flat shape and the nested
   `error` object the live service sends — or an error inside `response.failed`. It works even
   when `enable_responses_early_failure_retry` is false or `max_connection_retries` is zero.
+- The two forms can interleave: when a diagnostic-free early failure is replayed and that
+  replay returns the HTTP-form rejection, recovery still runs on it.
 - Explicit invalid-request errors are not retried with the same input. Once text, reasoning,
   or tool-call output has been forwarded, the stream is never replayed.
 

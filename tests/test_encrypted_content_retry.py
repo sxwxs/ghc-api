@@ -557,6 +557,48 @@ class EncryptedContentStreamRetryTest(EncryptedContentTestCase):
                 self.assertEqual(post.call_count, 1)
                 self.assertIn(b"Encrypted function output", response.data)
 
+    def test_recovers_when_the_replay_surfaces_the_rejection_as_http_400(self):
+        """Upstream reports the same rejection as HTTP 400 or as a pre-output SSE
+        failure, and the forms can interleave across attempts. A diagnostic-free
+        ``response.failed`` triggers the transient replay, whose 400 is the first
+        time the real reason is stated -- so recovery has to see it. Dropping it
+        leaves the conversation stuck and sends the client ``error: null``.
+        """
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 1
+        transient = FakeStreamResponse([
+            {"type": "response.failed", "response": {"output": [], "error": None}},
+        ])
+        rejected = FakeResponse(400, FUNCTION_OUTPUT_ERROR)
+        response, post = self._run_stream([transient, rejected, self._success()])
+
+        self.assertEqual(post.call_count, 3)
+        self.assertIn(b"recovered", response.data)
+        self.assertNotIn(b"response.failed", response.data)
+        self.assertTrue(rejected.closed)
+        self.assertNotIn("encrypted_content", json.dumps(post.call_args_list[-1].kwargs["json"]))
+        self.assertEqual(counters.snapshot()["mod.encrypted_content_removal"], 1)
+        self.assertEqual(cache.get_recent_requests(1)[0]["status_code"], 200)
+
+    def test_http_rejection_of_a_replay_does_not_consume_the_retry_budget(self):
+        """Recovery keeps its own one-shot budget: the 400 replay is not charged
+        to max_connection_retries, and an unrecoverable 400 still falls back to
+        the buffered SSE failure rather than being replayed again.
+        """
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 1
+        transient = FakeStreamResponse([
+            {"type": "response.failed", "response": {"output": [], "error": None}},
+        ])
+        unrelated = FakeResponse(400, {"error": {"code": "invalid_request_body",
+                                                 "message": "bad tool schema"}})
+        response, post = self._run_stream([transient, unrelated])
+
+        self.assertEqual(post.call_count, 2)
+        self.assertIn(b"response.failed", response.data)
+        self.assertTrue(unrelated.closed)
+        self.assertEqual(counters.snapshot().get("mod.encrypted_content_removal", 0), 0)
+
     def test_failed_recovery_preserves_the_original_diagnostic(self):
         for retry in (FakeResponse(503, {"error": "unavailable"}), requests.ConnectionError("offline")):
             with self.subTest(retry=type(retry).__name__):
