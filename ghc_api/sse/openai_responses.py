@@ -18,11 +18,11 @@ from .base import SSEStreamHandler
 class RetryingResponsesResponse:
     """Replay a Responses request when it fails before producing output.
 
-    Copilot occasionally returns a successful HTTP response whose SSE body is
-    just ``response.created`` followed by ``response.failed``. Buffer only that
-    non-output preamble so a fresh attempt can replace it transparently. Once
-    any substantive event is seen, lines pass through immediately and retries
-    are disabled so text and tool calls cannot be duplicated.
+    Buffer the non-output preamble and encrypted-only reasoning with empty
+    content/summary so failures and transport errors can be replaced before
+    visible output. Text, visible reasoning, tool calls, unknown events, or the
+    1 MiB buffer limit commit the stream and permanently disable retries.
+    The outer handler continues client keepalives while this iterator buffers.
 
     An optional error_response_factory can recover a specific upstream error
     independently of the transient retry budget. It must bound its own retries.
@@ -36,7 +36,12 @@ class RetryingResponsesResponse:
         "response.queued",
     }
     _INVALID_REQUEST_CODES = ("invalid_request_body", "invalid_request_error")
-    _MAX_BUFFERED_BYTES = 256 * 1024
+    _MAX_BUFFERED_BYTES = 1024 * 1024
+    _TRANSPORT_ERRORS = (
+        requests.exceptions.ChunkedEncodingError,
+        requests.exceptions.ConnectionError,
+        requests.exceptions.ReadTimeout,
+    )
 
     def __init__(
         self,
@@ -45,12 +50,14 @@ class RetryingResponsesResponse:
         max_retries: int,
         request_id: str,
         error_response_factory: Optional[Callable[[Dict], Optional[requests.Response]]] = None,
+        max_buffer_bytes: int = 1024 * 1024,
     ) -> None:
         self._response = response
         self._response_factory = response_factory
         self._max_retries = max(0, max_retries)
         self._request_id = request_id
         self._error_response_factory = error_response_factory
+        self._max_buffer_bytes = max(0, max_buffer_bytes)
         self._lock = threading.Lock()
         self._closed = False
 
@@ -94,7 +101,7 @@ class RetryingResponsesResponse:
             try:
                 line = line.decode("utf-8")
             except UnicodeDecodeError:
-                return None
+                return {}
         if not isinstance(line, str) or not line.startswith("data:"):
             return None
         data = line[5:].lstrip(" ")
@@ -146,6 +153,22 @@ class RetryingResponsesResponse:
             )
             return None
 
+    @staticmethod
+    def _is_hidden_reasoning(event: Dict) -> bool:
+        if event.get("type") not in (
+            "response.output_item.added", "response.output_item.done",
+        ):
+            return False
+        item = event.get("item")
+        return (
+            isinstance(item, dict)
+            and item.get("type") == "reasoning"
+            and isinstance(item.get("encrypted_content"), str)
+            and bool(item["encrypted_content"])
+            and item.get("content") in (None, [])
+            and item.get("summary") in (None, [])
+        )
+
     def iter_lines(self) -> Iterator[bytes]:
         retries = 0
 
@@ -154,21 +177,43 @@ class RetryingResponsesResponse:
             if response is None:
                 return
             lines = iter(response.iter_lines())
+            if retries >= self._max_retries and self._error_response_factory is None:
+                terminal_failure_seen = False
+                try:
+                    for line in lines:
+                        if self._current_response() is None:
+                            return
+                        event = self._event(line)
+                        if event is not None and event.get("type") == "response.failed":
+                            terminal_failure_seen = True
+                        yield line
+                except requests.exceptions.RequestException:
+                    if not terminal_failure_seen:
+                        raise
+                return
             buffered = []
             buffered_bytes = 0
             output_started = False
             early_failure = False
             terminal_error = False
             error = None
+            transport_error = None
 
             while True:
                 try:
                     line = next(lines)
                 except StopIteration:
                     break
-                except requests.exceptions.RequestException:
-                    if not early_failure:
+                except requests.exceptions.RequestException as exc:
+                    if self._current_response() is None:
+                        return
+                    if output_started:
                         raise
+                    if not early_failure:
+                        if not isinstance(exc, self._TRANSPORT_ERRORS) or retries >= self._max_retries:
+                            raise
+                        transport_error = exc
+                        early_failure = True
                     # A broken connection while reading the optional diagnostic
                     # must not discard the terminal failure already received.
                     # Mid-stream breaks usually surface as ChunkedEncodingError
@@ -182,12 +227,12 @@ class RetryingResponsesResponse:
                     continue
 
                 buffered.append(line)
-                buffered_bytes += len(line) + 1
+                buffered_bytes += len(line if isinstance(line, bytes) else line.encode("utf-8")) + 1
                 event = self._event(line)
                 event_type = event.get("type", "") if event is not None else None
                 # Bound the preamble, including comments/diagnostics after a
                 # failure. Once anything is forwarded it cannot be replaced.
-                if buffered_bytes > self._MAX_BUFFERED_BYTES:
+                if buffered_bytes > self._max_buffer_bytes:
                     output_started = True
                     early_failure = False
                     yield from buffered
@@ -219,7 +264,8 @@ class RetryingResponsesResponse:
                         if isinstance(error, dict) and error:
                             break
                         continue
-                if event_type is not None and event_type not in self._PRE_OUTPUT_EVENTS:
+                if (event_type is not None and event_type not in self._PRE_OUTPUT_EVENTS
+                        and not self._is_hidden_reasoning(event)):
                     output_started = True
                     yield from buffered
                     buffered.clear()
@@ -293,6 +339,8 @@ class RetryingResponsesResponse:
                 retry_response.close()
 
             yield from buffered
+            if transport_error is not None:
+                raise transport_error
             if early_failure or terminal_error:
                 # Preserve any sentinel or diagnostic lines following the
                 # terminal failure on the final attempt.
@@ -319,6 +367,8 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._item_ids: Dict[int, str] = {}
+        self._next_sequence_number = 0
+        self._error_response_body: Optional[Dict] = None
 
     def _normalize_id(self, output_index, value: Dict, field: str) -> Dict:
         """Keep the first upstream ID for an output slot, without inventing IDs.
@@ -368,6 +418,9 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
         yield (event_type, raw_data if normalized is event else json.dumps(normalized, ensure_ascii=False))
 
     def on_event(self, event_type: str, event: Dict) -> None:
+        sequence_number = event.get("sequence_number")
+        if type(sequence_number) is int:
+            self._next_sequence_number = max(self._next_sequence_number, sequence_number + 1)
         if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
             usage = resp.get("usage", {}) or {}
@@ -387,3 +440,35 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
             # ghc-api would record the failure as 200/completed.
             self.error_occurred = True
             self.status_code = 502
+
+    def _format_error(self, exc: Exception, code: str) -> str:
+        message = str(exc)
+        self._error_response_body = {"error": {
+            "type": type(exc).__name__, "code": code, "message": message,
+        }}
+        event = {
+            "type": "error",
+            "code": code,
+            "message": message,
+            "param": None,
+            "sequence_number": self._next_sequence_number,
+        }
+        return f"event: error\ndata: {json.dumps(event)}\n\n"
+
+    def _format_transport_error(self, exc: Exception) -> str:
+        return self._format_error(exc, "upstream_connection_error")
+
+    def _format_generic_error(self, exc: Exception) -> str:
+        code = (
+            "upstream_stream_error"
+            if isinstance(exc, requests.exceptions.ChunkedEncodingError)
+            else "proxy_error"
+        )
+        return self._format_error(exc, code)
+
+    def extra_cache_fields(self) -> Dict:
+        # Keep upstream raw_events untouched; store proxy-generated diagnostics
+        # separately so request JSONL logs retain the actual exception.
+        if self._error_response_body is not None:
+            return {"response_body": self._error_response_body}
+        return {}
