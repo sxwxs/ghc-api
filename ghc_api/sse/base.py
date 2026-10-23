@@ -371,7 +371,8 @@ class SSEStreamHandler:
             return
         except Exception as e:
             self.error_occurred = True
-            self.status_code = 500
+            # A truncated upstream HTTP body is a bad gateway, not a proxy bug.
+            self.status_code = 502 if isinstance(e, requests.exceptions.ChunkedEncodingError) else 500
             print(f"{self.log_prefix} Error for request {self.request_id}: {type(e).__name__}: {e}")
             try:
                 yield self._format_generic_error(e)
