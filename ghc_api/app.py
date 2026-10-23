@@ -18,9 +18,10 @@ from .state import state
 
 
 # Paths that require an approved user token when state.enable_auth is True.
-# Everything not in this set bypasses auth at the Flask layer (dashboard,
-# /signup, /api/users/*, /agent, static files). Production deployments are
-# expected to put nginx (or equivalent) in front to gate admin paths.
+# Dynamic model detail routes and raw catalog slash variants are also protected
+# by endpoint in _auth_gate. Other paths bypass auth at the Flask layer
+# (dashboard, /signup, /api/users/*, /agent, static files). Production deployments
+# are expected to put nginx (or equivalent) in front to gate admin paths.
 PROTECTED_PATHS = frozenset({
     "/v1/chat/completions",
     "/chat/completions",
@@ -60,7 +61,9 @@ def create_app() -> Flask:
             g.user_id = ANONYMOUS_USER_ID
             return None
 
-        if request.path not in PROTECTED_PATHS:
+        if request.path not in PROTECTED_PATHS and request.endpoint not in {
+            "openai.retrieve_model", "openai.list_models_full",
+        }:
             g.user_id = ANONYMOUS_USER_ID
             return None
 

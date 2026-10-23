@@ -14,10 +14,16 @@ POST /proxy/example-llm/v1/chat/completions
 POST /proxy/example-llm/v1/messages
 POST /proxy/example-llm/v1/systemone
 GET  /proxy/example-llm/v1/models
+GET  /proxy/example-llm/v1/models/<model_id>
 GET  /proxy/models
 ```
 
 `GET /proxy/models` is a first-party discovery catalog used by the built-in `/chat` page. It adds the profile name and profile base URL to each public model entry without exposing upstream URLs, headers, credentials, or affinity values.
+
+Both model lists and the single-model route use the shared [model metadata
+schema](docs/MODEL_METADATA.md), including context and output limits, input
+types, and reasoning support. A detail response is the same object as its list
+entry. Unknown models return HTTP 404 with `error.code: "model_not_found"`.
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 

@@ -13,6 +13,7 @@ from flask import Blueprint, Response, g, jsonify, request
 
 from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
 from ..cache import cache
+from ..model_metadata import normalize_model_metadata
 from ..proxy import ProxyRequestError, ProxyRuntime
 from ..proxy.config import (
     NON_STREAMING_APIS,
@@ -467,12 +468,15 @@ def _model_data(
         "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
         "owned_by": "configured-proxy",
         "display_name": model.display_name,
+        "model_type": "decision" if supported_endpoints == ["/systemone"] else "chat",
+        "streaming": False if supported_endpoints == ["/systemone"] else None,
         "supported_endpoints": supported_endpoints,
         "reasoning": model.reasoning,
         "input": list(model.input_types),
         "context_window": model.context_window,
         "max_output_tokens": model.max_output_tokens,
     }
+    data.update(normalize_model_metadata(data))
     if include_profile:
         data["profile"] = profile_name
         data["base_url"] = f"/proxy/{profile_name}/v1"
@@ -507,12 +511,20 @@ def proxy_model_catalog():
 
 
 @proxy_bp.route("/proxy/<profile_name>/v1/models", methods=["GET"])
-def proxy_models(profile_name: str):
+@proxy_bp.route("/proxy/<profile_name>/v1/models/<path:model_id>", methods=["GET"])
+def proxy_models(profile_name: str, model_id: Optional[str] = None):
     profile = proxy_runtime.registry.get_profile(profile_name)
     if profile is None:
         if proxy_runtime.registry.last_error:
             return _error("The configured proxy is unavailable because its private configuration is invalid.", "proxy_config_error", 503)
         return _error("Configured proxy profile not found.", "proxy_not_found", 404)
+
+    if model_id is not None:
+        model = profile.models.get(model_id)
+        data = _model_data(profile_name, profile, model) if model is not None else None
+        if data is None:
+            return _error(f"Model '{model_id}' not found.", "model_not_found", 404, param="model")
+        return jsonify(data)
 
     models = []
     for model in profile.models.values():

@@ -701,6 +701,8 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
 
         entry = next(item for item in catalog["data"] if item["id"] == "decision-only")
         self.assertEqual(entry["supported_endpoints"], ["/systemone"])
+        self.assertEqual(entry["model_type"], "decision")
+        self.assertIs(entry["streaming"], False)
         self.assertEqual(rejected.status_code, 400)
         self.assertEqual(rejected.get_json()["error"]["code"], "unsupported_model")
 
@@ -1012,6 +1014,29 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertNotIn("headers", model)
         self.assertNotIn("upstream_url", model)
 
+    def test_model_detail_matches_list_and_exposes_only_public_metadata(self):
+        with self.app.test_client() as client:
+            listing = client.get("/proxy/demo-profile/v1/models")
+            detail = client.get("/proxy/demo-profile/v1/models/demo-model")
+            missing = client.get("/proxy/demo-profile/v1/models/missing")
+            missing_profile = client.get("/proxy/missing/v1/models/demo-model")
+
+        self.assertEqual(detail.status_code, 200)
+        model = detail.get_json()
+        self.assertEqual(model, listing.get_json()["data"][0])
+        self.assertEqual(model["context_window"], 64000)
+        self.assertEqual(model["max_output_tokens"], 4096)
+        self.assertEqual(model["input"], ["text"])
+        self.assertIs(model["reasoning"], True)
+        for field in ("max_input_tokens", "reasoning_efforts", "tool_calls", "streaming", "capabilities"):
+            self.assertIsNone(model[field], field)
+        for private in ("headers", "upstream_url", "upstream_model", "auth", "affinity"):
+            self.assertNotIn(private, model)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json()["error"]["code"], "model_not_found")
+        self.assertEqual(missing_profile.status_code, 404)
+        self.assertEqual(missing_profile.get_json()["error"]["code"], "proxy_not_found")
+
     def test_empty_success_response_becomes_bad_gateway(self):
         upstream = FakeResponse(payload=None, content=b"")
 
@@ -1071,10 +1096,11 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         )
         with mock.patch.object(proxy_routes, "require_auth", return_value=denied) as require:
             with self.app.test_client() as client:
-                response = client.get("/proxy/models")
+                for path in ("/proxy/models", "/proxy/demo-profile/v1/models/demo-model"):
+                    with self.subTest(path=path):
+                        self.assertEqual(client.get(path).status_code, 401)
 
-        self.assertEqual(response.status_code, 401)
-        require.assert_called_once()
+        self.assertEqual(require.call_count, 2)
         self.assertNotIn("/proxy/demo-profile/v1/models", PROTECTED_PATHS)
 
 

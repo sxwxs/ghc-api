@@ -25,6 +25,7 @@ from ..auth import redact_auth_headers
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support
+from ..model_metadata import normalize_model_metadata
 from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
 from ..sse.keepalive import (
     BackgroundResult,
@@ -1206,42 +1207,78 @@ def _normalize_responses_tool_descriptions(payload: Dict) -> int:
     return normalized_count
 
 
+def _public_model_data(model: Dict) -> Dict:
+    return {
+        "id": model["id"],
+        "object": "model",
+        "type": "model",
+        "created": 0,
+        "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
+        "owned_by": model.get("vendor", "unknown"),
+        "display_name": model.get("name", model["id"]),
+        **normalize_model_metadata(model),
+    }
+
+
+def _load_model_catalog():
+    """Use the cached catalog; only contact Copilot when it has not loaded."""
+    from ..api_helpers import fetch_models
+
+    if state.models is None and not fetch_models():
+        raise RuntimeError("Failed to fetch models from the Copilot API")
+    if not isinstance(state.models, dict) or not isinstance(state.models.get("data"), list):
+        raise RuntimeError("Invalid model catalog from the Copilot API")
+    return state.models["data"]
+
+
+def _model_catalog_error(error):
+    return jsonify({"error": {
+        "message": str(error),
+        "type": "upstream_error",
+        "code": "model_catalog_unavailable",
+    }}), 502
+
+
 @openai_bp.route("/v1/models", methods=["GET"])
 @openai_bp.route("/models", methods=["GET"])
 def list_models():
-    """List available models"""
-    from ..api_helpers import fetch_models
-
+    """List available models with limits and capabilities."""
     try:
-        ensure_copilot_token()
-        if not state.models:
-            fetch_models()
-
-        models = [
-            {
-                "id": m["id"],
-                "object": "model",
-                "type": "model",
-                "created": 0,
-                "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
-                "owned_by": m.get("vendor", "unknown"),
-                "display_name": m.get("name", m["id"]),
-            }
-            for m in state.models.get("data", [])
-        ]
-
         return jsonify({
             "object": "list",
-            "data": models,
+            "data": [_public_model_data(model) for model in _load_model_catalog()],
             "has_more": False,
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _model_catalog_error(e)
 
-@openai_bp.route("/v1/models/full/", methods=["GET"])
-@openai_bp.route("/models/full/", methods=["GET"])
+
+@openai_bp.route("/v1/models/<path:model_id>", methods=["GET"])
+@openai_bp.route("/models/<path:model_id>", methods=["GET"])
+def retrieve_model(model_id: str):
+    """Return the same public metadata as the list for an exact model id."""
+    try:
+        model = next((model for model in _load_model_catalog() if model.get("id") == model_id), None)
+        if model is None:
+            return jsonify({"error": {
+                "message": f"Model '{model_id}' not found.",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }}), 404
+        return jsonify(_public_model_data(model))
+    except Exception as e:
+        return _model_catalog_error(e)
+
+
+@openai_bp.route("/v1/models/full/", methods=["GET"], strict_slashes=False)
+@openai_bp.route("/models/full/", methods=["GET"], strict_slashes=False)
 def list_models_full():
-    return jsonify(state.models)
+    try:
+        _load_model_catalog()
+        return jsonify(state.models)
+    except Exception as e:
+        return _model_catalog_error(e)
 
 
 @openai_bp.route("/v1/models/full/refresh", methods=["POST"])
