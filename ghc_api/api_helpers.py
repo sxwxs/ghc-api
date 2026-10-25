@@ -349,6 +349,26 @@ def supports_responses_api(model_id: str) -> bool:
     return "/responses" in supported_endpoints or "/v1/responses" in supported_endpoints
 
 
+def supports_responses_via_chat_completions(model_id: str) -> bool:
+    """Gemini models with native Chat Completions can use the Responses bridge.
+
+    Keep this separate from native Responses capability: other routes use
+    ``supports_responses_api`` to choose their upstream wire protocol.
+    """
+    if not isinstance(model_id, str) or not model_id.lower().startswith("gemini-"):
+        return False
+    if not state.models or not state.models.get("data"):
+        return False
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if not model:
+        return False
+    endpoints = model.get("supported_endpoints", []) or []
+    return "/chat/completions" in endpoints or (
+        "/v1/chat/completions" in endpoints
+        and not is_configured_chat_completions_support_added(state.models, model_id)
+    )
+
+
 _BUILTIN_ANTHROPIC_RESPONSES_MODEL_PROFILES = {
     # Copilot's GPT backend accepts the private Responses-Lite dialect, where
     # function tools are carried in an ``additional_tools`` input item. xAI's

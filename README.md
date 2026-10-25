@@ -34,6 +34,20 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 - [Responses pre-header keepalive](docs/decisions/RESPONSES_PRE_HEADER_KEEPALIVE.md) - review notes and decisions behind the `/v1/responses` pre-header keepalive (PR #42): why upstream errors keep their HTTP status, why the synthetic event is `error`, and what is still open
 
+### Gemini through the Responses API
+
+Gemini models advertised by Copilot with Chat Completions support also accept
+`POST /v1/responses` (and `/responses`). ghc-api translates requests through
+Copilot's `/chat/completions` backend and returns Responses JSON or streaming
+events. No configuration change is needed. Models with native Responses support
+continue to use that endpoint.
+
+The bridge supports text, image URLs, function tools and tool results, structured
+JSON output, and token usage. Send the complete conversation in `input` for each
+request. Server-side conversation state (`previous_response_id`, `conversation`),
+background execution, file inputs, and tools other than functions are unsupported
+and return HTTP 400. Responses reasoning items in replayed history are omitted.
+
 ### Responses streaming item IDs
 
 Copilot can return different opaque IDs for the same output item in successive

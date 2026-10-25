@@ -20,11 +20,17 @@ from ..api_helpers import (
     is_configured_chat_completions_support_added,
     supports_embeddings_api,
     supports_responses_api,
+    supports_responses_via_chat_completions,
 )
 from ..auth import redact_auth_headers
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support
+from ..responses_chat import (
+    ChatCompletionResponsesAdapter,
+    ResponsesChatRequestError,
+    responses_to_chat_payload,
+)
 from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
 from ..sse.keepalive import (
     BackgroundResult,
@@ -54,15 +60,32 @@ def _current_user_id() -> str:
     return getattr(g, "user_id", "anonymous") or "anonymous"
 
 
+def _post_responses_request(headers: Dict, payload: Dict, stream: bool):
+    """Prefer native Responses; translate Gemini requests through native chat."""
+    via_chat = (
+        not supports_responses_api(payload.get("model"))
+        and supports_responses_via_chat_completions(payload.get("model"))
+    )
+    upstream_payload = responses_to_chat_payload(payload) if via_chat else payload
+    if via_chat:
+        headers = dict(headers)
+        headers["X-Initiator"] = "agent" if any(
+            message.get("role") in ("assistant", "tool")
+            for message in upstream_payload["messages"]
+        ) else "user"
+    response = requests.post(
+        f"{get_copilot_base_url()}/chat/completions" if via_chat else f"{get_copilot_base_url()}/v1/responses",
+        headers=headers,
+        json=upstream_payload,
+        stream=stream,
+        timeout=state.upstream_read_timeout,
+    )
+    return ChatCompletionResponsesAdapter(response, payload) if via_chat else response
+
+
 def _start_responses_post(headers: Dict, payload: Dict) -> BackgroundResult:
     """Start a streaming Responses request without blocking the client route."""
-    return BackgroundResult(lambda: requests.post(
-        f"{get_copilot_base_url()}/v1/responses",
-        headers=headers,
-        json=payload,
-        stream=True,
-        timeout=state.upstream_read_timeout,
-    ), label="responses")
+    return BackgroundResult(lambda: _post_responses_request(headers, payload, True), label="responses")
 
 
 def _responses_keepalive() -> str:
@@ -166,13 +189,7 @@ def _build_responses_stream_handler(
         def retry_streaming_response():
             ensure_copilot_token()
             retry_headers = get_copilot_headers(enable_vision)
-            return requests.post(
-                f"{get_copilot_base_url()}/v1/responses",
-                headers=retry_headers,
-                json=payload,
-                stream=True,
-                timeout=state.upstream_read_timeout,
-            )
+            return _post_responses_request(retry_headers, payload, True)
 
         def retry_encrypted_content(error):
             nonlocal payload, encrypted_content_retry_attempted
@@ -1703,7 +1720,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
 @openai_bp.route("/v1/responses", methods=["POST"])
 @openai_bp.route("/responses", methods=["POST"])
 def responses():
-    """Handle OpenAI Responses API (passthrough for supported models only)"""
+    """Handle native Responses and Gemini's Chat Completions compatibility path."""
     try:
         start_time = time.time()
         ensure_copilot_token()
@@ -1740,7 +1757,10 @@ def responses():
             }}), 400
 
         # Check if this model supports the Responses API
-        if not supports_responses_api(translated_model):
+        if not (
+            supports_responses_api(translated_model)
+            or supports_responses_via_chat_completions(translated_model)
+        ):
             return jsonify({
                 "error": {
                     "message": f"Model '{original_model}' does not support the /v1/responses endpoint.",
@@ -1767,6 +1787,19 @@ def responses():
         headers = get_copilot_headers(enable_vision)
 
         _normalize_responses_tool_descriptions(payload)
+
+        # Validate bridge-only limitations before committing streaming headers.
+        if not supports_responses_api(translated_model):
+            try:
+                responses_to_chat_payload(payload)
+            except ResponsesChatRequestError as exc:
+                return jsonify({"error": {
+                    "message": str(exc),
+                    "type": "invalid_request_error",
+                    "code": "unsupported_parameter",
+                    "param": exc.param,
+                }}), 400
+
         _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
@@ -1835,13 +1868,7 @@ def responses():
             request_size = len(json.dumps(payload))
             try:
                 if response is None:
-                    response = requests.post(
-                        f"{get_copilot_base_url()}/v1/responses",
-                        headers=headers,
-                        json=payload,
-                        stream=use_streaming,
-                        timeout=state.upstream_read_timeout,
-                    )
+                    response = _post_responses_request(headers, payload, use_streaming)
                 if use_streaming and response.ok:
                     return _build_responses_stream_handler(
                         response, payload, request_id, request_size,
