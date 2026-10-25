@@ -45,6 +45,15 @@ tool `call_id`, encrypted reasoning content, and response IDs are preserved.
 Events whose IDs are already consistent pass through unchanged, and request
 history retains the original upstream events for diagnosis.
 
+### OpenAI service tiers
+
+Copilot does not support the OpenAI `service_tier` request parameter. ghc-api
+omits this field from requests forwarded through the Copilot Responses and Chat
+Completions routes, including streaming requests, so clients such as Codex can
+send it without triggering an upstream rejection. The original request remains
+available in request history. Configured `/proxy/<profile>/v1/...` routes
+continue forwarding `service_tier` unchanged.
+
 ## Installation
 
 Install the package using pip:

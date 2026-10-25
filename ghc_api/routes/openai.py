@@ -1,5 +1,7 @@
 """
 OpenAI-compatible API routes
+
+Copilot requests omit the unsupported OpenAI service_tier parameter.
 """
 
 import copy
@@ -1456,6 +1458,7 @@ def chat_completions():
         ensure_copilot_token()
         payload = request.get_json()
         original_request_body = copy.deepcopy(payload)
+        payload.pop("service_tier", None)
         request_id = str(uuid.uuid4())
 
         # Capture incoming request headers (auth values redacted before caching).
@@ -1754,6 +1757,7 @@ def responses():
             payload = json.loads(raw.decode('utf8'))
             print("after remove \\r \\n the json can be parsed")
         original_request_body = copy.deepcopy(payload)
+        payload.pop("service_tier", None)
         request_id = str(uuid.uuid4())
 
         # Capture incoming request headers (auth values redacted before caching).
