@@ -1080,7 +1080,6 @@
         async function loadModels() {
             const select = document.getElementById('model-select');
             const copilotModels = [];
-            const copilotMetadata = {};
             const configuredModels = [];
             let configuredModelsError = null;
             modelTargets = {};
@@ -1092,19 +1091,6 @@
                 if (res.ok && Array.isArray(data.data)) copilotModels.push(...data.data);
             } catch {
                 // Configured proxies can still be available without Copilot models.
-            }
-
-            try {
-                const fullRes = await fetch('/v1/models/full/');
-                const fullData = await fullRes.json();
-                const fullModels = fullData.data || fullData || [];
-                if (fullRes.ok && Array.isArray(fullModels)) {
-                    for (const model of fullModels) {
-                        if (model.id) copilotMetadata[model.id] = model;
-                    }
-                }
-            } catch {
-                // The compact model response remains usable without capabilities.
             }
 
             try {
@@ -1125,13 +1111,13 @@
                 const group = document.createElement('optgroup');
                 group.label = 'Copilot';
                 for (const model of copilotModels) {
-                    const metadata = copilotMetadata[model.id] || model;
                     addModelOption(group, model.id, model, {
                         type: 'copilot',
                         id: model.id,
                         baseUrl: '/v1',
-                        supportedEndpoints: metadata.supported_endpoints || model.supported_endpoints || [],
-                        contextWindow: metadata.capabilities?.limits?.max_context_window_tokens || null,
+                        supportedEndpoints: model.supported_endpoints || [],
+                        contextWindow: model.context_window || null,
+                        maxOutputTokens: model.max_output_tokens || null,
                     });
                 }
                 select.appendChild(group);
