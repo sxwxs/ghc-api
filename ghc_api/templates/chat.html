@@ -1111,6 +1111,9 @@
                 const group = document.createElement('optgroup');
                 group.label = 'Copilot';
                 for (const model of copilotModels) {
+                    const endpoints = model.supported_endpoints || [];
+                    // Decision (System One) models return probabilities, not messages.
+                    if (endpoints.length && endpoints.every(e => e === '/systemone' || e === '/v1/systemone')) continue;
                     addModelOption(group, model.id, model, {
                         type: 'copilot',
                         id: model.id,

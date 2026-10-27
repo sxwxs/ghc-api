@@ -426,6 +426,41 @@ def supports_embeddings_api(model_id: str) -> bool:
     return model.get("capabilities", {}).get("type") == "embeddings"
 
 
+# Endpoint spellings Copilot may advertise for System One decision models.
+# Copilot lists Responses as "/responses" but Anthropic Messages as
+# "/v1/messages", so both forms are accepted.
+SYSTEMONE_ENDPOINTS = ("/systemone", "/v1/systemone")
+
+
+def systemone_upstream_path(model_id: str) -> Optional[str]:
+    """Return the Copilot path serving a decision model, or None.
+
+    Decision models (for example Microsoft-Decision-1) score a closed set of
+    options instead of generating text. The advertised endpoint spelling is
+    used verbatim so ghc-api follows whatever path Copilot publishes.
+    """
+    if not state.models or not state.models.get("data"):
+        return None
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if not isinstance(model, dict):
+        return None
+    supported_endpoints = model.get("supported_endpoints") or []
+    for endpoint in SYSTEMONE_ENDPOINTS:
+        if endpoint in supported_endpoints:
+            return endpoint
+    # Copilot tags decision models with capabilities.type == "decisions";
+    # fall back to the path it currently advertises if the list is missing.
+    capabilities = model.get("capabilities") or {}
+    if isinstance(capabilities, dict) and capabilities.get("type") == "decisions":
+        return "/v1/systemone"
+    return None
+
+
+def supports_systemone_api(model_id: str) -> bool:
+    """Return whether Copilot advertises the System One decision endpoint."""
+    return systemone_upstream_path(model_id) is not None
+
+
 def supported_reasoning_efforts(model_id: str) -> set:
     """Reasoning-effort values Copilot reports for a model.
 
