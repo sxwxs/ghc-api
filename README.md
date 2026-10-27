@@ -521,7 +521,7 @@ Copilot decision models such as Microsoft-Decision-1 score a closed set of optio
 - Non-streaming only: `"stream": true` is rejected with HTTP 400 `unsupported_stream`.
 - The response `model` field reports the underlying model rather than the requested id, as Copilot returns it.
 - Usage is read from flat `usage.input_tokens` / `usage.output_tokens`; there are no cache tiers.
-- Decision-only models are hidden from the built-in `/chat` page.
+- The built-in `/chat` page has a **Decision** mode next to Chat and Raw. Decision models are listed with a `[decision]` tag; selecting one switches to Decision mode, which starts from a `state` + `questions` template, fills in the model, and shows each answer as probability bars (choice/score) or a yes/no split (noul), with the raw JSON available. Raw mode can also target `/v1/systemone`.
 
 ```bash
 curl http://127.0.0.1:8313/v1/systemone \
