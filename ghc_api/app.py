@@ -29,6 +29,8 @@ PROTECTED_PATHS = frozenset({
     "/responses",
     "/v1/embeddings",
     "/embeddings",
+    "/v1/systemone",
+    "/systemone",
     "/v1/messages",
     "/v1/messages/count_tokens",
     "/v1/models",

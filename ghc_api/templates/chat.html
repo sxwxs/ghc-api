@@ -611,6 +611,156 @@
         .raw-response .json-boolean { color: #569cd6; }
         .raw-response .json-null { color: #569cd6; }
 
+        /* Decision mode (System One decision models) */
+        .message.decision-request {
+            align-self: flex-end;
+            background: #eef1fd;
+            border: 1px solid #c5cdf5;
+            border-bottom-right-radius: 4px;
+            max-width: 85%;
+            font-size: 0.85rem;
+        }
+
+        .message.decision-response {
+            align-self: flex-start;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-bottom-left-radius: 4px;
+            max-width: 85%;
+            min-width: 320px;
+            font-size: 0.85rem;
+        }
+
+        .decision-label-row {
+            font-size: 0.65rem;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.4rem;
+        }
+
+        .decision-state {
+            white-space: pre-wrap;
+            word-break: break-word;
+            margin-bottom: 0.4rem;
+        }
+
+        .decision-question {
+            margin-top: 0.25rem;
+            color: #444;
+        }
+
+        .decision-card {
+            border: 1px solid #e5e5e5;
+            border-radius: 6px;
+            padding: 0.5rem 0.65rem;
+            margin-top: 0.5rem;
+        }
+
+        .decision-card-header {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            margin-bottom: 0.35rem;
+        }
+
+        .decision-card-header .decision-id {
+            font-weight: 600;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        .decision-type {
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            background: #eef1fd;
+            color: #4a5bd4;
+            border-radius: 4px;
+            padding: 0.05rem 0.35rem;
+        }
+
+        .decision-summary {
+            margin-left: auto;
+            color: #555;
+            font-size: 0.8rem;
+        }
+
+        .decision-option {
+            display: grid;
+            grid-template-columns: minmax(80px, 30%) 1fr 4.5rem;
+            align-items: center;
+            gap: 0.5rem;
+            margin: 0.15rem 0;
+            font-size: 0.8rem;
+        }
+
+        .decision-option .decision-option-label {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .decision-option.chosen .decision-option-label {
+            font-weight: 600;
+        }
+
+        .decision-bar {
+            height: 0.55rem;
+            background: #f0f0f0;
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .decision-bar-fill {
+            height: 100%;
+            background: #b8c1f0;
+        }
+
+        .decision-option.chosen .decision-bar-fill {
+            background: #667eea;
+        }
+
+        .decision-pct {
+            text-align: right;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+
+        .decision-meta {
+            margin-top: 0.5rem;
+            font-size: 0.7rem;
+            color: #888;
+        }
+
+        .decision-error {
+            color: #c62828;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        .decision-raw summary {
+            cursor: pointer;
+            font-size: 0.7rem;
+            color: #888;
+            margin-top: 0.4rem;
+        }
+
+        .decision-raw pre {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 0.5rem;
+            border-radius: 4px;
+            font-size: 0.72rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .decision-raw pre .json-key { color: #9cdcfe; }
+        .decision-raw pre .json-string { color: #ce9178; }
+        .decision-raw pre .json-number { color: #b5cea8; }
+        .decision-raw pre .json-boolean,
+        .decision-raw pre .json-null { color: #569cd6; }
+
         @media (max-width: 768px) {
             .sidebar {
                 width: 220px;
@@ -654,8 +804,10 @@
                     <option value="/v1/chat/completions">/v1/chat/completions</option>
                 </select>
                 <div class="mode-toggle">
-                    <button id="mode-chat" class="active" onclick="setRawMode(false)">Chat</button>
-                    <button id="mode-raw" onclick="setRawMode(true)">Raw</button>
+                    <button id="mode-chat" class="active" onclick="setMode('chat')">Chat</button>
+                    <button id="mode-raw" onclick="setMode('raw')">Raw</button>
+                    <button id="mode-decision" onclick="setMode('decision')"
+                            title="Decision models (System One): score options and return probabilities">Decision</button>
                 </div>
                 <label for="search-provider">Search</label>
                 <select class="search-provider-select" id="search-provider" onchange="onSearchProviderChange()"
@@ -709,7 +861,7 @@
         let abortController = null;
         let modelsData = [];
         let modelTargets = {}; // selection key -> model id, provider, endpoints, and base URL
-        let rawMode = false;
+        let chatMode = 'chat'; // 'chat' | 'raw' | 'decision'
 
         // ---- Session management ----
 
@@ -827,6 +979,10 @@
                     appendRawRequestEl(msg.content, msg.endpoint);
                 } else if (msg.role === 'raw-response') {
                     appendRawResponseEl(msg.content, msg.statusCode);
+                } else if (msg.role === 'decision-request') {
+                    appendDecisionRequestEl(msg.content, msg.endpoint);
+                } else if (msg.role === 'decision-response') {
+                    appendDecisionResponseEl(msg.content, msg.statusCode, msg.duration);
                 } else {
                     appendMessageEl(msg.role, msg.content, {
                         thinking: msg.thinking,
@@ -1056,7 +1212,31 @@
             const target = selectedModelTarget(selectionKey);
             const baseUrl = target ? target.baseUrl : '/v1';
             return baseUrl + (apiStyle === 'responses' ? '/responses' :
-                apiStyle === 'messages' ? '/messages' : '/chat/completions');
+                apiStyle === 'messages' ? '/messages' :
+                apiStyle === 'systemone' ? '/systemone' : '/chat/completions');
+        }
+
+        function isSystemOneEndpoint(endpoint) {
+            return endpoint === '/systemone' || endpoint === 'systemone' || endpoint === '/v1/systemone';
+        }
+
+        function targetSupportsDecision(target) {
+            return !!target && (target.modelType === 'decisions' ||
+                (target.supportedEndpoints || []).some(isSystemOneEndpoint));
+        }
+
+        // Decision-only models return probabilities, never messages.
+        function targetIsDecisionOnly(target) {
+            return targetSupportsDecision(target) &&
+                !(target.supportedEndpoints || []).some(e => !isSystemOneEndpoint(e));
+        }
+
+        function supportsDecision(selectionKey) {
+            return targetSupportsDecision(selectedModelTarget(selectionKey));
+        }
+
+        function isDecisionOnly(selectionKey) {
+            return targetIsDecisionOnly(selectedModelTarget(selectionKey));
         }
 
         function addModelOption(group, key, model, target) {
@@ -1069,6 +1249,9 @@
                 label += ' (' + model.id + ')';
             } else if (model.owned_by) {
                 label += ' (' + model.owned_by + ')';
+            }
+            if (targetIsDecisionOnly(target)) {
+                label += ' [decision]';
             }
             if (target.contextWindow) {
                 label += ' [' + formatTokenCount(target.contextWindow) + ' ctx]';
@@ -1115,6 +1298,7 @@
                         type: 'copilot',
                         id: model.id,
                         baseUrl: '/v1',
+                        modelType: model.model_type || null,
                         supportedEndpoints: model.supported_endpoints || [],
                         contextWindow: model.context_window || null,
                         maxOutputTokens: model.max_output_tokens || null,
@@ -1131,7 +1315,8 @@
                     if (!supportedEndpoints.some(e =>
                         e === '/responses' || e === 'responses' ||
                         e === '/chat/completions' || e === 'chat/completions' ||
-                        e === '/messages' || e === 'messages'
+                        e === '/messages' || e === 'messages' ||
+                        isSystemOneEndpoint(e)
                     )) continue;
                     if (!groups[model.profile]) {
                         groups[model.profile] = document.createElement('optgroup');
@@ -1192,6 +1377,10 @@
             }
             updateEndpointOptions();
             updateWebSearchAvailability();
+            // A decision-only model cannot chat; switch to the mode it supports.
+            if (chatMode === 'chat' && isDecisionOnly(model)) {
+                setMode('decision');
+            }
         }
 
         function updateEndpointOptions() {
@@ -1210,9 +1399,15 @@
                 if (target.supportedEndpoints.some(e => e === '/messages' || e === 'messages')) {
                     endpoints.push({ value: endpointForModel(null, 'messages'), label: endpointForModel(null, 'messages') });
                 }
+                if (target.supportedEndpoints.some(isSystemOneEndpoint)) {
+                    endpoints.push({ value: endpointForModel(null, 'systemone'), label: endpointForModel(null, 'systemone') });
+                }
             } else {
                 endpoints.push({ value: '/v1/responses', label: '/v1/responses' });
                 endpoints.push({ value: '/v1/chat/completions', label: '/v1/chat/completions' });
+                if (targetSupportsDecision(target)) {
+                    endpoints.push({ value: '/v1/systemone', label: '/v1/systemone' });
+                }
             }
 
             select.innerHTML = '';
@@ -1250,21 +1445,21 @@
 
         function canUseWebSearch(selectionKey) {
             const target = selectedModelTarget(selectionKey);
-            return !rawMode && target?.type === 'copilot' &&
+            return chatMode === 'chat' && target?.type === 'copilot' &&
                 isGptModel(target.id) && shouldUseResponses(selectionKey);
         }
 
         function canUseSearchProvider(modelId, provider) {
             if (provider === 'off') return true;
             if (provider === 'native') return canUseWebSearch(modelId);
-            return !rawMode && !!modelId && Object.hasOwn(SEARCH_PROVIDERS, provider) &&
+            return chatMode === 'chat' && !!modelId && Object.hasOwn(SEARCH_PROVIDERS, provider) &&
                 SEARCH_PROVIDERS[provider].available;
         }
 
         function updateWebSearchAvailability() {
             const select = document.getElementById('search-provider');
             const model = document.getElementById('model-select').value;
-            select.disabled = rawMode || !model;
+            select.disabled = chatMode !== 'chat' || !model;
             for (const option of select.options) {
                 option.disabled = !canUseSearchProvider(model, option.value);
             }
@@ -1294,8 +1489,11 @@
         // ---- Sending messages ----
 
         async function sendMessage() {
-            if (rawMode) {
+            if (chatMode === 'raw') {
                 return sendRawMessage();
+            }
+            if (chatMode === 'decision') {
+                return sendDecisionMessage();
             }
 
             const input = document.getElementById('chat-input');
@@ -1312,6 +1510,11 @@
             const modelTarget = selectedModelTarget(modelSelection);
             if (!modelTarget) {
                 appendMessageEl('error', 'Please select a model first.');
+                return;
+            }
+            if (targetIsDecisionOnly(modelTarget)) {
+                appendMessageEl('error', 'This is a decision model and cannot chat. Use Decision mode.');
+                scrollToBottom();
                 return;
             }
             session.model = modelSelection;
@@ -2317,35 +2520,67 @@
             return { toolCalls: toolCalls, roundText: roundText };
         }
 
-        // ---- Raw mode ----
+        // ---- Modes ----
 
-        function setRawMode(enabled) {
-            rawMode = enabled;
+        // Starting point for Decision mode; the selected model is filled in on send.
+        const DECISION_TEMPLATE = JSON.stringify({
+            state: 'Customer: I was charged twice for my order. Please refund the duplicate payment.',
+            questions: {
+                team: {
+                    type: 'choice',
+                    instructions: 'Which team should handle this message?',
+                    criteria: {
+                        billing: 'Payments, invoices, and refunds',
+                        support: 'Technical issues and bugs',
+                        sales: 'Pricing and new purchases',
+                    },
+                },
+                urgent: {
+                    type: 'noul',
+                    instructions: 'Does this need a reply within one hour?',
+                },
+            },
+        }, null, 2);
+
+        function setMode(mode) {
+            chatMode = mode;
             const chatInput = document.getElementById('chat-input');
-            const chatBtn = document.getElementById('mode-chat');
-            const rawBtn = document.getElementById('mode-raw');
-            const endpointSelect = document.getElementById('endpoint-select');
-
-            chatBtn.classList.toggle('active', !enabled);
-            rawBtn.classList.toggle('active', enabled);
-            endpointSelect.classList.toggle('visible', enabled);
+            for (const name of ['chat', 'raw', 'decision']) {
+                document.getElementById('mode-' + name).classList.toggle('active', name === mode);
+            }
+            document.getElementById('endpoint-select').classList.toggle('visible', mode === 'raw');
             updateWebSearchAvailability();
 
-            if (enabled) {
-                chatInput.classList.add('raw-mode');
+            chatInput.classList.toggle('raw-mode', mode !== 'chat');
+            if (mode === 'raw') {
                 chatInput.placeholder = 'Raw JSON payload (Ctrl+Enter to send)\n{\n  "model": "...",\n  "messages": [...],\n  "stream": true\n}';
+            } else if (mode === 'decision') {
+                chatInput.placeholder = 'Decision request JSON with "state" and "questions" (Ctrl+Enter to send).\nThe selected model is filled in automatically.';
             } else {
-                chatInput.classList.remove('raw-mode');
                 chatInput.placeholder = 'Type a message... (Enter to send, Shift+Enter for newline)';
+            }
+            // Offer the template only on an empty input, and do not leave an
+            // untouched template behind in the other modes.
+            if (mode === 'decision' && !chatInput.value.trim()) {
+                chatInput.value = DECISION_TEMPLATE;
+            } else if (mode !== 'decision' && chatInput.value === DECISION_TEMPLATE) {
+                chatInput.value = '';
             }
             autoResize(chatInput);
             chatInput.focus();
+        }
+
+        function setRawMode(enabled) {
+            setMode(enabled ? 'raw' : 'chat');
         }
 
         function resolveEndpoint(payload) {
             const selectedEndpoint = document.getElementById('endpoint-select').value;
             if (selectedEndpoint !== 'auto') return selectedEndpoint;
             const selectionKey = document.getElementById('model-select').value;
+            if (isDecisionOnly(selectionKey)) {
+                return endpointForModel(selectionKey, 'systemone');
+            }
             if (selectedModelTarget(selectionKey)) {
                 return endpointForModel(
                     selectionKey,
@@ -2525,6 +2760,228 @@
             scrollToBottom();
         }
 
+        // ---- Decision mode ----
+
+        function decisionPercent(value) {
+            const number = Number(value);
+            if (!Number.isFinite(number)) return null;
+            return Math.min(100, Math.max(0, number * 100));
+        }
+
+        function decisionOptionRow(label, probability, chosen) {
+            const pct = decisionPercent(probability);
+            const width = pct == null ? 0 : pct;
+            const text = pct == null ? escapeHtml(String(probability)) : pct.toFixed(1) + '%';
+            return `<div class="decision-option${chosen ? ' chosen' : ''}">` +
+                `<span class="decision-option-label" title="${escapeHtml(label).replace(/"/g, '&quot;')}">${escapeHtml(label)}</span>` +
+                `<div class="decision-bar"><div class="decision-bar-fill" style="width:${width.toFixed(1)}%"></div></div>` +
+                `<span class="decision-pct">${text}</span></div>`;
+        }
+
+        function decisionRawBlock(content, summary) {
+            let body;
+            try {
+                body = syntaxHighlightJson(JSON.parse(content));
+            } catch {
+                body = escapeHtml(content || '');
+            }
+            return `<details class="decision-raw"><summary>${escapeHtml(summary)}</summary><pre>${body}</pre></details>`;
+        }
+
+        function decisionText(value) {
+            if (value == null) return '';
+            return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+        }
+
+        function buildDecisionAnswerCard(id, answer) {
+            const type = answer && typeof answer === 'object' ? String(answer.type || '') : '';
+            let summary = '';
+            let body = '';
+            if (answer && typeof answer.noul === 'number') {
+                summary = 'yes ' + decisionPercent(answer.noul).toFixed(1) + '%';
+                body = decisionOptionRow('yes', answer.noul, answer.noul >= 0.5) +
+                    decisionOptionRow('no', 1 - answer.noul, answer.noul < 0.5);
+            } else if (answer && answer.probabilities && typeof answer.probabilities === 'object') {
+                const legend = answer.legend && typeof answer.legend === 'object' ? answer.legend : {};
+                const entries = Object.entries(answer.probabilities)
+                    .sort((a, b) => Number(b[1]) - Number(a[1]));
+                const chosen = answer.choice != null ? String(answer.choice) :
+                    (entries.length ? entries[0][0] : null);
+                body = entries.map(([option, p]) => {
+                    const description = typeof legend[option] === 'string' ? ' \u2014 ' + legend[option] : '';
+                    return decisionOptionRow(option + description, p, option === chosen);
+                }).join('');
+                if (typeof answer.score === 'number') {
+                    summary = 'score ' + answer.score.toFixed(2);
+                } else if (answer.choice != null) {
+                    summary = String(answer.choice);
+                }
+                if (typeof answer.confidence === 'number') {
+                    summary += (summary ? ' \u00b7 ' : '') + 'confidence ' +
+                        decisionPercent(answer.confidence).toFixed(1) + '%';
+                }
+            } else {
+                body = `<pre>${syntaxHighlightJson(answer)}</pre>`;
+            }
+            return `<div class="decision-card"><div class="decision-card-header">` +
+                `<span class="decision-id">${escapeHtml(id)}</span>` +
+                (type ? `<span class="decision-type">${escapeHtml(type)}</span>` : '') +
+                (summary ? `<span class="decision-summary">${escapeHtml(summary)}</span>` : '') +
+                `</div>${body}</div>`;
+        }
+
+        function renderDecisionResponse(div, content, statusCode, duration) {
+            const timing = duration != null ? ' (' + formatDuration(duration) + ')' : '';
+            const label = `<div class="decision-label-row">Decision ${escapeHtml(String(statusCode || ''))}${timing}</div>`;
+            let parsed = null;
+            try {
+                parsed = JSON.parse(content);
+            } catch {
+                parsed = null;
+            }
+            const answers = parsed && typeof parsed === 'object' ? parsed.answers : null;
+            if (!(statusCode >= 200 && statusCode < 300) || !answers || typeof answers !== 'object') {
+                // Upstream validation errors are shown verbatim.
+                const message = parsed && typeof parsed === 'object'
+                    ? decisionText(parsed.error?.message || parsed.detail || parsed.error || parsed)
+                    : (content || 'Empty response');
+                div.innerHTML = label + `<div class="decision-error">${escapeHtml(message)}</div>` +
+                    decisionRawBlock(content, 'Raw response');
+                return;
+            }
+            const cards = Object.entries(answers).map(([id, answer]) => buildDecisionAnswerCard(id, answer)).join('');
+            const meta = [];
+            if (parsed.model) meta.push('model ' + parsed.model);
+            if (parsed.usage && typeof parsed.usage === 'object') {
+                meta.push(`tokens ${parsed.usage.input_tokens ?? '?'} in / ${parsed.usage.output_tokens ?? '?'} out`);
+            }
+            div.innerHTML = label + cards +
+                (meta.length ? `<div class="decision-meta">${escapeHtml(meta.join(' \u00b7 '))}</div>` : '') +
+                decisionRawBlock(content, 'Raw response');
+        }
+
+        function appendDecisionRequestEl(content, endpoint) {
+            const container = document.getElementById('messages-container');
+            const empty = container.querySelector('.empty-state');
+            if (empty) empty.remove();
+
+            const div = document.createElement('div');
+            div.className = 'message decision-request';
+            let html = `<div class="decision-label-row">${escapeHtml(endpoint || '')}</div>`;
+            try {
+                const payload = JSON.parse(content);
+                html += `<div class="decision-state">${escapeHtml(decisionText(payload.state))}</div>`;
+                for (const [id, question] of Object.entries(payload.questions || {})) {
+                    html += `<div class="decision-question"><span class="decision-type">${escapeHtml(String(question?.type || '?'))}</span> ` +
+                        `<strong>${escapeHtml(id)}</strong>: ${escapeHtml(decisionText(question?.instructions))}</div>`;
+                }
+            } catch {
+                html += `<div class="decision-state">${escapeHtml(content || '')}</div>`;
+            }
+            div.innerHTML = html + decisionRawBlock(content, 'Request JSON');
+            container.appendChild(div);
+            return div;
+        }
+
+        function appendDecisionResponseEl(content, statusCode, duration) {
+            const container = document.getElementById('messages-container');
+            const div = document.createElement('div');
+            div.className = 'message decision-response';
+            renderDecisionResponse(div, content, statusCode, duration);
+            container.appendChild(div);
+            return div;
+        }
+
+        async function sendDecisionMessage() {
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text || isStreaming) return;
+
+            const selectionKey = document.getElementById('model-select').value;
+            const target = selectedModelTarget(selectionKey);
+            if (!target) {
+                appendMessageEl('error', 'Please select a model first.');
+                return;
+            }
+            if (!targetSupportsDecision(target)) {
+                appendMessageEl('error', `Model "${target.id}" does not support the decision API. Choose a model marked [decision].`);
+                scrollToBottom();
+                return;
+            }
+
+            let payload;
+            try {
+                payload = JSON.parse(text);
+            } catch (e) {
+                appendMessageEl('error', 'Invalid JSON: ' + e.message);
+                scrollToBottom();
+                return;
+            }
+            if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+                appendMessageEl('error', 'A decision request must be a JSON object with "state" and "questions".');
+                scrollToBottom();
+                return;
+            }
+            // Inject the public model id, not the UI's provider-qualified key.
+            if (!payload.model) payload.model = target.id;
+
+            let session = getActiveSession();
+            if (!session) {
+                newSession();
+                session = getActiveSession();
+            }
+            session.model = selectionKey;
+
+            const endpoint = endpointForModel(selectionKey, 'systemone');
+            const requestText = JSON.stringify(payload, null, 2);
+            session.messages.push({ role: 'decision-request', content: requestText, endpoint });
+            if (session.messages.length === 1) {
+                const preview = decisionText(payload.state).replace(/\s+/g, ' ').trim();
+                session.title = '[Decision] ' + (preview.substring(0, 50) || endpoint);
+                renderSessionList();
+            }
+            saveSessions();
+            appendDecisionRequestEl(requestText, endpoint);
+            // The input is kept: decision requests are usually refined and re-run.
+
+            const container = document.getElementById('messages-container');
+            const resDiv = document.createElement('div');
+            resDiv.className = 'message decision-response';
+            resDiv.innerHTML = '<div class="decision-label-row">Decision</div><span class="typing-indicator">Waiting</span>';
+            container.appendChild(resDiv);
+            scrollToBottom();
+
+            isStreaming = true;
+            document.getElementById('send-btn').disabled = true;
+            abortController = new AbortController();
+            const startTime = performance.now();
+            try {
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                    signal: abortController.signal,
+                });
+                const responseText = await res.text();
+                const duration = (performance.now() - startTime) / 1000;
+                session.messages.push({
+                    role: 'decision-response', content: responseText,
+                    statusCode: res.status, duration,
+                });
+                saveSessions();
+                renderDecisionResponse(resDiv, responseText, res.status, duration);
+            } catch (err) {
+                if (err.name === 'AbortError') return;
+                resDiv.innerHTML = '<div class="decision-label-row">Error</div>' +
+                    `<div class="decision-error">${escapeHtml(err.message)}</div>`;
+            } finally {
+                isStreaming = false;
+                document.getElementById('send-btn').disabled = false;
+                abortController = null;
+            }
+            scrollToBottom();
+        }
+
         // ---- Input handling ----
 
         function autoResize(el) {
@@ -2535,8 +2992,8 @@
         const chatInput = document.getElementById('chat-input');
         chatInput.addEventListener('input', () => autoResize(chatInput));
         chatInput.addEventListener('keydown', (e) => {
-            if (rawMode) {
-                // In raw mode: Ctrl+Enter to send (Enter is for editing JSON)
+            if (chatMode !== 'chat') {
+                // In raw and decision modes: Ctrl+Enter to send (Enter is for editing JSON)
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();
                     sendMessage();

@@ -6,7 +6,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Features
 
-- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` endpoints
+- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` endpoints, plus the `/v1/systemone` decision API
 - **Anthropic API Compatibility**: `/v1/messages` endpoint with automatic request/response translation
 - **Model Listing**: `/v1/models` endpoint listing available models
 - **Model Name Mapping**: Translate model names with exact and prefix-based matching
@@ -86,7 +86,7 @@ By default, the server will start on `http://localhost:8313`.
 - `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.31`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.32`)
 - `--help`: Show help message
 
 ### Configuration
@@ -425,7 +425,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -500,6 +500,8 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 - `POST /chat/completions` - Chat completions (without v1 prefix)
 - `POST /v1/embeddings` - Create embeddings
 - `POST /embeddings` - Create embeddings (without v1 prefix)
+- `POST /v1/systemone` - System One decision API (e.g. Microsoft-Decision-1)
+- `POST /systemone` - System One decision API (without v1 prefix)
 - `GET /v1/models` - List available models with token limits and capabilities
 - `GET /models` - Same listing without the v1 prefix
 - `GET /v1/models/<model_id>` / `GET /models/<model_id>` - Retrieve one model's metadata
@@ -509,6 +511,35 @@ Model entries include `context_window`, `max_input_tokens`, `max_output_tokens`,
 input types, reasoning capabilities, and supported endpoints. Unknown metadata
 is `null`. See [Model metadata](docs/MODEL_METADATA.md) for the schema, cache
 behavior, and field mapping for pi integrations.
+
+### System One decisions (Copilot)
+
+Copilot decision models such as Microsoft-Decision-1 score a closed set of options and return a calibrated probability per option instead of generating text. ghc-api forwards `POST /v1/systemone` to the endpoint the model advertises in Copilot's `supported_endpoints` (currently `/v1/systemone`, with `capabilities.type: "decisions"`).
+
+- The body is passed through unchanged except for model-name mapping; responses and upstream validation errors (for example HTTP 422) are returned as-is.
+- Only decision models (advertising the System One endpoint or `capabilities.type: "decisions"`) are accepted; others get HTTP 400 `unsupported_model`.
+- Non-streaming only: `"stream": true` is rejected with HTTP 400 `unsupported_stream`.
+- The response `model` field reports the underlying model rather than the requested id, as Copilot returns it.
+- Usage is read from flat `usage.input_tokens` / `usage.output_tokens`; there are no cache tiers.
+- The built-in `/chat` page has a **Decision** mode next to Chat and Raw. Decision models are listed with a `[decision]` tag; selecting one switches to Decision mode, which starts from a `state` + `questions` template, fills in the model, and shows each answer as probability bars (choice/score) or a yes/no split (noul), with the raw JSON available. Raw mode can also target `/v1/systemone`.
+
+```bash
+curl http://127.0.0.1:8313/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "microsoft-decision-1",
+    "state": "The payment callback API returns 500 on every call.",
+    "questions": {
+      "team": {
+        "type": "choice",
+        "instructions": "Which team should handle this ticket?",
+        "criteria": {"billing": "Charges and refunds", "engineering": "Bugs and outages"}
+      }
+    }
+  }'
+```
+
+For decision models served by your own gateway or Microsoft Foundry, use the configured proxy's `systemone` API instead (see [UPSTREAM_PROXY.md](UPSTREAM_PROXY.md)).
 
 ### Anthropic Compatible
 
@@ -881,7 +912,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v1/systemone`, `/systemone`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
