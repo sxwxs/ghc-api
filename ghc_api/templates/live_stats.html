@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
+    <title>Copilot API Proxy - Live Throughput</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container { max-width: 1500px; margin: 0 auto; padding: 2rem; }
+
+        .toolbar {
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            padding: 0.875rem 1rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.25rem;
+            align-items: center;
+        }
+
+        .toolbar label { font-weight: 600; font-size: 0.875rem; }
+
+        .window-buttons { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+
+        .window-buttons button {
+            border: 1px solid #d5d9e8;
+            background: #f8f9fc;
+            color: #555;
+            border-radius: 20px;
+            padding: 0.3rem 0.85rem;
+            font-size: 0.8125rem;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .window-buttons button:hover { background: #eef0fa; }
+
+        .window-buttons button.active {
+            background: #667eea;
+            border-color: #667eea;
+            color: white;
+            font-weight: 600;
+        }
+
+        select, input[type="number"] { padding: 0.3rem 0.5rem; font-size: 0.875rem; }
+
+        .refresh-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 0.4rem 0.9rem;
+            font-size: 0.8125rem;
+            cursor: pointer;
+        }
+
+        .refresh-btn:hover { background: #5568d3; }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 1.25rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .stat-card {
+            background: white;
+            border-radius: 12px;
+            padding: 1.25rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+        }
+
+        .stat-card h3 {
+            color: #666;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-card .value { font-size: 1.85rem; font-weight: 700; color: #333; }
+        .stat-card .subtext { color: #888; font-size: 0.8125rem; }
+
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 1.25rem 1.5rem 1.5rem;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            margin-bottom: 1.5rem;
+        }
+
+        .section h2 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+            color: #333;
+            border-bottom: 2px solid #667eea;
+            padding-bottom: 0.4rem;
+        }
+
+        .section .hint { color: #888; font-size: 0.8125rem; margin: 0.5rem 0 0.75rem; }
+
+        .table-scroll { overflow-x: auto; }
+
+        table { width: 100%; border-collapse: collapse; }
+
+        th, td {
+            padding: 0.55rem 0.7rem;
+            text-align: right;
+            border-bottom: 1px solid #eee;
+            font-size: 0.875rem;
+            white-space: nowrap;
+        }
+
+        th:first-child, td:first-child { text-align: left; }
+
+        th {
+            background: #f8f9fa;
+            font-weight: 600;
+            color: #555;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
+        tbody tr:hover { background: #f8f9fc; }
+
+        .model-badge {
+            display: inline-block;
+            padding: 0.2rem 0.65rem;
+            background: #e3e8ff;
+            color: #667eea;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .endpoint-badge {
+            display: inline-block;
+            padding: 0.15rem 0.45rem;
+            background: #e8f5e9;
+            color: #2e7d32;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-family: monospace;
+        }
+
+        .state-badge {
+            display: inline-block;
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .state-badge.pending { background: #fff3e0; color: #ef6c00; }
+        .state-badge.sending { background: #e3f2fd; color: #1565c0; }
+        .state-badge.receiving { background: #e8f5e9; color: #2e7d32; }
+
+        .muted { color: #aaa; }
+        .bad { color: #c62828; font-weight: 600; }
+
+        .bar-cell { display: flex; align-items: center; justify-content: flex-end; gap: 0.5rem; }
+
+        .bar {
+            height: 8px;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            min-width: 2px;
+        }
+
+        .notice {
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            background: #fff8e1;
+            border: 1px solid #ffe082;
+            color: #6d4c41;
+            font-size: 0.875rem;
+            margin-bottom: 1.25rem;
+        }
+
+        .empty { color: #999; font-style: italic; padding: 0.75rem 0; }
+
+        .legend { color: #888; font-size: 0.8125rem; line-height: 1.7; }
+        .legend code { background: #f1f3f9; padding: 0 0.3rem; border-radius: 3px; }
+
+        @media (max-width: 768px) {
+            .container { padding: 1rem; }
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar" id="app-nav" data-title="Live Throughput"></nav>
+    <script src="{{ url_for('static', filename='nav.js') }}"></script>
+
+    <div class="container">
+        <div class="toolbar">
+            <label>Window:</label>
+            <div class="window-buttons" id="window-buttons"></div>
+
+            <label for="user-filter">User:</label>
+            <select id="user-filter">
+                <option value="">All users</option>
+            </select>
+
+            <label for="auto-refresh">Auto refresh:</label>
+            <select id="auto-refresh">
+                <option value="0">Off</option>
+                <option value="2">2s</option>
+                <option value="5" selected>5s</option>
+                <option value="15">15s</option>
+                <option value="60">60s</option>
+            </select>
+
+            <button class="refresh-btn" id="refresh-btn" type="button">Refresh now</button>
+            <span class="muted" id="updated-at" style="font-size:0.8125rem;"></span>
+        </div>
+
+        <div class="notice" id="truncation-notice" style="display:none;"></div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Running now</h3>
+                <div class="value" id="card-inflight">-</div>
+                <div class="subtext" id="card-inflight-sub">&nbsp;</div>
+            </div>
+            <div class="stat-card">
+                <h3>Output speed</h3>
+                <div class="value" id="card-tps">-</div>
+                <div class="subtext">tokens/s across the window</div>
+            </div>
+            <div class="stat-card">
+                <h3>Median time to first token</h3>
+                <div class="value" id="card-ttft">-</div>
+                <div class="subtext" id="card-ttft-sub">&nbsp;</div>
+            </div>
+            <div class="stat-card">
+                <h3>Requests in window</h3>
+                <div class="value" id="card-requests">-</div>
+                <div class="subtext" id="card-requests-sub">&nbsp;</div>
+            </div>
+            <div class="stat-card">
+                <h3>Output tokens</h3>
+                <div class="value" id="card-tokens">-</div>
+                <div class="subtext" id="card-tokens-sub">&nbsp;</div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Running now</h2>
+            <p class="hint">In-flight requests in this process, newest first. <code>receiving</code> means the first token already arrived.</p>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Endpoint</th>
+                            <th>State</th>
+                            <th>User</th>
+                            <th>Elapsed</th>
+                            <th>TTFT</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inflight-body"></tbody>
+                </table>
+            </div>
+            <div class="empty" id="inflight-empty" style="display:none;">Nothing running right now.</div>
+        </div>
+
+        <div class="section">
+            <h2>Speed by model</h2>
+            <p class="hint">Finished requests only. Sorted by output tokens produced in the window.</p>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>tok/s</th>
+                            <th>tok/s p10</th>
+                            <th>tok/s median</th>
+                            <th>tok/s p90</th>
+                            <th>TTFT median</th>
+                            <th>TTFT p90</th>
+                            <th>Duration median</th>
+                            <th>Duration p90</th>
+                            <th>Requests</th>
+                            <th>Errors</th>
+                            <th>Avg out</th>
+                            <th>Out tokens</th>
+                            <th>In tokens</th>
+                            <th>Last seen</th>
+                        </tr>
+                    </thead>
+                    <tbody id="models-body"></tbody>
+                </table>
+            </div>
+            <div class="empty" id="models-empty" style="display:none;">No finished requests in this window.</div>
+        </div>
+
+        <div class="section">
+            <h2>Endpoints</h2>
+            <div class="table-scroll">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Endpoint</th>
+                            <th>Requests</th>
+                            <th>Errors</th>
+                            <th>Output tokens</th>
+                        </tr>
+                    </thead>
+                    <tbody id="endpoints-body"></tbody>
+                </table>
+            </div>
+            <div class="empty" id="endpoints-empty" style="display:none;">No finished requests in this window.</div>
+        </div>
+
+        <div class="section">
+            <h2>How to read this</h2>
+            <p class="legend">
+                <strong>tok/s</strong> is decode speed: output tokens divided by generation time, where generation time is
+                the total request duration minus the time to first token. A slow queue upstream therefore shows up as a large
+                <strong>TTFT</strong>, not as a low tok/s. The headline <code>tok/s</code> column is token-weighted across the
+                whole window (total tokens / total generating seconds); the median and percentile columns describe individual
+                requests, so a single long reply cannot dominate them.<br>
+                Non-streaming responses have no measurable TTFT; for them the full duration counts as generation time, and they
+                are excluded from the TTFT columns (<em>streaming</em> share is visible in the JSON as <code>streaming_requests</code>).
+                Requests with no output tokens or under 0.05s of generation are excluded from speed metrics but still counted
+                as requests and errors.<br>
+                All numbers come from an in-memory ring of recent finished requests and cover <strong>this process run only</strong>;
+                they reset on restart. For historical analysis across days use <a href="/request-stats">Request Stats</a>.
+            </p>
+            <p class="legend" id="sample-info"></p>
+        </div>
+    </div>
+
+    <script>
+        const WINDOWS = [
+            { value: '5m', label: '5 min' },
+            { value: '15m', label: '15 min' },
+            { value: '1h', label: '1 hour' },
+            { value: '6h', label: '6 hours' },
+            { value: '24h', label: '24 hours' },
+            { value: 'all', label: 'Since start' }
+        ];
+
+        let currentWindow = localStorage.getItem('liveStatsWindow') || '1h';
+        let currentUser = '';
+        let refreshTimer = null;
+        let inFlightRequest = false;
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text === null || text === undefined ? '' : text;
+            return div.innerHTML;
+        }
+
+        function formatNumber(value) {
+            if (value === null || value === undefined) return '-';
+            return Number(value).toLocaleString();
+        }
+
+        function formatRate(value) {
+            if (value === null || value === undefined) return '<span class="muted">-</span>';
+            return Number(value).toFixed(1);
+        }
+
+        function formatSeconds(value) {
+            if (value === null || value === undefined) return '<span class="muted">-</span>';
+            const n = Number(value);
+            if (n < 10) return n.toFixed(2) + 's';
+            if (n < 600) return n.toFixed(1) + 's';
+            return (n / 60).toFixed(1) + 'm';
+        }
+
+        function formatAge(seconds) {
+            if (seconds === null || seconds === undefined) return '-';
+            const n = Number(seconds);
+            if (n < 60) return Math.round(n) + 's ago';
+            if (n < 3600) return Math.round(n / 60) + 'm ago';
+            return (n / 3600).toFixed(1) + 'h ago';
+        }
+
+        function renderWindowButtons() {
+            const container = document.getElementById('window-buttons');
+            container.innerHTML = WINDOWS.map((w) =>
+                `<button type="button" data-window="${w.value}" class="${w.value === currentWindow ? 'active' : ''}">${w.label}</button>`
+            ).join('');
+            container.querySelectorAll('button').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    currentWindow = btn.dataset.window;
+                    localStorage.setItem('liveStatsWindow', currentWindow);
+                    renderWindowButtons();
+                    load();
+                });
+            });
+        }
+
+        async function loadUsers() {
+            try {
+                const response = await fetch('/api/users-list');
+                const data = await response.json();
+                const select = document.getElementById('user-filter');
+                const previous = select.value;
+                select.innerHTML = '<option value="">All users</option>' +
+                    (data.users || []).map((u) =>
+                        `<option value="${escapeHtml(u.user_id)}">${escapeHtml(u.display_name || u.user_id)}</option>`
+                    ).join('');
+                select.value = previous;
+            } catch (error) {
+                console.error('Failed to load users:', error);
+            }
+        }
+
+        function renderCards(data) {
+            const overall = data.overall || {};
+            const inflight = data.in_flight || [];
+
+            document.getElementById('card-inflight').textContent = inflight.length;
+            const models = [...new Set(inflight.map((r) => r.model))];
+            document.getElementById('card-inflight-sub').textContent =
+                models.length ? models.join(', ') : 'idle';
+
+            document.getElementById('card-tps').innerHTML = formatRate(overall.tps);
+            document.getElementById('card-ttft').innerHTML = formatSeconds(overall.ttft_median);
+            document.getElementById('card-ttft-sub').textContent =
+                `p90 ${overall.ttft_p90 === null || overall.ttft_p90 === undefined ? '-' : Number(overall.ttft_p90).toFixed(2) + 's'} · ${formatNumber(overall.streaming_requests)} streamed`;
+
+            document.getElementById('card-requests').textContent = formatNumber(overall.requests);
+            document.getElementById('card-requests-sub').textContent =
+                `${formatNumber(overall.errors)} errors · ${formatNumber(overall.measured_requests)} measured for speed`;
+
+            document.getElementById('card-tokens').textContent = formatNumber(overall.output_tokens);
+            document.getElementById('card-tokens-sub').textContent =
+                `${formatNumber(overall.input_tokens)} input tokens`;
+        }
+
+        function renderInFlight(rows) {
+            const body = document.getElementById('inflight-body');
+            const empty = document.getElementById('inflight-empty');
+            if (!rows.length) {
+                body.innerHTML = '';
+                empty.style.display = 'block';
+                return;
+            }
+            empty.style.display = 'none';
+            body.innerHTML = rows.map((row) => `
+                <tr>
+                    <td><span class="model-badge">${escapeHtml(row.model)}</span></td>
+                    <td><span class="endpoint-badge">${escapeHtml(row.endpoint)}</span></td>
+                    <td><span class="state-badge ${escapeHtml(row.state)}">${escapeHtml(row.state)}</span></td>
+                    <td>${escapeHtml(row.user_id)}</td>
+                    <td>${formatSeconds(row.elapsed)}</td>
+                    <td>${formatSeconds(row.ttft)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderModels(models) {
+            const body = document.getElementById('models-body');
+            const empty = document.getElementById('models-empty');
+            if (!models.length) {
+                body.innerHTML = '';
+                empty.style.display = 'block';
+                return;
+            }
+            empty.style.display = 'none';
+
+            const maxTps = Math.max(...models.map((m) => m.tps || 0), 1);
+            body.innerHTML = models.map((m) => `
+                <tr>
+                    <td><span class="model-badge">${escapeHtml(m.model)}</span></td>
+                    <td>
+                        <div class="bar-cell">
+                            <span class="bar" style="width:${Math.round(((m.tps || 0) / maxTps) * 60)}px"></span>
+                            <strong>${formatRate(m.tps)}</strong>
+                        </div>
+                    </td>
+                    <td>${formatRate(m.tps_p10)}</td>
+                    <td>${formatRate(m.tps_median)}</td>
+                    <td>${formatRate(m.tps_p90)}</td>
+                    <td>${formatSeconds(m.ttft_median)}</td>
+                    <td>${formatSeconds(m.ttft_p90)}</td>
+                    <td>${formatSeconds(m.duration_median)}</td>
+                    <td>${formatSeconds(m.duration_p90)}</td>
+                    <td>${formatNumber(m.requests)}</td>
+                    <td class="${m.errors ? 'bad' : 'muted'}">${formatNumber(m.errors)}</td>
+                    <td>${formatNumber(m.avg_output_tokens)}</td>
+                    <td>${formatNumber(m.output_tokens)}</td>
+                    <td>${formatNumber(m.input_tokens)}</td>
+                    <td class="muted">${formatAge(m.seconds_since_last)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderEndpoints(endpoints) {
+            const body = document.getElementById('endpoints-body');
+            const empty = document.getElementById('endpoints-empty');
+            if (!endpoints.length) {
+                body.innerHTML = '';
+                empty.style.display = 'block';
+                return;
+            }
+            empty.style.display = 'none';
+            body.innerHTML = endpoints.map((e) => `
+                <tr>
+                    <td><span class="endpoint-badge">${escapeHtml(e.endpoint)}</span></td>
+                    <td>${formatNumber(e.requests)}</td>
+                    <td class="${e.errors ? 'bad' : 'muted'}">${formatNumber(e.errors)}</td>
+                    <td>${formatNumber(e.output_tokens)}</td>
+                </tr>
+            `).join('');
+        }
+
+        function renderMeta(data) {
+            const notice = document.getElementById('truncation-notice');
+            if (data.truncated) {
+                const oldest = data.oldest_sample_at ? new Date(data.oldest_sample_at * 1000).toLocaleString() : 'unknown';
+                notice.style.display = 'block';
+                notice.textContent =
+                    `The sample buffer holds ${formatNumber(data.sample_capacity)} requests and has wrapped, ` +
+                    `so this window only covers requests since ${oldest} (${formatNumber(data.samples_dropped)} older samples dropped). ` +
+                    `Raise perf_sample_capacity in config.yaml for a longer history.`;
+            } else {
+                notice.style.display = 'none';
+            }
+
+            const uptimeHours = (data.uptime_seconds || 0) / 3600;
+            document.getElementById('sample-info').textContent =
+                `Process uptime ${uptimeHours < 1 ? Math.round((data.uptime_seconds || 0) / 60) + ' min' : uptimeHours.toFixed(1) + ' h'} · ` +
+                `${formatNumber(data.samples_in_window)} samples in window · ` +
+                `${formatNumber(data.samples_retained)} retained of ${formatNumber(data.sample_capacity)} capacity · ` +
+                `${formatNumber(data.samples_recorded)} recorded since start.`;
+
+            document.getElementById('updated-at').textContent = 'Updated ' + new Date().toLocaleTimeString();
+        }
+
+        async function load() {
+            if (inFlightRequest) return;
+            inFlightRequest = true;
+            try {
+                const params = new URLSearchParams({ window: currentWindow });
+                if (currentUser) params.set('user', currentUser);
+                const response = await fetch('/api/live-stats?' + params.toString());
+                const data = await response.json();
+
+                renderCards(data);
+                renderInFlight(data.in_flight || []);
+                renderModels(data.models || []);
+                renderEndpoints(data.endpoints || []);
+                renderMeta(data);
+            } catch (error) {
+                console.error('Failed to load live stats:', error);
+                document.getElementById('updated-at').textContent = 'Update failed';
+            } finally {
+                inFlightRequest = false;
+            }
+        }
+
+        function applyAutoRefresh() {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+            const seconds = Number(document.getElementById('auto-refresh').value);
+            if (seconds > 0) {
+                refreshTimer = setInterval(load, seconds * 1000);
+            }
+        }
+
+        document.getElementById('refresh-btn').addEventListener('click', load);
+        document.getElementById('auto-refresh').addEventListener('change', () => {
+            localStorage.setItem('liveStatsRefresh', document.getElementById('auto-refresh').value);
+            applyAutoRefresh();
+        });
+        document.getElementById('user-filter').addEventListener('change', (event) => {
+            currentUser = event.target.value;
+            load();
+        });
+        // Stop polling while the tab is hidden: a forgotten background tab
+        // should not keep waking the server up.
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
+                if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+            } else {
+                applyAutoRefresh();
+                load();
+            }
+        });
+
+        const savedRefresh = localStorage.getItem('liveStatsRefresh');
+        if (savedRefresh !== null) {
+            document.getElementById('auto-refresh').value = savedRefresh;
+        }
+        renderWindowButtons();
+        loadUsers();
+        applyAutoRefresh();
+        load();
+    </script>
+</body>
+</html>

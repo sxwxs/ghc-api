@@ -14,6 +14,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Vision Support**: Handle image inputs and enable vision capabilities
 - **Memory Caching**: Cache all requests and responses (up to 1000 entries)
 - **Web Dashboard**: Real-time statistics and request browser
+- **Live Throughput**: Per-model tokens/second, time to first token, and currently running requests for the active process run
 - **Request Details**: View full request/response bodies with JSON formatting
 - **Export/Import**: Export and import request history as JSON Lines files
 - **Optional Request File Logging**: Save completed requests to daily JSON Lines files
@@ -194,6 +195,12 @@ responses_pre_header_grace: 0.5 # How long a Responses request waits for upstrea
                               # only be reported as an SSE error event, so keep this below
                               # the shortest client read timeout. Clamped to [0, 5]
                               # seconds; sse_keepalive_interval: 0 disables it entirely.
+
+# Live throughput dashboard (/live)
+perf_sample_capacity: 2000    # Finished requests kept in memory for tokens-per-second
+                              # aggregation. One small tuple per request (well under
+                              # 1 MB at the default); windows wider than the retained
+                              # samples are reported as truncated rather than wrong.
 
 # Recover from undecryptable encrypted content (disabled by default)
 auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
@@ -379,6 +386,28 @@ Each JSONL line includes:
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
+
+### Live Throughput
+
+`/live` answers one question: *why does it feel slow right now, and which model is to blame?*
+
+Every finished request records one small sample (model, endpoint, status, duration, time to first token, tokens) into a bounded in-memory ring sized by `perf_sample_capacity`. Nothing is aggregated on the request path — the page computes everything on read — so the feature costs one tuple append per request and nothing at all when the page is closed.
+
+The page shows, for a selectable window (5m / 15m / 1h / 6h / 24h / since start):
+
+- **Running now** — in-flight requests with model, endpoint, state, elapsed time, and TTFT once the first token arrived. Derived from the existing request-cache states, so there is no second registry to leak.
+- **Speed by model** — `tok/s` (token-weighted decode speed), its p10/median/p90 across individual requests, TTFT median/p90, duration median/p90, request and error counts, and token volume.
+- **Endpoints** — request, error, and output-token counts per proxy endpoint.
+
+Definitions that matter when reading the numbers:
+
+- `tokens_per_second` is **output tokens / generation seconds**, where generation seconds is the total duration minus the time to first token. Upstream queueing therefore shows up as a large **TTFT** instead of silently depressing the measured speed.
+- Non-streaming responses have no measurable TTFT; their full duration counts as generation time and they are excluded from the TTFT columns.
+- Requests with no output tokens, or under 0.05 s of generation, are excluded from speed metrics (they are rounding noise) but still counted as requests and errors.
+
+The same two fields, `ttft` and `tokens_per_second`, are attached to every cached request, so they also appear in the request browser, in `/api/requests`, and in persisted `.jl` request files.
+
+Scope is deliberate: these metrics cover the **current process run only** and reset on restart. A window wider than the retained samples is reported as truncated instead of under-reporting silently; raise `perf_sample_capacity` for a longer history, or use [Request File Logging](#request-file-logging) and `/request-stats` for cross-day analysis. Imported `.jl` requests never feed the live metrics — replaying an export must not invent throughput this process never produced.
 
 ### Request File Logging
 
@@ -777,6 +806,8 @@ Configured models are selectable from `/chat` and participate in the same reques
 ### Dashboard & Monitoring
 
 - `GET /` - Web dashboard with statistics
+- `GET /live` - Live throughput page: tokens/second and TTFT per model for the current run
+- `GET /api/live-stats?window=5m|15m|1h|6h|24h|all|<seconds>&user=<id>` - Live throughput JSON, including in-flight requests
 - `GET /requests` - Request browser page
 - `GET /request-stats` - Multi-file persisted request statistics page
 - `GET /api/request-stats/files` - List daily request files and index state without scanning contents
@@ -890,6 +921,7 @@ Access the web dashboard at `http://localhost:8313/` to:
 - See per-endpoint analytics
 - Browse recent requests
 - View detailed request/response bodies
+- Use Live Throughput (`/live`) to see what is running right now and why it feels slow (see [Live Throughput](#live-throughput))
 - Use Request Stats (`/request-stats`) to multi-select persisted daily files, compare overall/model/response-code distributions, click histogram buckets for matching requests, and open hash-verified historical details
 - Use Code Agent Manager to:
   - Install code-agent CLIs
@@ -904,6 +936,23 @@ Access the web dashboard at `http://localhost:8313/` to:
   - Browse sessions across machines via OneDrive
   - Resume viewing past session history
 
+### Shared navigation
+
+Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Code Agent, Request Stats, and the raw JSON stats endpoints) live behind the **Other** menu.
+
+A template only declares its title and any page-specific buttons:
+
+```html
+<nav class="navbar" id="app-nav" data-title="Request Browser">
+    <template id="nav-extras">
+        <button onclick="downloadRequests()">Download .jl</button>
+    </template>
+</nav>
+<script src="{{ url_for('static', filename='nav.js') }}"></script>
+```
+
+The active entry is derived from the current path (`data-active="/request-stats"` overrides it for detail pages), and the measured bar height is published as the `--nav-height` CSS variable for the full-height pages. "Runtime Config Override" opens the modal in place on the dashboard and links to `/#runtime-config` from anywhere else.
+
 ## Production deployment
 
 When you expose ghc-api beyond `localhost` (sharing a single instance with other people, putting it on a VPS, etc.), put a reverse proxy in front to authenticate admin paths. ghc-api intentionally does **not** authenticate dashboard pages or admin APIs at the Flask layer — that responsibility is delegated to your reverse proxy.
@@ -916,7 +965,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
-| **Admin — dashboard & inspection** | `GET /`, `/requests`, `/request-stats`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
+| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
 
 ### Sample nginx config
 

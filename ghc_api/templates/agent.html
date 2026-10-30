@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
     <title>Copilot API Proxy - Code Agent</title>
     <style>
         * {
@@ -21,46 +22,10 @@
             overflow: hidden;
         }
 
-        .navbar {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 0.75rem 1.5rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-
-        .navbar h1 {
-            font-size: 1.25rem;
-            font-weight: 600;
-        }
-
-        .navbar-actions {
-            display: flex;
-            gap: 0.75rem;
-            align-items: center;
-        }
-
-        .navbar-actions a, .navbar-actions button {
-            color: white;
-            text-decoration: none;
-            padding: 0.4rem 0.75rem;
-            border-radius: 4px;
-            background: rgba(255,255,255,0.2);
-            transition: background 0.2s;
-            border: none;
-            font-size: 0.875rem;
-            cursor: pointer;
-        }
-
-        .navbar-actions a:hover, .navbar-actions button:hover {
-            background: rgba(255,255,255,0.3);
-        }
-
         .main-container {
             display: flex;
-            height: calc(100vh - 52px);
+            /* --nav-height is measured and published by nav.js. */
+            height: calc(100vh - var(--nav-height, 70px));
         }
 
         /* Left panel - Detail/interaction view */
@@ -731,16 +696,8 @@
     </style>
 </head>
 <body>
-    <nav class="navbar">
-        <h1>Code Agent</h1>
-        <div class="navbar-actions">
-            <a href="/">Dashboard</a>
-            <a href="/requests">Request Browser</a>
-            <a href="/chat">Chat</a>
-            <a href="/code-agent-manager">Agent Manager</a>
-            <a href="/request-stats">Request Stats</a>
-        </div>
-    </nav>
+    <nav class="navbar" id="app-nav" data-title="Code Agent"></nav>
+    <script src="{{ url_for('static', filename='nav.js') }}"></script>
 
     <div class="main-container">
         <!-- Left panel: create form + conversation + prompt input -->

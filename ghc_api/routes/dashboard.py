@@ -27,6 +27,7 @@ from ..api_helpers import (
     get_github_web_base_url,
 )
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
+from ..perf_stats import WINDOW_PRESETS, parse_window, perf_stats
 from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
 from ..anysearch import is_configured as anysearch_is_configured, tool_definitions as anysearch_tool_definitions
@@ -185,6 +186,12 @@ def code_agent_manager_page():
 def code_agent_manager_config_page():
     """Serve code-agent installation and config-sync details."""
     return render_template("code_agent_manager_config.html")
+
+
+@dashboard_bp.route("/live", methods=["GET"])
+def live_stats_page():
+    """Serve the live throughput (tokens/second) dashboard."""
+    return render_template("live_stats.html")
 
 
 @dashboard_bp.route("/request-stats", methods=["GET"])
@@ -457,6 +464,25 @@ def api_stats():
     stats = cache.get_stats(user_id=_user_filter_from_request())
     stats["counters"] = counters.snapshot()
     return jsonify(stats)
+
+
+@dashboard_bp.route("/api/live-stats", methods=["GET"])
+def api_live_stats():
+    """Live per-model throughput for the current process run.
+
+    ``?window=`` accepts a preset (5m/15m/1h/6h/24h/all) or a raw number of
+    seconds; ``?user=`` filters to one user. Everything is computed on read
+    from a bounded in-memory sample ring, so this endpoint costs nothing when
+    nobody is looking at it.
+    """
+    user_filter = _user_filter_from_request()
+    window_label, window_seconds = parse_window(request.args.get("window"))
+
+    payload = perf_stats.snapshot(window_seconds=window_seconds, user_id=user_filter)
+    payload["window"] = window_label
+    payload["window_presets"] = list(WINDOW_PRESETS.keys())
+    payload["in_flight"] = cache.get_in_flight(user_id=user_filter)
+    return jsonify(payload)
 
 
 @dashboard_bp.route("/api/request-stats/files", methods=["GET"])
