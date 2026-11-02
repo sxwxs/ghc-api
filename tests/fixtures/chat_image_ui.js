@@ -140,15 +140,31 @@ function descendants(element, tag) {
     // Restore from IndexedDB, not a short-lived URL or a huge localStorage item.
     await run('restoreImageResponse(getActiveSession().messages[1])');
     assert.equal(descendants(last(), 'img').length, 1);
-    // Raw image requests/responses use the same binary store and safe previews.
+    // All image endpoints are non-streaming, even when a false string is
+    // truthy in JavaScript. Keep previews and binary storage on this path.
     run("setMode('raw')");
-    el('endpoint-select').value = 'auto';
-    el('chat-input').value = JSON.stringify({prompt: 'edit', images: [{image_url: 'data:image/png;base64,c2VjcmV0'}]});
+    for (const endpoint of ['/v1/images/generations', '/images/generations', '/v1/images/edits', '/images/edits']) {
+        el('endpoint-select').value = endpoint;
+        for (const stream of [undefined, false, 'false', '0']) {
+            el('chat-input').value = JSON.stringify({
+                prompt: 'edit', stream, images: [{image_url: 'data:image/png;base64,c2VjcmV0'}],
+            });
+            await run('sendMessage()');
+            assert.equal(calls.at(-1).url, endpoint);
+            assert.equal(descendants(last(), 'img').length, 1, `${endpoint} stream=${stream} must show a preview`);
+            assert.equal(run('getActiveSession().messages.at(-1).role'), 'image-response');
+            assert.ok(!JSON.stringify(saved).includes('c2VjcmV0'));
+            assert.ok(!JSON.stringify(saved).includes('aW1hZ2U='));
+        }
+    }
+    // A rejected true flag returns an ordinary JSON error, not an SSE stream.
+    const successfulResponse = nextResponse;
+    nextResponse = {status: 400, body: {error: {message: 'Image streaming is not supported'}}};
+    el('chat-input').value = JSON.stringify({prompt: 'edit', stream: true});
     await run('sendMessage()');
-    assert.equal(calls.at(-1).url, '/v1/images/edits');
-    assert.equal(descendants(last(), 'img').length, 1);
-    assert.ok(!JSON.stringify(saved).includes('c2VjcmV0'));
-    assert.ok(!JSON.stringify(saved).includes('aW1hZ2U='));
+    assert.match(last().children.at(-1).textContent, /streaming is not supported/);
+    assert.equal(run('getActiveSession().messages.at(-1).statusCode'), 400);
+    nextResponse = successfulResponse;
     run("setMode('image')");
     el('chat-input').value = 'make it red';
     run('selectImageFiles([])');

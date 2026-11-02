@@ -133,6 +133,15 @@ def test_invalid_requests_do_not_spend_quota(api, body, code):
     post.assert_not_called()
 
 
+@pytest.mark.parametrize("stream", [False, None, "false", "0"])
+def test_false_stream_values_return_json_and_are_not_forwarded(api, stream):
+    client, post, _ = api
+    response = client.post(PATHS[0], json={**BODY, "stream": stream})
+    assert response.status_code == 200
+    assert response.get_json() == RESULT
+    assert "stream" not in post.call_args.kwargs["json"]
+
+
 def test_missing_edit_file_and_duplicate_model_are_rejected(api):
     client, post, _ = api
     response = client.post(PATHS[2], data={"model": MODEL, "prompt": "x"}, content_type="multipart/form-data")

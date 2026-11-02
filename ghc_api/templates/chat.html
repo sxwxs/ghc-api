@@ -2698,7 +2698,9 @@
             }
 
             const endpoint = resolveEndpoint(payload);
-            const isStream = !!payload.stream;
+            const imageRequest = /^\/(?:v1\/)?images\/(generations|edits)$/.test(endpoint);
+            // Image endpoints return JSON, including errors for stream: true.
+            const isStream = !imageRequest && !!payload.stream;
 
             let session = getActiveSession();
             if (!session) {
@@ -2706,7 +2708,6 @@
                 session = getActiveSession();
             }
 
-            const imageRequest = /^\/(?:v1\/)?images\/(generations|edits)$/.test(endpoint);
             const historyText = imageRequest ? imageRequestSummary(payload) : text;
             // Raw image payloads may contain multi-megabyte data URLs.
             session.messages.push({ role: 'raw-request', content: historyText, endpoint });
