@@ -611,6 +611,20 @@
         .raw-response .json-boolean { color: #569cd6; }
         .raw-response .json-null { color: #569cd6; }
 
+        /* Images share the conversation pane, but never chat history. */
+        .image-controls { display: none; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 10px; }
+        .image-controls.visible { display: flex; }
+        .image-controls select, .image-controls input { max-width: 230px; padding: 5px; }
+        .image-note { width: 100%; color: #777; font-size: 12px; }
+        .message.image-request, .message.image-response { max-width: 95%; padding: 14px; border-radius: 10px; background: #f3f5f8; }
+        .message.image-request { white-space: pre-wrap; }
+        .image-label { color: #666; font-size: 12px; margin-bottom: 8px; }
+        .image-gallery { display: flex; flex-wrap: wrap; gap: 12px; }
+        .image-gallery figure { margin: 0; max-width: 100%; }
+        .image-gallery img { display: block; max-width: 100%; max-height: 520px; object-fit: contain; border-radius: 6px; }
+        .image-gallery a, .image-gallery button { display: inline-block; margin: 8px 10px 0 0; }
+        .image-error { color: #b71c1c; white-space: pre-wrap; }
+
         /* Decision mode (System One decision models) */
         .message.decision-request {
             align-self: flex-end;
@@ -806,6 +820,7 @@
                 <div class="mode-toggle">
                     <button id="mode-chat" class="active" onclick="setMode('chat')">Chat</button>
                     <button id="mode-raw" onclick="setMode('raw')">Raw</button>
+                    <button id="mode-image" onclick="setMode('image')">Image</button>
                     <button id="mode-decision" onclick="setMode('decision')"
                             title="Decision models (System One): score options and return probabilities">Decision</button>
                 </div>
@@ -822,6 +837,17 @@
                 <div class="empty-state" id="empty-state">Select or create a chat session to begin</div>
             </div>
             <div class="input-area">
+                <div class="image-controls" id="image-controls">
+                    <label>Action <select id="image-operation"><option value="generations">Generate</option><option value="edits">Edit</option></select></label>
+                    <label>Size <select id="image-size"><option value="auto">Auto</option><option value="1024x1024">1024 × 1024</option><option value="1536x1024">1536 × 1024</option><option value="1024x1536">1024 × 1536</option></select></label>
+                    <label>Quality <select id="image-quality"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="auto">Auto</option></select></label>
+                    <label>Format <select id="image-format"><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select></label>
+                    <label>Count <input id="image-count" type="number" min="1" max="4" value="1" style="width: 55px;"></label>
+                    <label>Reference images <input id="image-files" type="file" accept="image/png,image/jpeg,image/webp" multiple onchange="selectImageFiles(this.files)"></label>
+                    <button type="button" onclick="selectImageFiles([])">Clear references</button>
+                    <span id="image-file-label"></span>
+                    <div class="image-note">Image tokens are billed separately. No automatic retries. Images are stored in this browser (IndexedDB); download originals to keep them.</div>
+                </div>
                 <div class="input-wrapper">
                     <textarea id="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
                     <button class="send-btn" id="send-btn" onclick="sendMessage()">Send</button>
@@ -861,7 +887,7 @@
         let abortController = null;
         let modelsData = [];
         let modelTargets = {}; // selection key -> model id, provider, endpoints, and base URL
-        let chatMode = 'chat'; // 'chat' | 'raw' | 'decision'
+        let chatMode = 'chat'; // 'chat' | 'raw' | 'decision' | 'image'
 
         // ---- Session management ----
 
@@ -893,6 +919,10 @@
 
         function deleteSession(id, e) {
             e.stopPropagation();
+            const removed = sessions.find(s => s.id === id);
+            for (const msg of removed?.messages || []) {
+                if (msg.imageId) imageStore('delete', msg.imageId).catch(() => {});
+            }
             sessions = sessions.filter(s => s.id !== id);
             saveSessions();
             if (activeSessionId === id) {
@@ -910,6 +940,8 @@
             }
             updateEndpointOptions();
             updateWebSearchAvailability();
+            if (chatMode !== 'raw' && targetSupportsImages(selectedModelTarget())) setMode('image');
+            else if (chatMode === 'image') setMode('chat');
             renderSessionList();
             renderMessages();
             document.getElementById('chat-input').focus();
@@ -979,6 +1011,10 @@
                     appendRawRequestEl(msg.content, msg.endpoint);
                 } else if (msg.role === 'raw-response') {
                     appendRawResponseEl(msg.content, msg.statusCode);
+                } else if (msg.role === 'image-request') {
+                    appendImageRequest(msg.content, msg.endpoint);
+                } else if (msg.role === 'image-response') {
+                    restoreImageResponse(msg);
                 } else if (msg.role === 'decision-request') {
                     appendDecisionRequestEl(msg.content, msg.endpoint);
                 } else if (msg.role === 'decision-response') {
@@ -1213,7 +1249,9 @@
             const baseUrl = target ? target.baseUrl : '/v1';
             return baseUrl + (apiStyle === 'responses' ? '/responses' :
                 apiStyle === 'messages' ? '/messages' :
-                apiStyle === 'systemone' ? '/systemone' : '/chat/completions');
+                apiStyle === 'systemone' ? '/systemone' :
+                apiStyle === 'generations' ? '/images/generations' :
+                apiStyle === 'edits' ? '/images/edits' : '/chat/completions');
         }
 
         function isSystemOneEndpoint(endpoint) {
@@ -1253,6 +1291,7 @@
             if (targetIsDecisionOnly(target)) {
                 label += ' [decision]';
             }
+            if (targetSupportsImages(target)) label += ' [image]';
             if (target.contextWindow) {
                 label += ' [' + formatTokenCount(target.contextWindow) + ' ctx]';
             }
@@ -1365,6 +1404,7 @@
             }
             updateEndpointOptions();
             updateWebSearchAvailability();
+            if (chatMode !== 'raw' && targetSupportsImages(selectedModelTarget())) setMode('image');
         }
 
         function onModelChange() {
@@ -1378,7 +1418,11 @@
             updateEndpointOptions();
             updateWebSearchAvailability();
             // A decision-only model cannot chat; switch to the mode it supports.
-            if (chatMode === 'chat' && isDecisionOnly(model)) {
+            if (chatMode !== 'raw' && targetSupportsImages(selectedModelTarget(model))) {
+                setMode('image');
+            } else if (chatMode === 'image') {
+                setMode(isDecisionOnly(model) ? 'decision' : 'chat');
+            } else if (chatMode === 'chat' && isDecisionOnly(model)) {
                 setMode('decision');
             }
         }
@@ -1401,6 +1445,13 @@
                 }
                 if (target.supportedEndpoints.some(isSystemOneEndpoint)) {
                     endpoints.push({ value: endpointForModel(null, 'systemone'), label: endpointForModel(null, 'systemone') });
+                }
+            } else if (targetSupportsImages(target)) {
+                for (const op of ['generations', 'edits']) {
+                    if (targetSupportsImageOperation(target, op)) {
+                        const path = endpointForModel(null, op);
+                        endpoints.push({ value: path, label: path });
+                    }
                 }
             } else {
                 endpoints.push({ value: '/v1/responses', label: '/v1/responses' });
@@ -1489,6 +1540,7 @@
         // ---- Sending messages ----
 
         async function sendMessage() {
+            if (chatMode === 'image') return sendImageMessage();
             if (chatMode === 'raw') {
                 return sendRawMessage();
             }
@@ -1510,6 +1562,10 @@
             const modelTarget = selectedModelTarget(modelSelection);
             if (!modelTarget) {
                 appendMessageEl('error', 'Please select a model first.');
+                return;
+            }
+            if (targetSupportsImages(modelTarget)) {
+                appendMessageEl('error', 'This is an image model. Use Image mode.');
                 return;
             }
             if (targetIsDecisionOnly(modelTarget)) {
@@ -2545,15 +2601,18 @@
         function setMode(mode) {
             chatMode = mode;
             const chatInput = document.getElementById('chat-input');
-            for (const name of ['chat', 'raw', 'decision']) {
+            for (const name of ['chat', 'raw', 'decision', 'image']) {
                 document.getElementById('mode-' + name).classList.toggle('active', name === mode);
             }
             document.getElementById('endpoint-select').classList.toggle('visible', mode === 'raw');
+            document.getElementById('image-controls').classList.toggle('visible', mode === 'image');
             updateWebSearchAvailability();
 
-            chatInput.classList.toggle('raw-mode', mode !== 'chat');
+            chatInput.classList.toggle('raw-mode', mode === 'raw' || mode === 'decision');
             if (mode === 'raw') {
                 chatInput.placeholder = 'Raw JSON payload (Ctrl+Enter to send)\n{\n  "model": "...",\n  "messages": [...],\n  "stream": true\n}';
+            } else if (mode === 'image') {
+                chatInput.placeholder = 'Describe an image or the changes to your reference images... (Enter to send)';
             } else if (mode === 'decision') {
                 chatInput.placeholder = 'Decision request JSON with "state" and "questions" (Ctrl+Enter to send).\nThe selected model is filled in automatically.';
             } else {
@@ -2578,6 +2637,9 @@
             const selectedEndpoint = document.getElementById('endpoint-select').value;
             if (selectedEndpoint !== 'auto') return selectedEndpoint;
             const selectionKey = document.getElementById('model-select').value;
+            if (targetSupportsImages(selectedModelTarget(selectionKey))) {
+                return endpointForModel(selectionKey, payload.image || payload.images ? 'edits' : 'generations');
+            }
             if (isDecisionOnly(selectionKey)) {
                 return endpointForModel(selectionKey, 'systemone');
             }
@@ -2644,8 +2706,10 @@
                 session = getActiveSession();
             }
 
-            // Save raw request to session
-            session.messages.push({ role: 'raw-request', content: text, endpoint });
+            const imageRequest = /^\/(?:v1\/)?images\/(generations|edits)$/.test(endpoint);
+            const historyText = imageRequest ? imageRequestSummary(payload) : text;
+            // Raw image payloads may contain multi-megabyte data URLs.
+            session.messages.push({ role: 'raw-request', content: historyText, endpoint });
             if (session.messages.length === 1) {
                 session.title = '[Raw] ' + endpoint;
                 renderSessionList();
@@ -2659,7 +2723,7 @@
 
             const reqDiv = document.createElement('div');
             reqDiv.className = 'message raw-request';
-            reqDiv.innerHTML = `<span class="raw-label">${escapeHtml(endpoint)}</span>\n` + syntaxHighlightJson(payload);
+            reqDiv.innerHTML = `<span class="raw-label">${escapeHtml(endpoint)}</span>\n` + syntaxHighlightJson(imageRequest ? historyText : payload);
             container.appendChild(reqDiv);
 
             input.value = '';
@@ -2693,19 +2757,26 @@
                 });
 
                 if (!isStream) {
-                    // Non-streaming: read full response
-                    const contentType = res.headers.get('content-type') || '';
-                    let responseText;
-                    if (contentType.includes('json')) {
-                        const jsonData = await res.json();
-                        responseText = JSON.stringify(jsonData, null, 2);
-                        resDiv.innerHTML = `<span class="raw-label">Response ${res.status} (${formatDuration((performance.now() - startTime) / 1000)})</span>\n` + syntaxHighlightJson(jsonData);
+                    if (imageRequest) {
+                        const text = await res.text();
+                        let result;
+                        try { result = JSON.parse(text); } catch { result = {error: {message: text}}; }
+                        resDiv.className = 'message image-response';
+                        await saveImageResponse(session, resDiv, result, res.status, (performance.now() - startTime) / 1000);
                     } else {
-                        responseText = await res.text();
-                        resDiv.innerHTML = `<span class="raw-label">Response ${res.status} (${formatDuration((performance.now() - startTime) / 1000)})</span>\n` + escapeHtml(responseText);
+                        const contentType = res.headers.get('content-type') || '';
+                        let responseText;
+                        if (contentType.includes('json')) {
+                            const jsonData = await res.json();
+                            responseText = JSON.stringify(jsonData, null, 2);
+                            resDiv.innerHTML = `<span class="raw-label">Response ${res.status} (${formatDuration((performance.now() - startTime) / 1000)})</span>\n` + syntaxHighlightJson(jsonData);
+                        } else {
+                            responseText = await res.text();
+                            resDiv.innerHTML = `<span class="raw-label">Response ${res.status} (${formatDuration((performance.now() - startTime) / 1000)})</span>\n` + escapeHtml(responseText);
+                        }
+                        session.messages.push({ role: 'raw-response', content: responseText, statusCode: res.status });
+                        saveSessions();
                     }
-                    session.messages.push({ role: 'raw-response', content: responseText, statusCode: res.status });
-                    saveSessions();
                 } else {
                     // Streaming: show SSE events incrementally
                     const reader = res.body.getReader();
@@ -2982,6 +3053,8 @@
             scrollToBottom();
         }
 
+        {% include 'chat_images.js' %}
+
         // ---- Input handling ----
 
         function autoResize(el) {
@@ -2992,7 +3065,7 @@
         const chatInput = document.getElementById('chat-input');
         chatInput.addEventListener('input', () => autoResize(chatInput));
         chatInput.addEventListener('keydown', (e) => {
-            if (chatMode !== 'chat') {
+            if (chatMode === 'raw' || chatMode === 'decision') {
                 // In raw and decision modes: Ctrl+Enter to send (Enter is for editing JSON)
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
                     e.preventDefault();

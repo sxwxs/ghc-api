@@ -20,6 +20,7 @@ from ..api_helpers import (
     get_copilot_base_url,
     get_copilot_headers,
     is_configured_chat_completions_support_added,
+    is_non_chat_model,
     supports_embeddings_api,
     supports_responses_api,
     systemone_upstream_path,
@@ -1600,6 +1601,12 @@ def chat_completions():
         if translated_model != original_model:
             payload = dict(payload)
             payload["model"] = translated_model
+
+        if is_non_chat_model(translated_model):
+            return _invalid_request(
+                f"Model '{original_model}' is not a chat model. Use its advertised endpoints.",
+                "unsupported_model", "model",
+            )
 
         # Web IQ is no longer applied inside the proxy path. Strip the retired
         # option so it can never reach Copilot as an unknown parameter, and

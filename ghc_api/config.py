@@ -50,6 +50,7 @@ DEFAULT_MODEL_MAPPINGS = {
 
 # Models that should be advertised as supporting the OpenAI-compatible
 # /v1/chat/completions endpoint even when Copilot's model metadata omits it.
+# Applied only to text-compatible entries, never known non-chat model types.
 DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT = {
     "exact": [],
     "prefix": [

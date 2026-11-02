@@ -456,6 +456,7 @@ def main():
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"System One decision API: http://{host}:{port}/v1/systemone")
+    print(f"Images API: http://{host}:{port}/v1/images/generations, /v1/images/edits")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
     if webiq.is_configured(state):
         print(f"Web IQ v3 REST APIs: http://{host}:{port}/v3/")
