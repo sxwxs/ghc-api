@@ -75,6 +75,7 @@ async function fetch(url, options) {
             {id: 'microsoft-decision-1', display_name: 'Microsoft-Decision-1',
              model_type: 'decisions', supported_endpoints: ['/v1/systemone']},
             {id: 'decision-typed', model_type: 'decisions', supported_endpoints: []},
+            {id: 'gpt-image', model_type: 'image', supported_endpoints: ['/v1/images/generations']},
         ] }) };
     }
     if (url === '/proxy/models') {
@@ -177,6 +178,27 @@ const lastMessage = () => container.children.at(-1);
     run('renderMessages()');
     assert.equal(container.children.length, 2);
     assert.match(container.children[1].innerHTML, /99\.8%/);
+
+    // Restoring a Decision session after an Image session must not enter Chat.
+    const decisionSessionId = run('activeSessionId');
+    run("sessions.push({id: 'image-session', model: 'gpt-image', messages: []})");
+    run("setActiveSession('image-session')");
+    assert.equal(run('chatMode'), 'image');
+    run(`setActiveSession(${JSON.stringify(decisionSessionId)})`);
+    assert.equal(run('chatMode'), 'decision');
+    assert.equal(elements['model-select'].value, 'microsoft-decision-1');
+    assert.ok(elements['mode-decision'].classList.contains('active'));
+    assert.match(container.children[1].innerHTML, /99\.8%/);
+    const beforeRestoredSend = calls.length;
+    await run('sendMessage()');
+    assert.equal(calls.length, beforeRestoredSend + 1);
+    assert.equal(calls.at(-1).url, '/v1/systemone');
+
+    // Explicit Raw mode remains Raw when either session is restored.
+    run("setMode('raw'); setActiveSession('image-session')");
+    run(`setActiveSession(${JSON.stringify(decisionSessionId)})`);
+    assert.equal(run('chatMode'), 'raw');
+    run("setMode('decision')");
 
     // Upstream validation errors are shown, not hidden behind empty cards.
     nextResponse = {status: 422, body: JSON.stringify({detail: 'At least one question is required.'})};

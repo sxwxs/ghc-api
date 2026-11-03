@@ -152,6 +152,12 @@ async function saveImageResponse(session, div, result, statusCode, duration) {
     }
     session.messages.push(message);
     saveSessions();
+    // Switching away and back rebuilt the pane while this request was pending.
+    // Reuse the live result so a storage failure cannot hide its only preview.
+    if (activeSessionId === session.id) {
+        const container = document.getElementById('messages-container');
+        if (!container.contains(div)) container.appendChild(div);
+    }
 }
 
 async function sendImageMessage() {

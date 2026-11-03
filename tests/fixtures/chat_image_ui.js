@@ -10,13 +10,26 @@ function element(tag = 'div') {
             add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
             contains(name) { return classes.has(name); },
         },
-        appendChild(child) { this.children.push(child); return child; },
-        insertBefore(child) { this.children.push(child); return child; },
+        appendChild(child) {
+            if (child.parentNode) {
+                const siblings = child.parentNode.children;
+                siblings.splice(siblings.indexOf(child), 1);
+            }
+            child.parentNode = this;
+            this.children.push(child);
+            return child;
+        },
+        insertBefore(child) { return this.appendChild(child); },
+        contains(node) { return node === this || this.children.some(child => child.contains(node)); },
         querySelector() { return null; }, remove() {}, focus() {},
     };
     Object.defineProperty(el, 'innerHTML', {
         get() { return this.html || ''; },
-        set(value) { this.html = value; if (value === '') this.children = []; },
+        set(value) {
+            this.html = value;
+            for (const child of this.children) child.parentNode = null;
+            this.children = [];
+        },
     });
     Object.defineProperty(el, 'textContent', {
         get() { return this.text || ''; },
@@ -38,6 +51,8 @@ const saved = {};
 const localStorage = {getItem: k => saved[k] || null, setItem: (k, v) => { saved[k] = v; }};
 const images = new Map();
 let storageFailure = false;
+let writeGate = null;
+let notifyWriteStarted = null;
 const indexedDB = {open() {
     const opening = {};
     queueMicrotask(() => {
@@ -45,7 +60,12 @@ const indexedDB = {open() {
             const tx = {objectStore() {
                 function op(action, value, key) {
                     const result = {};
-                    queueMicrotask(() => {
+                    queueMicrotask(async () => {
+                        if (action === 'put' && writeGate) {
+                            const gate = writeGate;
+                            notifyWriteStarted();
+                            await gate;
+                        }
                         if (storageFailure && action === 'put') {
                             tx.error = new Error('Quota exceeded'); tx.onabort(); return;
                         }
@@ -70,6 +90,7 @@ let nextResponse = {status: 200, body: {
     usage: {input_tokens: 17, output_tokens: 196},
 }};
 let networkFailure = false;
+let responseGate = null;
 const calls = [];
 async function fetch(url, options) {
     if (url === '/v1/models') return {ok: true, json: async () => ({data: [
@@ -79,6 +100,7 @@ async function fetch(url, options) {
     if (url === '/proxy/models') return {ok: true, json: async () => ({data: []})};
     calls.push({url, options});
     if (networkFailure) throw new Error('Connection lost');
+    if (responseGate) await responseGate;
     return {ok: nextResponse.status < 400, status: nextResponse.status,
         text: async () => JSON.stringify(nextResponse.body), headers: {get: () => 'application/json'}};
 }
@@ -179,6 +201,59 @@ function descendants(element, tag) {
     assert.match(last().children.at(-1).textContent, /not saved/);
     assert.ok(!JSON.stringify(saved).includes('aW1hZ2U='));
     storageFailure = false;
+
+    // Switching away and back while either the response or the storage write
+    // is pending must reattach the original result, including quota warnings.
+    const imageSessionId = run('activeSessionId');
+    run("sessions.push({id: 'other-session', title: 'Other', model: 'gpt-chat', messages: []})");
+    for (const phase of ['response', 'storage']) {
+        for (const failStorage of [false, true]) {
+            storageFailure = failStorage;
+            let release;
+            const gate = new Promise(resolve => { release = resolve; });
+            let writeStarted;
+            if (phase === 'response') responseGate = gate;
+            else {
+                writeGate = gate;
+                writeStarted = new Promise(resolve => { notifyWriteStarted = resolve; });
+            }
+            el('chat-input').value = 'a blue circle';
+            const before = calls.length;
+            const pending = run('sendMessage()');
+            if (writeStarted) await writeStarted;
+            const responseDiv = last();
+            run("setActiveSession('other-session')");
+            run(`setActiveSession(${JSON.stringify(imageSessionId)})`);
+            assert.equal(el('messages-container').contains(responseDiv), false);
+            release();
+            await pending;
+            responseGate = writeGate = notifyWriteStarted = null;
+            assert.ok(el('messages-container').contains(responseDiv), `${phase}: completed response must be visible`);
+            assert.equal(el('messages-container').children.filter(c => c === responseDiv).length, 1);
+            assert.equal(descendants(responseDiv, 'img').length, 1);
+            assert.equal(descendants(responseDiv, 'a').length, 1);
+            if (failStorage) assert.match(responseDiv.children.at(-1).textContent, /not saved/);
+            assert.equal(calls.length, before + 1, 'switching sessions must not retry generation');
+            assert.ok(!JSON.stringify(saved).includes('aW1hZ2U='));
+        }
+    }
+    storageFailure = false;
+
+    // Completion while another session is active must not show the image there.
+    let releaseResponse;
+    responseGate = new Promise(resolve => { releaseResponse = resolve; });
+    el('chat-input').value = 'another circle';
+    const pending = run('sendMessage()');
+    const responseDiv = last();
+    run("setActiveSession('other-session')");
+    releaseResponse();
+    await pending;
+    responseGate = null;
+    assert.equal(el('messages-container').contains(responseDiv), false);
+    assert.equal(descendants(el('messages-container'), 'img').length, 0);
+    run(`setActiveSession(${JSON.stringify(imageSessionId)})`);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(descendants(last(), 'img').length, 1);
 
     nextResponse = {status: 403, body: {error: {message: '<script>policy disabled</script>'}}};
     await run('sendMessage()');
