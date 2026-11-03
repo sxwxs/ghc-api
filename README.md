@@ -6,7 +6,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Features
 
-- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` endpoints, plus the `/v1/systemone` decision API
+- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/images/{generations,edits}` endpoints, plus the `/v1/systemone` decision API
 - **Anthropic API Compatibility**: `/v1/messages` endpoint with automatic request/response translation
 - **Model Listing**: `/v1/models` endpoint listing available models
 - **Model Name Mapping**: Translate model names with exact and prefix-based matching
@@ -425,7 +425,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -502,6 +502,8 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 - `POST /embeddings` - Create embeddings (without v1 prefix)
 - `POST /v1/systemone` - System One decision API (e.g. Microsoft-Decision-1)
 - `POST /systemone` - System One decision API (without v1 prefix)
+- `POST /v1/images/generations` / `POST /images/generations` - Generate images
+- `POST /v1/images/edits` / `POST /images/edits` - Edit reference images
 - `GET /v1/models` - List available models with token limits and capabilities
 - `GET /models` - Same listing without the v1 prefix
 - `GET /v1/models/<model_id>` / `GET /models/<model_id>` - Retrieve one model's metadata
@@ -511,6 +513,58 @@ Model entries include `context_window`, `max_input_tokens`, `max_output_tokens`,
 input types, reasoning capabilities, and supported endpoints. Unknown metadata
 is `null`. See [Model metadata](docs/MODEL_METADATA.md) for the schema, cache
 behavior, and field mapping for pi integrations.
+
+### Images (Copilot)
+
+Image models such as `gpt-image-2.5-flare` use dedicated Images endpoints, not Chat
+Completions or Responses. Only endpoints advertised in the model catalog are
+accepted. The `gpt-*` / `mai-code-*` Chat Completions compatibility overrides apply
+to text models, never known image, embedding, or decision models. Known non-chat
+models are also rejected by the text-generation APIs rather than sent upstream.
+
+```bash
+# Generate one low-quality image (response contains data[].b64_json).
+curl http://127.0.0.1:8313/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-image-2.5-flare","prompt":"A blue circle on white","size":"1024x1024","quality":"low","n":1}'
+
+# Edit an image. Repeat image[] for multiple reference images; mask is optional.
+curl http://127.0.0.1:8313/v1/images/edits \
+  -F model=gpt-image-2.5-flare \
+  -F 'prompt=Change the circle to red' \
+  -F quality=low \
+  -F 'image[]=@circle.png'
+```
+
+Add `Authorization: Bearer <user-token>` when user authentication is enabled.
+Model mappings, request statistics, per-user usage, and upstream errors work as
+on the other APIs. JSON generation and multipart editing have been verified
+against Copilot; JSON edit bodies are also forwarded for upstream validation.
+Additional parameters are passed through, so unsupported options are reported
+by Copilot rather than silently removed. Responses (including image bytes,
+usage breakdown, and content provenance metadata) are returned unchanged.
+Image payloads are omitted from request logs; token counts and timing are kept.
+
+- Non-streaming only for now; `stream: true` returns HTTP 400.
+- Upload limit: 50 MiB per image request. Set your reverse proxy's
+  `client_max_body_size` accordingly (nginx defaults to 1 MiB).
+- Image requests are **never automatically retried**, even after a timeout.
+  A timed-out request may have completed and been billed upstream; check usage
+  before manually resubmitting.
+- Images are billed separately by image/text tokens against Copilot AI credits,
+  and organization model policies still apply. See [GitHub's image-generation documentation](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/image-generation).
+
+The built-in `/chat` page has an **Image** mode. Image models have an `[image]`
+label and selecting one enters Image mode. Choose Generate or Edit, size,
+quality, output format, and count; upload reference images or click **Use as
+reference** on a generated result. Results include previews and **Download
+original** without re-encoding. Search tools and text-chat history are not sent
+to image models. Raw mode offers the Images endpoints too.
+
+Image results are stored in the browser's IndexedDB, not localStorage. Session
+history keeps only references and small metadata. If browser storage is blocked
+or full, the current result remains downloadable with a warning; clearing browser
+data removes saved previews. Download originals for durable storage.
 
 ### System One decisions (Copilot)
 
@@ -912,7 +966,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v1/systemone`, `/systemone`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v1/systemone`, `/systemone`, `/v1/images/generations`, `/images/generations`, `/v1/images/edits`, `/images/edits`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
@@ -928,6 +982,7 @@ server {
     server_name ghc.example.com;
 
     # ssl_certificate / ssl_certificate_key go here
+    client_max_body_size 50m;         # Image-edit uploads
 
     # Default for the whole server: admin basic-auth required.
     auth_basic "ghc-api admin";
@@ -943,7 +998,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
     # Aliases without the /v1 prefix
-    location ~ ^/(chat/completions|responses|models)(/|$) {
+    location ~ ^/(chat/completions|responses|embeddings|systemone|images|models)(/|$) {
         auth_basic off;
         proxy_pass http://127.0.0.1:8313;
         proxy_buffering off;

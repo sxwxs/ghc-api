@@ -257,7 +257,12 @@ def apply_configured_chat_completions_support(models: Dict, reset_tracking: bool
             supported_endpoints = []
 
         changed = False
-        matches_config = chat_completions_model_support.matches(model_id)
+        # Prefix overrides exist for text-model compatibility, not to turn
+        # image, embedding, or decision models into chat models.
+        matches_config = (
+            chat_completions_model_support.matches(model_id)
+            and not _is_non_chat_model_entry(model)
+        )
         was_added_by_config = model_id in added_model_ids
 
         if matches_config and CHAT_COMPLETIONS_ENDPOINT not in supported_endpoints:
@@ -277,6 +282,39 @@ def apply_configured_chat_completions_support(models: Dict, reset_tracking: bool
             updated_count += 1
 
     return updated_count
+
+
+def _is_non_chat_model_entry(model: Dict) -> bool:
+    capabilities = model.get("capabilities") or {}
+    model_type = model.get("model_type") or capabilities.get("type")
+    if model_type:
+        return model_type in ("image", "embeddings", "decisions")
+    endpoints = model.get("supported_endpoints") or []
+    # Also recognise image-only entries when the type field is absent. Ignore
+    # the synthetic chat endpoint: an earlier application may have added it.
+    return any(e in endpoints for e in (
+        "/images/generations", "/v1/images/generations",
+        "/images/edits", "/v1/images/edits",
+    )) and not any(e in endpoints for e in ("/responses", "/v1/responses", "/v1/messages"))
+
+
+def is_non_chat_model(model_id: str) -> bool:
+    """Reject known non-chat models without changing unknown-model behaviour."""
+    return any(
+        m.get("id") == model_id and _is_non_chat_model_entry(m)
+        for m in (state.models or {}).get("data", [])
+    )
+
+
+def image_upstream_path(model_id: str, operation: str) -> Optional[str]:
+    """Use only image endpoints explicitly advertised by the model."""
+    for model in (state.models or {}).get("data", []):
+        if model.get("id") == model_id:
+            endpoints = model.get("supported_endpoints") or []
+            for path in (f"/v1/images/{operation}", f"/images/{operation}"):
+                if path in endpoints:
+                    return path
+    return None
 
 
 def is_configured_chat_completions_support_added(models: Dict, model_id: str) -> bool:
