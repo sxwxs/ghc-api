@@ -151,7 +151,12 @@ async function saveImageResponse(session, div, result, statusCode, duration) {
         message.result = result;
     }
     session.messages.push(message);
-    saveSessions();
+    try {
+        saveSessions();
+    } catch {
+        // Metadata storage failure must not overwrite an already-rendered result.
+        imageText(div, 'Session history was not saved in this browser. Download any generated images before leaving.', 'image-error');
+    }
     // Switching away and back rebuilt the pane while this request was pending.
     // Reuse the live result so a storage failure cannot hide its only preview.
     if (activeSessionId === session.id) {

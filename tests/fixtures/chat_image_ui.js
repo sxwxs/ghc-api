@@ -48,7 +48,16 @@ el('search-provider').options = ['off', 'native', 'webiq', 'anysearch'].map(valu
 el('image-count').value = '1';
 el('image-operation').value = 'generations';
 const saved = {};
-const localStorage = {getItem: k => saved[k] || null, setItem: (k, v) => { saved[k] = v; }};
+let metadataLimit = null;
+const localStorage = {
+    getItem: k => saved[k] || null,
+    setItem(k, v) {
+        if (k === 'ghc_chat_sessions' && metadataLimit != null && v.length > metadataLimit) {
+            throw new Error('QuotaExceededError');
+        }
+        saved[k] = v;
+    },
+};
 const images = new Map();
 let storageFailure = false;
 let writeGate = null;
@@ -202,10 +211,50 @@ function descendants(element, tag) {
     assert.ok(!JSON.stringify(saved).includes('aW1hZ2U='));
     storageFailure = false;
 
-    // Switching away and back while either the response or the storage write
-    // is pending must reattach the original result, including quota warnings.
     const imageSessionId = run('activeSessionId');
     run("sessions.push({id: 'other-session', title: 'Other', model: 'gpt-chat', messages: []})");
+
+    // Filling localStorage when the response metadata is appended must not
+    // replace a successful image with a status-0 connection error. Test both
+    // image paths and keep the preview even if IndexedDB also fails.
+    for (const mode of ['image', 'raw']) {
+        for (const failImageStorage of [false, true]) {
+            run(`setMode(${JSON.stringify(mode)})`);
+            el('endpoint-select').value = '/v1/images/generations';
+            el('chat-input').value = mode === 'raw' ? JSON.stringify({prompt: 'a circle'}) : 'a circle';
+            storageFailure = failImageStorage;
+            let release;
+            responseGate = new Promise(resolve => { release = resolve; });
+            const before = calls.length;
+            const beforeImages = images.size;
+            const beforeMessages = run('getActiveSession().messages.length');
+            const pending = run('sendMessage()');
+            const responseDiv = last();
+            const requestHistory = saved['ghc_chat_sessions'];
+            metadataLimit = requestHistory.length;
+            run("setActiveSession('other-session')");
+            run(`setActiveSession(${JSON.stringify(imageSessionId)})`);
+            release();
+            await pending;
+            metadataLimit = responseGate = null;
+            storageFailure = false;
+            assert.equal(calls.length, before + 1);
+            assert.equal(run('getActiveSession().messages.length'), beforeMessages + 2);
+            assert.equal(run('getActiveSession().messages.at(-1).statusCode'), 200);
+            assert.equal(images.size, beforeImages + (failImageStorage ? 0 : 1));
+            assert.ok(el('messages-container').contains(responseDiv));
+            assert.equal(descendants(responseDiv, 'img').length, 1);
+            assert.equal(descendants(responseDiv, 'a').length, 1);
+            assert.match(responseDiv.children.at(-1).textContent, /history.*not saved/);
+            assert.match(responseDiv.children.at(-1).textContent, /Download/);
+            assert.equal(saved['ghc_chat_sessions'], requestHistory, 'failed write must not claim persisted history');
+            assert.equal(el('send-btn').disabled, false);
+        }
+    }
+    run("setMode('image')");
+
+    // Switching away and back while either the response or the storage write
+    // is pending must reattach the original result, including quota warnings.
     for (const phase of ['response', 'storage']) {
         for (const failStorage of [false, true]) {
             storageFailure = failStorage;
