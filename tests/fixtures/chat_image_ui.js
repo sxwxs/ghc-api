@@ -99,8 +99,8 @@ async function fetch(url, options) {
     ]})};
     if (url === '/proxy/models') return {ok: true, json: async () => ({data: []})};
     calls.push({url, options});
-    if (networkFailure) throw new Error('Connection lost');
     if (responseGate) await responseGate;
+    if (networkFailure) throw new Error('Connection lost');
     return {ok: nextResponse.status < 400, status: nextResponse.status,
         text: async () => JSON.stringify(nextResponse.body), headers: {get: () => 'application/json'}};
 }
@@ -265,6 +265,48 @@ function descendants(element, tag) {
     assert.equal(calls.length, count + 1);
     assert.equal(el('send-btn').disabled, false);
     assert.match(last().children.at(-1).textContent, /No retry/);
+    assert.equal(run('getActiveSession().messages.at(-1).statusCode'), 0, 'local failure is not an HTTP response');
+    assert.match(run('getActiveSession().messages.at(-1).result.error.message'), /billed/);
+    run('renderMessages()');
+    assert.match(last().children.at(-1).textContent, /No retry/);
+
+    // A delayed connection failure must be recorded even after switching
+    // sessions, without retrying or showing the warning in the wrong session.
+    for (const returnBeforeFailure of [true, false]) {
+        let releaseFailure;
+        responseGate = new Promise(resolve => { releaseFailure = resolve; });
+        el('chat-input').value = 'a circle';
+        const before = calls.length;
+        const pending = run('sendMessage()');
+        const responseDiv = last();
+        run("setActiveSession('other-session')");
+        if (returnBeforeFailure) run(`setActiveSession(${JSON.stringify(imageSessionId)})`);
+        releaseFailure();
+        await pending;
+        responseGate = null;
+        assert.equal(calls.length, before + 1);
+        assert.equal(el('send-btn').disabled, false);
+        assert.equal(el('messages-container').contains(responseDiv), returnBeforeFailure);
+        run(`setActiveSession(${JSON.stringify(imageSessionId)})`);
+        assert.match(last().children.at(-1).textContent, /No retry/);
+        assert.match(last().children.at(-1).textContent, /billed/);
+    }
+
+    // Raw image requests share the failure history and re-rendering path.
+    run("setMode('raw')");
+    el('endpoint-select').value = '/v1/images/generations';
+    el('chat-input').value = JSON.stringify({prompt: 'a circle'});
+    const beforeRawFailure = calls.length;
+    await run('sendMessage()');
+    assert.equal(calls.length, beforeRawFailure + 1);
+    assert.equal(run('getActiveSession().messages.at(-1).role'), 'image-response');
+    assert.equal(run('getActiveSession().messages.at(-1).statusCode'), 0);
+    // Simulate a reload from the localStorage history, not just in-memory state.
+    run('sessions = []; activeSessionId = null; loadSessions()');
+    run(`setActiveSession(${JSON.stringify(imageSessionId)})`);
+    assert.match(last().children.at(-1).textContent, /No retry/);
+    assert.match(last().children.at(-1).textContent, /billed/);
+    run("setMode('image')");
 
     // Reject active-content URLs and invalid base64 without rendering HTML.
     const div = element();

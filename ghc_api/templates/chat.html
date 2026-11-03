@@ -2822,8 +2822,14 @@
                 }
             } catch (err) {
                 if (err.name === 'AbortError') return;
-                resDiv.innerHTML = `<span class="raw-label">Error</span>\n` + escapeHtml(err.message);
-                resDiv.style.borderColor = '#ef9a9a';
+                if (imageRequest) {
+                    const message = err.message + ' No retry was attempted; generation may already have completed and been billed. Check usage before submitting again.';
+                    resDiv.className = 'message image-response';
+                    await saveImageResponse(session, resDiv, {error: {message}}, 0, (performance.now() - startTime) / 1000);
+                } else {
+                    resDiv.innerHTML = `<span class="raw-label">Error</span>\n` + escapeHtml(err.message);
+                    resDiv.style.borderColor = '#ef9a9a';
+                }
             } finally {
                 isStreaming = false;
                 document.getElementById('send-btn').disabled = false;

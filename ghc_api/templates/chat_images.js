@@ -227,7 +227,9 @@ async function sendImageMessage() {
         try { result = JSON.parse(text); } catch { result = {error: {message: text || 'Empty upstream response'}}; }
         await saveImageResponse(session, div, result, response.status, (performance.now() - start) / 1000);
     } catch (err) {
-        imageText(div, err.message + ' No retry was attempted; check usage before submitting again.', 'image-error');
+        const message = err.message + ' No retry was attempted; generation may already have completed and been billed. Check usage before submitting again.';
+        // Status 0 denotes a local failure, not a response from the server.
+        await saveImageResponse(session, div, {error: {message}}, 0, (performance.now() - start) / 1000);
     } finally {
         isStreaming = false;
         abortController = null;
