@@ -50,13 +50,27 @@ class AnthropicDirectStreamHandler(SSEStreamHandler):
         if event_type == "message_start":
             msg = event.get("message", {}) or {}
             self.accumulated_model = msg.get("model", self.original_model)
-            usage = msg.get("usage", {}) or {}
-            self.input_tokens = usage.get("input_tokens", 0)
-            self.cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
-            self.cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
+            self._apply_usage(msg.get("usage"))
         elif event_type == "message_delta":
-            usage = event.get("usage", {}) or {}
-            self.output_tokens = usage.get("output_tokens", 0)
+            # Anthropic sends the final counts here, and Anthropic-compatible
+            # gateways (e.g. ModelScope) report ``input_tokens`` only in this
+            # event, leaving ``message_start`` at zeros. Take every counter the
+            # event actually carries, keeping earlier values for absent fields.
+            self._apply_usage(event.get("usage"))
+
+    def _apply_usage(self, usage: Any) -> None:
+        """Update the recorded counters from a usage object; absent fields keep their value."""
+        if not isinstance(usage, dict):
+            return
+        for field in (
+            "input_tokens",
+            "output_tokens",
+            "cache_creation_input_tokens",
+            "cache_read_input_tokens",
+        ):
+            value = usage.get(field)
+            if value is not None:
+                setattr(self, field, value)
 
     def _format_generic_error(self, e: Exception) -> str:
         # Match the existing handler: emit ``event: error\ndata: {...}\n\n``.
