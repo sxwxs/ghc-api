@@ -361,14 +361,18 @@
         let currentWindow = localStorage.getItem('liveStatsWindow') || '1h';
         let currentUser = '';
         let refreshTimer = null;
-        // Every load() fires; only the newest response is rendered, so a slow
-        // reply can never overwrite data for a filter selected after it.
+        // Every load() fires and only the newest response is rendered, so a
+        // slow reply never paints data for a filter selected after it. The
+        // auto-refresh timer skips its tick while a load is pending, so a slow
+        // server still gets its replies rendered.
         let latestLoad = 0;
+        let loading = false;
 
+        // Safe in text and in quoted attributes (option values, class names).
         function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text === null || text === undefined ? '' : text;
-            return div.innerHTML;
+            return String(text ?? '').replace(/[&<>"']/g, (ch) => ({
+                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+            })[ch]);
         }
 
         function formatNumber(value) {
@@ -553,6 +557,7 @@
 
         async function load() {
             const loadId = ++latestLoad;
+            loading = true;
             try {
                 const params = new URLSearchParams({ window: currentWindow });
                 if (currentUser) params.set('user', currentUser);
@@ -569,6 +574,8 @@
                 if (loadId !== latestLoad) return;
                 console.error('Failed to load live stats:', error);
                 document.getElementById('updated-at').textContent = 'Update failed';
+            } finally {
+                if (loadId === latestLoad) loading = false;
             }
         }
 
@@ -579,7 +586,7 @@
             }
             const seconds = Number(document.getElementById('auto-refresh').value);
             if (seconds > 0) {
-                refreshTimer = setInterval(load, seconds * 1000);
+                refreshTimer = setInterval(() => { if (!loading) load(); }, seconds * 1000);
             }
         }
 

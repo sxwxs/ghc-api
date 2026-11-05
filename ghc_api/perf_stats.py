@@ -82,22 +82,22 @@ def parse_window(raw: Any) -> Tuple[str, Optional[int]]:
     return label, WINDOW_PRESETS[label]
 
 
-# The first event of each kind that carries model output. Every Anthropic
-# content block (text, thinking, tool_use) opens with content_block_start and
-# every Responses item (reasoning, message, function_call) with
-# output_item.added, so these mark the moment generation starts. Envelope
-# events (message_start, response.created, ...) arrive earlier and do not.
-OUTPUT_START_EVENTS = frozenset({"content_block_start", "response.output_item.added"})
-
-
-def is_output_event(event: Dict[str, Any]) -> bool:
+def is_output_event(event: Dict[str, Any], event_type: str = "") -> bool:
     """True when a parsed upstream SSE event carries model output.
 
-    The first such event is what time-to-first-token measures. Chat
-    Completions chunks count once any delta field other than ``role`` is
-    non-empty (content, reasoning, tool_calls ...).
+    The first such event is what time-to-first-token measures:
+
+    * Anthropic: any ``content_block_*`` event (text, thinking, tool_use).
+    * Responses: any ``response.output_*`` event or ``*.delta`` (reasoning,
+      text, tool arguments), so streams that skip ``output_item.added`` count.
+    * Chat Completions: a chunk with any non-empty delta field besides ``role``.
+
+    Envelope events (``message_start``, ``message_delta``, ``response.created``,
+    ``response.in_progress``) do not count. ``event_type`` is the SSE
+    ``event:`` name, for streams that do not repeat it in the payload.
     """
-    if event.get("type") in OUTPUT_START_EVENTS:
+    event_type = event_type or event.get("type") or ""
+    if event_type.startswith(("content_block_", "response.output_")) or event_type.endswith(".delta"):
         return True
     return any(
         value

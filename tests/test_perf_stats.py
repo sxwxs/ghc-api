@@ -65,12 +65,22 @@ class OutputEventTests(unittest.TestCase):
             {"choices": [{"delta": {"content": "Hi"}}]},
             {"choices": [{"delta": {"reasoning_text": "Hmm"}}]},
             {"choices": [{"delta": {"content": None, "tool_calls": [{"index": 0}]}}]},
+            # Streams that skip the item/block start still count.
+            {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hi"}},
+            {"type": "response.output_text.delta", "delta": "Hi"},
+            {"type": "response.reasoning_summary_text.delta", "delta": "Hmm"},
+            {"type": "response.function_call_arguments.delta", "delta": "{"},
         ):
             self.assertTrue(is_output_event(event), event)
+
+    def test_sse_event_name_is_used_when_payload_has_no_type(self) -> None:
+        self.assertTrue(is_output_event({"index": 0}, "content_block_start"))
+        self.assertFalse(is_output_event({"message": {}}, "message_start"))
 
     def test_envelope_events_do_not_count(self) -> None:
         for event in (
             {"type": "message_start", "message": {"usage": {}}},
+            {"type": "message_delta", "usage": {"output_tokens": 5}},
             {"type": "ping"},
             {"type": "response.created"},
             {"type": "response.in_progress"},
@@ -311,6 +321,26 @@ class StreamingHandlerSpeedTests(unittest.TestCase):
         self.assertGreaterEqual(entry["ttft"], 10)
         self.assertLessEqual(entry["ttft"], entry["duration"] + 0.01)
         self.assertEqual(entry["output_tokens"], 100)
+
+    def test_ttft_uses_sse_event_name_when_payload_has_no_type(self) -> None:
+        handler = AnthropicDirectStreamHandler(
+            response=_FakeResponse([
+                b"event: message_start",
+                b'data: {"message": {"usage": {}}}',
+                b"event: content_block_start",
+                b'data: {"index": 0, "content_block": {"type": "text", "text": ""}}',
+                b"data: [DONE]",
+            ]),
+            request_id="req-2",
+            request_size=42,
+            start_time=time.time() - 3,
+            original_model="claude-opus-4",
+            translated_model="claude-opus-4",
+            request_body_for_cache={"model": "claude-opus-4"},
+        )
+        list(handler._generate())
+
+        self.assertGreaterEqual(self.cache.get_request("req-2")["ttft"], 3)
 
         snapshot = perf_stats.snapshot(window_seconds=3600)
         self.assertEqual(snapshot["overall"]["requests"], 1)

@@ -332,12 +332,12 @@ class SSEStreamHandler:
                         sse_event_type = ""
                         continue
 
-                    if not output_started and is_output_event(event):
-                        output_started = True
-                        cache.update_request_state(self.request_id, cache.STATE_RECEIVING)
-
                     event_type = sse_event_type or event.get("type", "")
                     sse_event_type = ""
+
+                    if not output_started and is_output_event(event, event_type):
+                        output_started = True
+                        cache.update_request_state(self.request_id, cache.STATE_RECEIVING)
 
                     self.on_event(event_type, event)
 
