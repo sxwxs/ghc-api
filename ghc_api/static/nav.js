@@ -142,6 +142,10 @@
         });
         document.addEventListener('keydown', function (event) {
             if (event.key === 'Escape') {
+                // Focus would otherwise vanish with the hidden menu link.
+                if (panel.contains(document.activeElement)) {
+                    toggle.focus();
+                }
                 close();
             }
         });

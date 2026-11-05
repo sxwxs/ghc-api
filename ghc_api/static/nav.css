@@ -157,8 +157,16 @@
         justify-content: flex-start;
     }
 
+    /* The wrapped toolbar can put "Other" anywhere on its row, so hang the
+       panel off the whole navbar instead: it then always fits the viewport,
+       even on pages whose body has overflow: hidden. */
+    .nav-menu {
+        position: static;
+    }
+
     .nav-menu-panel {
-        right: auto;
-        left: 0;
+        left: 1rem;
+        right: 1rem;
+        top: 100%;
     }
 }

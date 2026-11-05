@@ -153,9 +153,10 @@ class PerfStats:
         self._samples: Deque[Sample] = deque(maxlen=max(1, int(capacity)))
         self.started_at: float = time.time()
         # Samples evicted because the ring was full. A window is incomplete
-        # exactly when the newest evicted sample falls inside it.
+        # exactly when the newest evicted sample falls inside it. Concurrent
+        # record() calls can append slightly out of order, hence max().
         self.dropped: int = 0
-        self.last_dropped_at: Optional[float] = None
+        self.newest_dropped_at: Optional[float] = None
         self.recorded: int = 0
 
     # ------------------------------------------------------------- lifecycle
@@ -174,7 +175,7 @@ class PerfStats:
             self._samples.clear()
             self.started_at = time.time()
             self.dropped = 0
-            self.last_dropped_at = None
+            self.newest_dropped_at = None
             self.recorded = 0
 
     # ----------------------------------------------------------- hot path
@@ -206,7 +207,7 @@ class PerfStats:
         with self._lock:
             if len(self._samples) == self._samples.maxlen:
                 self.dropped += 1
-                self.last_dropped_at = self._samples[0][0]
+                self.newest_dropped_at = max(self.newest_dropped_at or 0.0, self._samples[0][0])
             self._samples.append(sample)
             self.recorded += 1
 
@@ -226,7 +227,7 @@ class PerfStats:
             samples = list(self._samples)
             started_at = self.started_at
             dropped = self.dropped
-            last_dropped_at = self.last_dropped_at
+            newest_dropped_at = self.newest_dropped_at
             recorded = self.recorded
             capacity = self._samples.maxlen or DEFAULT_CAPACITY
 
@@ -245,7 +246,7 @@ class PerfStats:
         # The window is incomplete exactly when an evicted sample belonged to
         # it; say so instead of implying the numbers cover it.
         window_start = cutoff if cutoff is not None else started_at
-        truncated = last_dropped_at is not None and last_dropped_at >= window_start
+        truncated = newest_dropped_at is not None and newest_dropped_at >= window_start
 
         models = [_aggregate(name, group, now) for name, group in by_model.items()]
         models.sort(key=lambda m: m["output_tokens"], reverse=True)

@@ -192,6 +192,22 @@ class PerfStatsSnapshotTests(unittest.TestCase):
 
         self.assertTrue(stats.snapshot(window_seconds=None, now=start + 1)["truncated"])
 
+    def test_out_of_order_eviction_still_truncates(self) -> None:
+        # Concurrent record() calls can append out of timestamp order; the
+        # sample evicted at 99 still belongs to a window starting at 95.
+        stats = PerfStats(capacity=1)
+        for finished_at in (99.0, 90.0, 95.0):
+            stats.record(
+                model="m",
+                endpoint="/v1/messages",
+                status_code=200,
+                duration=1.0,
+                output_tokens=10,
+                finished_at=finished_at,
+            )
+
+        self.assertTrue(stats.snapshot(window_seconds=5, now=100.0)["truncated"])
+
     def test_user_filter(self) -> None:
         now = 10_000.0
         self._record("m", now - 5, user_id="alice")
