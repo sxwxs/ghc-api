@@ -26,6 +26,8 @@ import os
 from datetime import datetime
 from typing import Any, Dict
 
+from .file_logging import append_jsonl_line
+
 STATE_COMPLETED = "completed"
 STATE_ERROR = "error"
 STATE_CANCELLED = "cancelled"
@@ -55,7 +57,6 @@ def record_search_to_file(entry: Dict[str, Any]) -> None:
         directory = log_dir()
         os.makedirs(directory, exist_ok=True)
         daily_file = os.path.join(directory, f"{datetime.now().strftime('%Y-%m-%d')}.jl")
-        with open(daily_file, "a", encoding="utf-8") as f:
-            f.write(format_jsonl_line(entry))
+        append_jsonl_line(daily_file, format_jsonl_line(entry))
     except Exception as exc:
         print(f"[WebIQ Logging] Failed to append search record: {exc}")

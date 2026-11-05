@@ -11,6 +11,7 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from .file_logging import append_jsonl_line
 from .perf_stats import perf_stats, tokens_per_second
 
 
@@ -446,8 +447,7 @@ class RequestCache:
             requests_dir = os.path.join(get_config_dir(), "requests")
             os.makedirs(requests_dir, exist_ok=True)
             daily_file = os.path.join(requests_dir, f"{datetime.now().strftime('%Y-%m-%d')}.jl")
-            with open(daily_file, "a", encoding="utf-8") as f:
-                f.write(self.format_request_jsonl_line(request_entry))
+            append_jsonl_line(daily_file, self.format_request_jsonl_line(request_entry))
         except Exception as e:
             print(f"[Request File Logging] Failed to append request: {e}")
 
