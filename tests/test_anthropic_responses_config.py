@@ -174,7 +174,7 @@ class AnthropicResponsesGeneratedConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch(
                 "ghc_api.generate_config.get_config_dir", return_value=directory
-            ), mock.patch("ghc_api.generate_config.platform.system", return_value="Linux"):
+            ):
                 generate_config_file()
             text = (Path(directory) / "config.yaml").read_text(encoding="utf-8")
             config = yaml.safe_load(text)
