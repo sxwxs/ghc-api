@@ -147,6 +147,12 @@ class State:
         # Session persistence settings
         self.session_flush_interval: int = 5  # seconds between buffered writes
 
+        # Live throughput metrics (/live). Number of finished-request samples
+        # kept in memory for tokens-per-second aggregation. Each sample is one
+        # small tuple, so the default stays well under 1 MB; windows wider than
+        # the retained samples are reported as truncated rather than wrong.
+        self.perf_sample_capacity: int = 2000
+
         # Request cache memory limits
         self.cache_max_entries: int = 1000  # Max number of requests kept in memory
         self.cache_max_request_size: int = 1024 * 1024  # Max bytes per cached entry body (0 disables limit)

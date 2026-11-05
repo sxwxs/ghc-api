@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
     <title>Copilot API Proxy - Dashboard</title>
     <style>
         * {
@@ -17,68 +18,6 @@
             background-color: #f5f5f5;
             color: #333;
             line-height: 1.6;
-        }
-
-        .navbar {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 1rem 2rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-
-        .navbar h1 {
-            font-size: 1.5rem;
-            font-weight: 600;
-        }
-
-        .navbar-actions {
-            display: flex;
-            gap: 1rem;
-            align-items: center;
-        }
-
-        .navbar-actions a,
-        .navbar-actions button {
-            color: white;
-            text-decoration: none;
-            padding: 0.5rem 1rem;
-            border-radius: 4px;
-            background: rgba(255,255,255,0.2);
-            transition: background 0.2s;
-            border: none;
-            font-size: 0.875rem;
-            cursor: pointer;
-        }
-
-        .config-manager-btn {
-            display: inline-flex;
-            gap: 0.5rem;
-            align-items: center;
-        }
-
-        .config-manager-alert {
-            display: none;
-            width: 18px;
-            height: 18px;
-            border-radius: 50%;
-            background: #ff7043;
-            color: #fff;
-            font-size: 0.75rem;
-            line-height: 18px;
-            text-align: center;
-            font-weight: 700;
-        }
-
-        .config-manager-alert.visible {
-            display: inline-block;
-        }
-
-        .navbar-actions a:hover,
-        .navbar-actions button:hover {
-            background: rgba(255,255,255,0.3);
         }
 
         .container {
@@ -470,21 +409,8 @@
     </style>
 </head>
 <body>
-    <nav class="navbar">
-        <h1>Copilot API Proxy</h1>
-        <div class="navbar-actions">
-            <button type="button" onclick="openRuntimeConfigModal()">Runtime Config Override</button>
-            <button id="config-manager-btn" class="config-manager-btn" type="button" onclick="window.location.href='/code-agent-manager'">
-                Code Agent Manager
-                <span id="config-manager-alert" class="config-manager-alert">!</span>
-            </button>
-            <a href="/requests">Request Browser</a>
-            <a href="/chat">Chat</a>
-            <a href="/agent">Code Agent</a>
-            <a href="/request-stats">Request Stats</a>
-            <a href="/api/stats">API Stats</a>
-        </div>
-    </nav>
+    <nav class="navbar" id="app-nav" data-title="Copilot API Proxy"></nav>
+    <script src="{{ url_for('static', filename='nav.js') }}"></script>
 
     <div class="container">
         <div class="runtime-config-notice">
@@ -592,6 +518,8 @@
                         <th>State</th>
                         <th>Status</th>
                         <th>Duration</th>
+                        <th>TTFT</th>
+                        <th>Speed</th>
                         <th>Request Size</th>
                         <th>Response Size</th>
                     </tr>
@@ -690,6 +618,31 @@
                 return '…';
             }
             return (item.duration !== null && item.duration !== undefined) ? `${item.duration}s` : '-';
+        }
+
+        // Output decode speed: tokens per second of generation time (total
+        // duration minus time to first token), so upstream queueing shows up in
+        // TTFT rather than depressing the measured speed.
+        function formatTokensPerSecond(item) {
+            let value = item.tokens_per_second;
+            if (value === null || value === undefined) {
+                const outputTokens = Number(item.output_tokens || 0);
+                const duration = Number(item.duration || 0);
+                const ttft = (item.ttft === null || item.ttft === undefined) ? 0 : Number(item.ttft);
+                const generating = duration - ttft;
+                if (!outputTokens || generating < 0.05) {
+                    return '-';
+                }
+                value = outputTokens / generating;
+            }
+            return `${Number(value).toFixed(1)}`;
+        }
+
+        function formatTtft(item) {
+            if (item.ttft === null || item.ttft === undefined) {
+                return '-';
+            }
+            return `${Number(item.ttft).toFixed(2)}s`;
         }
 
         function syntaxHighlight(json) {
@@ -893,6 +846,8 @@
                         <td><span class="state-badge ${state}">${getStateLabel(state)}</span></td>
                         <td>${statusCode}</td>
                         <td>${duration}</td>
+                        <td>${formatTtft(item)}</td>
+                        <td>${formatTokensPerSecond(item)}</td>
                         <td>${formatBytes(item.request_size)}</td>
                         <td>${formatBytes(item.response_size)}</td>
                     `;
@@ -1111,6 +1066,12 @@
                 closeRuntimeConfigModal();
             }
         });
+
+        // The shared nav offers "Runtime Config Override" on every page. Pages
+        // without the modal link here instead, so honor the hash on arrival.
+        if (window.location.hash === '#runtime-config') {
+            openRuntimeConfigModal();
+        }
 
         // Initial load
         loadUserFilterOptions();

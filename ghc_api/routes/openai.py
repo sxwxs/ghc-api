@@ -30,6 +30,7 @@ from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support
 from ..model_metadata import normalize_model_metadata
+from ..perf_stats import is_output_event
 from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
 from ..sse.keepalive import (
     BackgroundResult,
@@ -258,6 +259,7 @@ def _stream_pending_responses_request(
         "endpoint": "/v1/responses",
         "request_size": request_size,
         "user_id": user_id,
+        "started_at": start_time,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -377,7 +379,7 @@ def _stream_pending_responses_request(
                 return
 
         except GeneratorExit:
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+            cache.cancel_request(request_id)
             return
         except Exception as exc:
             print(
@@ -392,7 +394,7 @@ def _stream_pending_responses_request(
             try:
                 yield _responses_error_event(str(exc), "proxy_error")
             except GeneratorExit:
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+                cache.cancel_request(request_id)
                 return
         finally:
             if active_pending is not None:
@@ -800,6 +802,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
         "endpoint": "/v1/chat/completions",
         "request_size": request_size,
         "user_id": user_id,
+        "started_at": start_time,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -811,7 +814,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
         total_cache_read_input_tokens = 0
         status_code = response.status_code
         error_occurred = False
-        first_chunk_received = False
+        output_started = False
         chunk_id = f"chatcmpl-{request_id}"
         tool_index_by_output_index = {}
         saw_tool_call = False
@@ -851,8 +854,8 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                     except json.JSONDecodeError:
                         continue
 
-                    if not first_chunk_received:
-                        first_chunk_received = True
+                    if not output_started and is_output_event(event):
+                        output_started = True
                         cache.update_request_state(request_id, cache.STATE_RECEIVING)
 
                     event_type = event.get("type", "")
@@ -965,8 +968,9 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
             response_data = {"error": f"Upstream connection error: {type(e).__name__}"}
             print(f"[Stream Chat via Responses] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
         except GeneratorExit:
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-            return
+            # Client disconnected: fall through and record what we have.
+            error_occurred = True
+            status_code = 499
         except Exception as e:
             error_occurred = True
             status_code = 500
@@ -975,8 +979,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
             try:
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
             except GeneratorExit:
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-                return
+                status_code = 499
 
         duration = round(time.time() - start_time, 2)
         if not response_data and accumulated_text:
@@ -1756,6 +1759,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         "endpoint": "/v1/chat/completions",
         "request_size": request_size,
         "user_id": user_id,
+        "started_at": start_time,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -1765,7 +1769,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         total_cache_read_input_tokens = 0
         error_occurred = False
         status_code = 200
-        first_chunk_received = False
+        output_started = False
         tool_index_map = {}
 
         try:
@@ -1802,9 +1806,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                         chunk = _normalize_stream_tool_calls(chunk, tool_index_map)
                         response_chunks.append(chunk)
 
-                        # Update state to receiving on first chunk
-                        if not first_chunk_received:
-                            first_chunk_received = True
+                        if not output_started and is_output_event(chunk):
+                            output_started = True
                             cache.update_request_state(request_id, cache.STATE_RECEIVING)
 
                         # Track tokens from streaming chunks
@@ -1822,12 +1825,10 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             status_code = 504
             print(f"[Stream] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
         except GeneratorExit:
-            # Client disconnected - this clean up
+            # Client disconnected: fall through and record what we have.
             error_occurred = True
+            status_code = 499
             print(f"[Stream] Client disconnected for request {request_id}")
-            # Update state to error since client disconnected
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-            return
         except Exception as e:
             error_occurred = True
             status_code = 500
@@ -1835,9 +1836,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             try:
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
             except GeneratorExit:
-                # Client already disconnected, can't yield
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-                return
+                status_code = 499
 
         duration = round(time.time() - start_time, 2)
 

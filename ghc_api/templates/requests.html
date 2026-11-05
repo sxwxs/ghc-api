@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
     <title>Copilot API Proxy - Request Browser</title>
     <style>
         * {
@@ -21,46 +22,10 @@
             overflow: hidden;
         }
 
-        .navbar {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 0.75rem 1.5rem;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-
-        .navbar h1 {
-            font-size: 1.25rem;
-            font-weight: 600;
-        }
-
-        .navbar-actions {
-            display: flex;
-            gap: 0.75rem;
-            align-items: center;
-        }
-
-        .navbar-actions a, .navbar-actions button {
-            color: white;
-            text-decoration: none;
-            padding: 0.4rem 0.75rem;
-            border-radius: 4px;
-            background: rgba(255,255,255,0.2);
-            transition: background 0.2s;
-            border: none;
-            font-size: 0.875rem;
-            cursor: pointer;
-        }
-
-        .navbar-actions a:hover, .navbar-actions button:hover {
-            background: rgba(255,255,255,0.3);
-        }
-
         .main-container {
             display: flex;
-            height: calc(100vh - 52px);
+            /* --nav-height is measured and published by nav.js. */
+            height: calc(100vh - var(--nav-height, 70px));
         }
 
         /* Left panel - Detail view */
@@ -885,21 +850,16 @@
     </style>
 </head>
 <body>
-    <nav class="navbar">
-        <h1>Request Browser</h1>
-        <div class="navbar-actions">
-            <a href="/">Dashboard</a>
-            <a href="/chat">Chat</a>
-            <a href="/agent">Code Agent</a>
-            <a href="/request-stats">Request Stats</a>
-            <a href="/api/stats">API Stats</a>
+    <nav class="navbar" id="app-nav" data-title="Request Browser">
+        <template id="nav-extras">
             <button onclick="downloadRequests()" title="Download all requests as JSON Lines">Download .jl</button>
             <div class="file-input-wrapper">
                 <button title="Load requests from JSON Lines file">Load .jl</button>
                 <input type="file" id="file-input" accept=".jl,.jsonl" onchange="uploadRequests(this)">
             </div>
-        </div>
+        </template>
     </nav>
+    <script src="{{ url_for('static', filename='nav.js') }}"></script>
 
     <div class="main-container">
         <!-- Left: Detail panel -->
@@ -1076,6 +1036,38 @@
                 return '…';
             }
             return (item.duration !== null && item.duration !== undefined) ? `${item.duration}s` : '-';
+        }
+
+        // Output decode speed: tokens per second of generation time (duration
+        // minus time to first token). Computed server-side; recomputed here only
+        // for older cached/imported entries that predate the field.
+        function computeTokensPerSecond(item) {
+            if (item.tokens_per_second !== null && item.tokens_per_second !== undefined) {
+                return Number(item.tokens_per_second);
+            }
+            const outputTokens = Number(item.output_tokens || 0);
+            const duration = Number(item.duration || 0);
+            if (!outputTokens || !duration) {
+                return null;
+            }
+            const ttft = (item.ttft === null || item.ttft === undefined) ? 0 : Number(item.ttft);
+            const generating = duration - ttft;
+            if (generating < 0.05) {
+                return null;
+            }
+            return outputTokens / generating;
+        }
+
+        function formatTokensPerSecond(item) {
+            const value = computeTokensPerSecond(item);
+            return value === null ? '-' : `${value.toFixed(1)} tok/s`;
+        }
+
+        function formatTtft(item) {
+            if (item.ttft === null || item.ttft === undefined) {
+                return '-';
+            }
+            return `${Number(item.ttft).toFixed(2)}s`;
         }
 
         function escapeHtml(text) {
@@ -1710,6 +1702,7 @@
                                 </div>
                                 <div class="request-item-stats">
                                     <span>Duration: ${duration}</span>
+                                    <span>TTFT: ${formatTtft(item)} / ${formatTokensPerSecond(item)}</span>
                                     <span>In: ${formatNumber(item.input_tokens + (item.cache_creation_input_tokens || 0) + (item.cache_read_input_tokens || 0))}${item.cache_creation_input_tokens ? ` / Cache+: ${formatNumber(item.cache_creation_input_tokens)}` : ''}${item.cache_read_input_tokens ? ` / Cache: ${formatNumber(item.cache_read_input_tokens)}` : ''} / Out: ${formatNumber(item.output_tokens)}</span>
                                 </div>
                                 <div class="request-item-stats">
@@ -1928,6 +1921,14 @@
                 <div class="overview-item">
                     <label>Duration</label>
                     <div class="value">${duration}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Time To First Token</label>
+                    <div class="value">${formatTtft(data)}</div>
+                </div>
+                <div class="overview-item">
+                    <label>Output Speed</label>
+                    <div class="value">${formatTokensPerSecond(data)}</div>
                 </div>
                 <div class="overview-item">
                     <label>Request Size</label>

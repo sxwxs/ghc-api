@@ -1211,6 +1211,47 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             self.assertTrue(upstream.closed)
             post.assert_called_once()
 
+    def test_disconnect_mid_stream_after_late_headers_is_recorded_once(self):
+        events = [
+            {"type": "response.created", "response": {"id": "resp_1"}},
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []},
+            },
+            {"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": "Hi"},
+        ]
+        upstream = _FakeResponse({}, lines=[
+            ("data: " + json.dumps(event)).encode() for event in events
+        ])
+        release_response = threading.Event()
+
+        def delayed_post(*args, **kwargs):
+            release_response.wait(2)
+            return upstream
+
+        with mock.patch.object(
+            anthropic_module.state, "sse_keepalive_interval", 0.02
+        ), mock.patch.object(
+            anthropic_module.requests, "post", side_effect=delayed_post
+        ):
+            response = self.client.post(
+                "/v1/messages",
+                json=self._request_payload(stream=True),
+                buffered=False,
+            )
+            chunks = iter(response.response)
+            self.assertIn('"ping"', next(chunks).decode("utf-8"))
+            release_response.set()
+            # Read until the stream handler forwards real output, then hang up.
+            while '"ping"' in next(chunks).decode("utf-8"):
+                pass
+            response.close()
+
+        cached = next(iter(self.cache.cache.values()))
+        self.assertEqual(cached["status_code"], 499)
+        self.assertEqual(self.cache.request_count, 1)
+
     def test_stream_unknown_responses_event_is_skipped_and_output_still_arrives(self):
         """An additive upstream event must not take the whole path down.
 

@@ -316,6 +316,12 @@ def main():
         _request_cache.max_entries = state.cache_max_entries
         _request_cache.max_request_size = state.cache_max_request_size
 
+        # Live throughput sample ring (/live dashboard)
+        if 'perf_sample_capacity' in config:
+            state.perf_sample_capacity = int(config['perf_sample_capacity'])
+        from .perf_stats import perf_stats as _perf_stats
+        _perf_stats.set_capacity(state.perf_sample_capacity)
+
         # Load web search proxy settings
         if 'enable_web_search_proxy' in config:
             state.enable_web_search_proxy = bool(config['enable_web_search_proxy'])
@@ -452,6 +458,7 @@ def main():
 
     print(f"Starting GitHub Copilot API Proxy on {host}:{port}")
     print(f"Dashboard: http://{host}:{port}/")
+    print(f"Live throughput: http://{host}:{port}/live")
     print(f"OpenAI API: http://{host}:{port}/v1/chat/completions")
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")

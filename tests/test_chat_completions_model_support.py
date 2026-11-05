@@ -573,6 +573,42 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
         self.assertEqual(response_body["choices"][0]["finish_reason"], "tool_calls")
         self.assertEqual(response_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], "{\"location\":\"SF\"}")
 
+    def test_native_streaming_client_disconnect_is_recorded_once(self):
+        class FakeResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                yield b'data: {"choices":[{"index":0,"delta":{"content":"Hi","role":"assistant"}}],"id":"chat-1"}'
+                yield b'data: {"choices":[{"index":0,"delta":{"content":" there"}}],"id":"chat-1"}'
+
+            def close(self):
+                pass
+
+        app = create_app()
+        before = cache.request_count
+
+        with app.test_request_context("/v1/chat/completions"):
+            with mock.patch("ghc_api.routes.openai.requests.post", return_value=FakeResponse()):
+                response = stream_chat_completions(
+                    payload={"model": "gpt-5", "stream": True},
+                    headers={},
+                    request_id="req-gone",
+                    request_body="{}",
+                    request_size=2,
+                    start_time=0,
+                    original_model="gpt-5",
+                    translated_model="gpt-5",
+                )
+                stream = iter(response.response)
+                next(stream)
+                stream.close()
+
+        entry = cache.cache["req-gone"]
+        self.assertEqual(entry["status_code"], 499)
+        self.assertEqual(entry["state"], "error")
+        self.assertIsNotNone(entry["ttft"])
+        self.assertEqual(cache.request_count, before + 1)
+
 
 if __name__ == "__main__":
     unittest.main()
