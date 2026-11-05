@@ -13,7 +13,15 @@ main_module = importlib.import_module("ghc_api.main")
 
 
 @pytest.fixture
-def startup_env(tmp_path, monkeypatch):
+def editor_calls(monkeypatch):
+    """Record config-editor launches instead of opening a (blocking) Notepad."""
+    calls = []
+    monkeypatch.setattr(main_module, "open_config_in_editor", calls.append)
+    return calls
+
+
+@pytest.fixture
+def startup_env(tmp_path, monkeypatch, editor_calls):
     """Run main() in isolation: no real app, no global state mutations leaking out."""
     monkeypatch.setenv("GHC_API_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(sys, "argv", ["ghc-api"])
@@ -24,7 +32,6 @@ def startup_env(tmp_path, monkeypatch):
     monkeypatch.setattr(main_module, "print_sync_diff_status", lambda: None)
     monkeypatch.setattr(main_module, "print_available_models", lambda: None)
     monkeypatch.setattr(main_module, "print_model_mappings", lambda: None)
-    monkeypatch.setattr(main_module, "generate_config_file", lambda: None)
 
     # Keep process-wide singletons out of these tests so they cannot leak into
     # (or depend on) unrelated tests.
@@ -71,6 +78,43 @@ def test_invalid_setting_value_aborts_startup(startup_env, capsys):
     assert excinfo.value.code == 1
     fake_app.run.assert_not_called()
     assert "refusing to start" in capsys.readouterr().err
+
+
+def test_config_flag_generates_and_opens_config(startup_env, editor_calls, monkeypatch):
+    tmp_path, fake_app = startup_env
+    monkeypatch.setattr(sys, "argv", ["ghc-api", "-c"])
+
+    main_module.main()
+
+    assert (tmp_path / "config.yaml").exists()
+    assert editor_calls == [str(tmp_path / "config.yaml")]
+    fake_app.run.assert_not_called()
+
+
+def test_first_run_generates_and_opens_config_before_starting(startup_env, editor_calls, monkeypatch):
+    tmp_path, _ = startup_env
+    # The generated default config has debug: false, i.e. a real waitress server.
+    serve_app = mock.Mock()
+    monkeypatch.setattr(main_module, "serve_app", serve_app)
+
+    main_module.main()
+
+    assert editor_calls == [str(tmp_path / "config.yaml")]
+    serve_app.assert_called_once()
+
+
+def test_generate_config_file_never_opens_an_editor(tmp_path, monkeypatch):
+    """Only the CLI opens the editor; any other caller (tests included) must
+    not block on Notepad."""
+    from ghc_api import generate_config
+
+    monkeypatch.setenv("GHC_API_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(generate_config.platform, "system", lambda: "Windows")
+    shell = mock.Mock(return_value=0)
+    monkeypatch.setattr(generate_config.os, "system", shell)
+
+    assert generate_config.generate_config_file() == str(tmp_path / "config.yaml")
+    shell.assert_not_called()
 
 
 def test_valid_config_is_used(startup_env):

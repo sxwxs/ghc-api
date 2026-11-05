@@ -5,7 +5,11 @@ from .utils import get_config_dir
 from .config import DEFAULT_COPILOT_VERSION, DEFAULT_API_VERSION, DEFAULT_VSCODE_VERSION
 
 def generate_config_file():
-    """Generate a YAML config file in the config directory with comments"""
+    """Write the commented default config.yaml unless one exists; return its path.
+
+    Only writes the file. Opening it for editing is the CLI's job
+    (``open_config_in_editor``), so callers such as tests never launch an editor.
+    """
     config_dir = get_config_dir()
     os.makedirs(config_dir, exist_ok=True)
 
@@ -351,8 +355,12 @@ enable_auth: false
             f.write(config_content)
 
     print(f"Configuration file generated at: {config_path}")
+    return config_path
 
-    # On Windows, try to open with notepad
+
+def open_config_in_editor(config_path):
+    """On Windows, open the config in Notepad and wait until it is closed, so
+    edits made on first run are picked up by the startup that follows."""
     if platform.system() == "Windows":
         try:
             os.system(f"notepad {config_path}")

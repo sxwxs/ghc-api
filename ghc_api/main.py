@@ -28,7 +28,7 @@ from .config import (
     DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
 )
 from .config_sync import print_sync_diff_status
-from .generate_config import generate_config_file
+from .generate_config import generate_config_file, open_config_in_editor
 from .state import state
 from .token_manager import (
     authenticate_github_device_flow,
@@ -198,7 +198,7 @@ def main():
     args = parser.parse_args()
 
     if args.config:
-        generate_config_file()
+        open_config_in_editor(generate_config_file())
         return
     if args.delete_github_token:
         delete_github_token_file()
@@ -238,7 +238,7 @@ def main():
     # Load config from file if it exists
     if not os.path.exists(config_path):
         print(f"No config file found at {config_path}, will generate one.")
-        generate_config_file()
+        open_config_in_editor(generate_config_file())
     # Server defaults; a config error aborts startup instead of silently
     # running with a half-applied configuration.
     host = 'localhost'
