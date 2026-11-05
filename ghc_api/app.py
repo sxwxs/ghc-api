@@ -2,7 +2,7 @@
 Flask application factory and initialization
 """
 
-from flask import Flask, g, jsonify, request
+from flask import Flask, Request, g, jsonify, request
 
 from .auth import ANONYMOUS_USER_ID, require_auth
 from .json_guard import MAX_JSON_NESTING_DEPTH, exceeds_max_nesting
@@ -11,15 +11,18 @@ from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
 from .routes.dashboard import dashboard_bp
 from .routes.openai import openai_bp
+from .routes.images import images_bp, MAX_IMAGE_REQUEST_BYTES, check_image_upload_limit
 from .routes.proxy import proxy_bp
 from .routes.webiq import webiq_bp
+from .routes.anysearch import anysearch_bp
 from .state import state
 
 
 # Paths that require an approved user token when state.enable_auth is True.
-# Everything not in this set bypasses auth at the Flask layer (dashboard,
-# /signup, /api/users/*, /agent, static files). Production deployments are
-# expected to put nginx (or equivalent) in front to gate admin paths.
+# Dynamic model detail routes and raw catalog slash variants are also protected
+# by endpoint in _auth_gate. Other paths bypass auth at the Flask layer
+# (dashboard, /signup, /api/users/*, /agent, static files). Production deployments
+# are expected to put nginx (or equivalent) in front to gate admin paths.
 PROTECTED_PATHS = frozenset({
     "/v1/chat/completions",
     "/chat/completions",
@@ -27,6 +30,12 @@ PROTECTED_PATHS = frozenset({
     "/responses",
     "/v1/embeddings",
     "/embeddings",
+    "/v1/systemone",
+    "/systemone",
+    "/v1/images/generations",
+    "/images/generations",
+    "/v1/images/edits",
+    "/images/edits",
     "/v1/messages",
     "/v1/messages/count_tokens",
     "/v1/models",
@@ -41,12 +50,28 @@ PROTECTED_PATHS = frozenset({
     "/v3/search/images",
     "/v3/search/classic",
     "/v3/mcp",
+    # AnySearch services share server-held credentials. Gate even the
+    # quota-free capability catalog when ghc-api user auth is enabled.
+    "/v1/search",
+    "/v1/extract",
+    "/v1/sub-domains",
 })
+
+
+class _APIRequest(Request):
+    @property
+    def max_content_length(self):
+        # Per-request setters require Flask 3.1; this also works on Flask 2.x.
+        limit = super().max_content_length
+        if self.blueprint == "images":
+            return min(limit, MAX_IMAGE_REQUEST_BYTES) if limit is not None else MAX_IMAGE_REQUEST_BYTES
+        return limit
 
 
 def create_app() -> Flask:
     """Create and configure the Flask application"""
     app = Flask(__name__)
+    app.request_class = _APIRequest
 
     @app.before_request
     def _auth_gate():
@@ -56,7 +81,9 @@ def create_app() -> Flask:
             g.user_id = ANONYMOUS_USER_ID
             return None
 
-        if request.path not in PROTECTED_PATHS:
+        if request.path not in PROTECTED_PATHS and request.endpoint not in {
+            "openai.retrieve_model", "openai.list_models_full",
+        }:
             g.user_id = ANONYMOUS_USER_ID
             return None
 
@@ -85,9 +112,17 @@ def create_app() -> Flask:
         It runs after the auth gate so an unauthenticated client cannot spend
         the scan on a protected path.
         """
+        if request.blueprint == "images" and request.content_length and request.content_length > MAX_IMAGE_REQUEST_BYTES:
+            return jsonify({"error": {
+                "message": "Image request exceeds the 50 MiB upload limit.",
+                "type": "invalid_request_error", "code": "request_too_large",
+            }}), 413
         if not request.is_json:
             return None
-        if not exceeds_max_nesting(request.get_data(cache=True)):
+        raw_json = request.get_data(cache=True)
+        if request.blueprint == "images":
+            check_image_upload_limit()
+        if not exceeds_max_nesting(raw_json):
             return None
 
         message = (
@@ -112,11 +147,13 @@ def create_app() -> Flask:
     # Register blueprints
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(openai_bp)
+    app.register_blueprint(images_bp)
     app.register_blueprint(proxy_bp)
     app.register_blueprint(anthropic_bp)
     app.register_blueprint(agent_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(webiq_bp)
+    app.register_blueprint(anysearch_bp)
 
     # Error handlers
     @app.errorhandler(404)

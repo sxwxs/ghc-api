@@ -257,7 +257,12 @@ def apply_configured_chat_completions_support(models: Dict, reset_tracking: bool
             supported_endpoints = []
 
         changed = False
-        matches_config = chat_completions_model_support.matches(model_id)
+        # Prefix overrides exist for text-model compatibility, not to turn
+        # image, embedding, or decision models into chat models.
+        matches_config = (
+            chat_completions_model_support.matches(model_id)
+            and not _is_non_chat_model_entry(model)
+        )
         was_added_by_config = model_id in added_model_ids
 
         if matches_config and CHAT_COMPLETIONS_ENDPOINT not in supported_endpoints:
@@ -277,6 +282,39 @@ def apply_configured_chat_completions_support(models: Dict, reset_tracking: bool
             updated_count += 1
 
     return updated_count
+
+
+def _is_non_chat_model_entry(model: Dict) -> bool:
+    capabilities = model.get("capabilities") or {}
+    model_type = model.get("model_type") or capabilities.get("type")
+    if model_type:
+        return model_type in ("image", "embeddings", "decisions")
+    endpoints = model.get("supported_endpoints") or []
+    # Also recognise image-only entries when the type field is absent. Ignore
+    # the synthetic chat endpoint: an earlier application may have added it.
+    return any(e in endpoints for e in (
+        "/images/generations", "/v1/images/generations",
+        "/images/edits", "/v1/images/edits",
+    )) and not any(e in endpoints for e in ("/responses", "/v1/responses", "/v1/messages"))
+
+
+def is_non_chat_model(model_id: str) -> bool:
+    """Reject known non-chat models without changing unknown-model behaviour."""
+    return any(
+        m.get("id") == model_id and _is_non_chat_model_entry(m)
+        for m in (state.models or {}).get("data", [])
+    )
+
+
+def image_upstream_path(model_id: str, operation: str) -> Optional[str]:
+    """Use only image endpoints explicitly advertised by the model."""
+    for model in (state.models or {}).get("data", []):
+        if model.get("id") == model_id:
+            endpoints = model.get("supported_endpoints") or []
+            for path in (f"/v1/images/{operation}", f"/images/{operation}"):
+                if path in endpoints:
+                    return path
+    return None
 
 
 def is_configured_chat_completions_support_added(models: Dict, model_id: str) -> bool:
@@ -424,6 +462,41 @@ def supports_embeddings_api(model_id: str) -> bool:
     if not isinstance(model, dict):
         return False
     return model.get("capabilities", {}).get("type") == "embeddings"
+
+
+# Endpoint spellings Copilot may advertise for System One decision models.
+# Copilot lists Responses as "/responses" but Anthropic Messages as
+# "/v1/messages", so both forms are accepted.
+SYSTEMONE_ENDPOINTS = ("/systemone", "/v1/systemone")
+
+
+def systemone_upstream_path(model_id: str) -> Optional[str]:
+    """Return the Copilot path serving a decision model, or None.
+
+    Decision models (for example Microsoft-Decision-1) score a closed set of
+    options instead of generating text. The advertised endpoint spelling is
+    used verbatim so ghc-api follows whatever path Copilot publishes.
+    """
+    if not state.models or not state.models.get("data"):
+        return None
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if not isinstance(model, dict):
+        return None
+    supported_endpoints = model.get("supported_endpoints") or []
+    for endpoint in SYSTEMONE_ENDPOINTS:
+        if endpoint in supported_endpoints:
+            return endpoint
+    # Copilot tags decision models with capabilities.type == "decisions";
+    # fall back to the path it currently advertises if the list is missing.
+    capabilities = model.get("capabilities") or {}
+    if isinstance(capabilities, dict) and capabilities.get("type") == "decisions":
+        return "/v1/systemone"
+    return None
+
+
+def supports_systemone_api(model_id: str) -> bool:
+    """Return whether Copilot advertises the System One decision endpoint."""
+    return systemone_upstream_path(model_id) is not None
 
 
 def supported_reasoning_efforts(model_id: str) -> set:

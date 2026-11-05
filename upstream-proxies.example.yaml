@@ -15,6 +15,8 @@ proxies:
     #   type: none
     #   type: bearer_env + env: VARIABLE_NAME
     #   type: bearer_command + command: [executable, arg1, ...]
+    #   type: header_command + header: api-key + command: [executable, arg1, ...]
+    # header_command requires an explicit header name and sends no Bearer prefix.
     auth:
       type: bearer_env
       env: EXAMPLE_LLM_TOKEN

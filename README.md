@@ -6,7 +6,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Features
 
-- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` endpoints
+- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/images/{generations,edits}` endpoints, plus the `/v1/systemone` decision API
 - **Anthropic API Compatibility**: `/v1/messages` endpoint with automatic request/response translation
 - **Model Listing**: `/v1/models` endpoint listing available models
 - **Model Name Mapping**: Translate model names with exact and prefix-based matching
@@ -46,6 +46,15 @@ tool `call_id`, encrypted reasoning content, and response IDs are preserved.
 Events whose IDs are already consistent pass through unchanged, and request
 history retains the original upstream events for diagnosis.
 
+### OpenAI service tiers
+
+Copilot does not support the OpenAI `service_tier` request parameter. ghc-api
+omits this field from requests forwarded through the Copilot Responses and Chat
+Completions routes, including streaming requests, so clients such as Codex can
+send it without triggering an upstream rejection. The original request remains
+available in request history. Configured `/proxy/<profile>/v1/...` routes
+continue forwarding `service_tier` unchanged.
+
 ## Installation
 
 Install the package using pip:
@@ -78,7 +87,7 @@ By default, the server will start on `http://localhost:8313`.
 - `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.27`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.33`)
 - `--help`: Show help message
 
 ### Configuration
@@ -446,7 +455,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -521,8 +530,100 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 - `POST /chat/completions` - Chat completions (without v1 prefix)
 - `POST /v1/embeddings` - Create embeddings
 - `POST /embeddings` - Create embeddings (without v1 prefix)
-- `GET /v1/models` - List available models
-- `GET /models` - List available models (without v1 prefix)
+- `POST /v1/systemone` - System One decision API (e.g. Microsoft-Decision-1)
+- `POST /systemone` - System One decision API (without v1 prefix)
+- `POST /v1/images/generations` / `POST /images/generations` - Generate images
+- `POST /v1/images/edits` / `POST /images/edits` - Edit reference images
+- `GET /v1/models` - List available models with token limits and capabilities
+- `GET /models` - Same listing without the v1 prefix
+- `GET /v1/models/<model_id>` / `GET /models/<model_id>` - Retrieve one model's metadata
+- `GET /v1/models/full/` / `GET /models/full/` - Full upstream model catalog
+
+Model entries include `context_window`, `max_input_tokens`, `max_output_tokens`,
+input types, reasoning capabilities, and supported endpoints. Unknown metadata
+is `null`. See [Model metadata](docs/MODEL_METADATA.md) for the schema, cache
+behavior, and field mapping for pi integrations.
+
+### Images (Copilot)
+
+Image models such as `gpt-image-2.5-flare` use dedicated Images endpoints, not Chat
+Completions or Responses. Only endpoints advertised in the model catalog are
+accepted. The `gpt-*` / `mai-code-*` Chat Completions compatibility overrides apply
+to text models, never known image, embedding, or decision models. Known non-chat
+models are also rejected by the text-generation APIs rather than sent upstream.
+
+```bash
+# Generate one low-quality image (response contains data[].b64_json).
+curl http://127.0.0.1:8313/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-image-2.5-flare","prompt":"A blue circle on white","size":"1024x1024","quality":"low","n":1}'
+
+# Edit an image. Repeat image[] for multiple reference images; mask is optional.
+curl http://127.0.0.1:8313/v1/images/edits \
+  -F model=gpt-image-2.5-flare \
+  -F 'prompt=Change the circle to red' \
+  -F quality=low \
+  -F 'image[]=@circle.png'
+```
+
+Add `Authorization: Bearer <user-token>` when user authentication is enabled.
+Model mappings, request statistics, per-user usage, and upstream errors work as
+on the other APIs. JSON generation and multipart editing have been verified
+against Copilot; JSON edit bodies are also forwarded for upstream validation.
+Additional parameters are passed through, so unsupported options are reported
+by Copilot rather than silently removed. Responses (including image bytes,
+usage breakdown, and content provenance metadata) are returned unchanged.
+Image payloads are omitted from request logs; token counts and timing are kept.
+
+- Non-streaming only for now; `stream: true` returns HTTP 400.
+- Upload limit: 50 MiB per image request. Set your reverse proxy's
+  `client_max_body_size` accordingly (nginx defaults to 1 MiB).
+- Image requests are **never automatically retried**, even after a timeout.
+  A timed-out request may have completed and been billed upstream; check usage
+  before manually resubmitting.
+- Images are billed separately by image/text tokens against Copilot AI credits,
+  and organization model policies still apply. See [GitHub's image-generation documentation](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/image-generation).
+
+The built-in `/chat` page has an **Image** mode. Image models have an `[image]`
+label and selecting one enters Image mode. Choose Generate or Edit, size,
+quality, output format, and count; upload reference images or click **Use as
+reference** on a generated result. Results include previews and **Download
+original** without re-encoding. Search tools and text-chat history are not sent
+to image models. Raw mode offers the Images endpoints too.
+
+Image results are stored in the browser's IndexedDB, not localStorage. Session
+history keeps only references and small metadata. If browser storage is blocked
+or full, the current result remains downloadable with a warning; clearing browser
+data removes saved previews. Download originals for durable storage.
+
+### System One decisions (Copilot)
+
+Copilot decision models such as Microsoft-Decision-1 score a closed set of options and return a calibrated probability per option instead of generating text. ghc-api forwards `POST /v1/systemone` to the endpoint the model advertises in Copilot's `supported_endpoints` (currently `/v1/systemone`, with `capabilities.type: "decisions"`).
+
+- The body is passed through unchanged except for model-name mapping; responses and upstream validation errors (for example HTTP 422) are returned as-is.
+- Only decision models (advertising the System One endpoint or `capabilities.type: "decisions"`) are accepted; others get HTTP 400 `unsupported_model`.
+- Non-streaming only: `"stream": true` is rejected with HTTP 400 `unsupported_stream`.
+- The response `model` field reports the underlying model rather than the requested id, as Copilot returns it.
+- Usage is read from flat `usage.input_tokens` / `usage.output_tokens`; there are no cache tiers.
+- The built-in `/chat` page has a **Decision** mode next to Chat and Raw. Decision models are listed with a `[decision]` tag; selecting one switches to Decision mode, which starts from a `state` + `questions` template, fills in the model, and shows each answer as probability bars (choice/score) or a yes/no split (noul), with the raw JSON available. Raw mode can also target `/v1/systemone`.
+
+```bash
+curl http://127.0.0.1:8313/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "microsoft-decision-1",
+    "state": "The payment callback API returns 500 on every call.",
+    "questions": {
+      "team": {
+        "type": "choice",
+        "instructions": "Which team should handle this ticket?",
+        "criteria": {"billing": "Charges and refunds", "engineering": "Bugs and outages"}
+      }
+    }
+  }'
+```
+
+For decision models served by your own gateway or Microsoft Foundry, use the configured proxy's `systemone` API instead (see [UPSTREAM_PROXY.md](UPSTREAM_PROXY.md)).
 
 ### Anthropic Compatible
 
@@ -614,7 +715,7 @@ optional user-token auth gate, and logging. It adds nothing to the search itself
 The proxy never searches on a model's behalf. Clients declare the `webiq_search`
 function tool, the model decides whether and what to search, and the client
 executes the tool call against this endpoint; `/chat` does that automatically
-when the Web IQ toggle is on. That tool schema stays narrow (`query`,
+when Web IQ is selected in the Search menu. That tool schema stays narrow (`query`,
 `max_results`) on purpose — it is a prompt surface, not the API — so the client
 is what turns those arguments into a full official request. See
 `scripts/webiq_search_demo.py`.
@@ -626,6 +727,124 @@ added to the shared request cache with a service-specific model name such as
 places with HTTP/MCP method, name, status, duration, session IDs and user ID;
 streaming MCP request and response bodies are never persisted.
 
+### AnySearch
+
+AnySearch is an independent second search provider alongside Web IQ:
+
+All three documented REST endpoints are proxied:
+
+| Endpoint | Purpose | Chat function tool |
+| --- | --- | --- |
+| [`POST /v1/search`](https://www.anysearch.com/docs/api-endpoints/v1-search) | Ranked search results | `anysearch_search` |
+| [`POST /v1/extract`](https://www.anysearch.com/docs/api-endpoints/v1-extract) | Clean content from a public HTTP(S) URL | `anysearch_extract` |
+| [`GET /v1/sub-domains`](https://www.anysearch.com/docs/api-endpoints/v1-sub-domains) | Search capability tags and parameter definitions | `anysearch_sub_domains` |
+
+**`sub-domains` is a capability catalog, not DNS subdomain discovery.** Its
+`domain` values are search categories such as `code` and `finance`, not website
+hostnames. It consumes no search quota and does not count as search usage.
+
+`/chat` offers **Off / Native / Web IQ / AnySearch** in its Search selector.
+Existing Native/Web IQ preferences are migrated automatically. There is no
+automatic provider fallback or simultaneous use of different providers.
+
+Configure it in `config.yaml`, then restart ghc-api:
+
+```yaml
+enable_anysearch: true
+# Choose one: inline anysearch_api_key, OR a private key file.
+anysearch_api_key: ""
+anysearch_api_key_file: "~/.config/ghc-api/secrets/anysearch_api_key"
+anysearch_base_url: "https://api.anysearch.com"
+anysearch_timeout: 30
+anysearch_extract_timeout: 60
+log_anysearch_requests: true
+```
+
+The key file contains only the key (a trailing newline is accepted); keep it
+outside the repository with mode `0600`. It is read at startup, not automatically
+created or discovered. A nonempty inline `anysearch_api_key` and a key file cannot
+be configured together. Keys never appear in Chat template data or the runtime
+config API. **A server-held key is required**: missing configuration returns 503,
+never anonymous traffic. No automatic retries, redirects, or key registration.
+
+```bash
+curl -X POST http://localhost:8313/v1/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Python asyncio TaskGroup documentation","max_results":5}'
+
+curl -X POST http://localhost:8313/v1/extract \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/article"}'
+
+curl 'http://localhost:8313/v1/sub-domains?domain=code&domain=finance'
+```
+
+With `enable_auth: true`, provide your **ghc-api user token**, not the provider
+key, using `Authorization: Bearer <GHC_API_USER_TOKEN>`. Client credentials are
+not forwarded to AnySearch. When auth is disabled, protect the server with an
+appropriate network/reverse-proxy access boundary: callers spend its quota.
+
+Native request bytes and normal responses are preserved, including `tag`,
+`zone`, `language`, `params`, `format`, and future fields. The proxy inserts no
+search defaults. `format: markdown` still returns a JSON envelope; result
+`content` is Markdown. Retry-After and X-Request-ID survive ordinary responses.
+
+Extract accepts exactly one JSON object with a nonempty `url` string: no unknown
+or duplicate fields, valid UTF-8, at most 16 KiB, `application/json` with no
+charset or UTF-8, and no Content-Encoding or `identity`. The proxy passes the
+bytes and content headers unchanged; **upstream validates this strict contract**
+and the public-URL policy. ghc-api never fetches the submitted URL locally.
+Ordinary extraction failures, including 422 and `error_code`, are preserved.
+
+For the capability catalog, repeat `domain` (`?domain=code&domain=finance`), not
+`domains` or a comma-separated list. Upstream deduplicates repeated values and
+returns an empty `data.domains` array for unknown domains. Query arguments are
+preserved, except ghc-api's client `api_key` parameter is stripped before
+forwarding or recording. All three endpoints require the server key and share
+ghc-api's optional user-token gate, even though catalog lookup is quota-free.
+
+Documented security exceptions:
+
+- Upstream 401/403 become safe 503 errors about the **server's** credentials/access.
+- **Every 402 body is replaced** with a fixed quota error, retaining only safe
+  request-ID metadata. AnySearch may include generated credentials in 402s;
+  originals never reach logs, request caches, exports, or clients.
+- Upstream redirects become safe 502 errors instead of being followed.
+- Timeout is 504; other network failure is 502. No exception details are exposed.
+
+Selecting AnySearch in Chat declares all three tools. The model can discover
+capabilities, search with a returned tag and its required params, then extract a
+source before answering. `anysearch_search` accepts `query`, `max_results` and
+optional `tag`, `params`, `zone`, `language`, `format`; `anysearch_extract` takes
+`url`; `anysearch_sub_domains` takes a `domain` array. Tools execute client-side
+through Chat Completions, Responses, or Messages tool results, not by injecting
+hidden server-side searches into LLM requests. Native upstream `web_search`
+tools are unchanged.
+
+The shared limit is three tool rounds per user turn, then a forced-answer round.
+The UI defaults to five search results and Markdown, clips search content to
+3000 characters, snippets to 1000, and extracted content to 12000, marking
+truncation. These are client context policies, not native API defaults. Web
+content is labeled untrusted and citation URLs survive. Catalog metadata does
+not create fake webpage citations. Failures become safe tool outputs;
+cancellation propagates, and unknown or unselected tools cannot execute.
+
+Requests appear in the shared request browser/statistics as `anysearch_search`,
+`anysearch_extract`, or `anysearch_sub_domains`, with zero LLM tokens. Capability
+lookups have separate counters and `uses_search_quota: false`; they do not
+increment search counters. Safe daily audit records go to
+`<ghc-api config dir>/anysearch/YYYY-MM-DD.jl`; `log_anysearch_requests` controls
+this dedicated file, not the shared cache. It can be toggled through
+`/api/runtime-config`. Business failures and malformed successes are marked as
+errors even if upstream used HTTP 200; the original HTTP contract is preserved.
+
+`scripts/anysearch_search_demo.py` supports the original positional search query,
+`--extract URL`, or repeated `--domain code --domain finance`. Use `--params` with
+a JSON object for tagged searches, and `GHC_API_TOKEN` for optional ghc-api user
+authentication. These are the three REST APIs; an AnySearch MCP proxy is not
+provided. See the
+[design and security decision](docs/decisions/ANYSEARCH_SEARCH_API.md) for details.
+
 ### Configured Upstream Proxy
 
 Optional private upstream profiles expose isolated routes without changing the existing Copilot endpoints:
@@ -634,6 +853,7 @@ Optional private upstream profiles expose isolated routes without changing the e
 - `POST /proxy/<profile>/v1/chat/completions`
 - `POST /proxy/<profile>/v1/messages`
 - `GET /proxy/<profile>/v1/models`
+- `GET /proxy/<profile>/v1/models/<model_id>` - Model metadata using the same schema as `/v1/models`
 - `GET /proxy/models` - First-party model catalog used by the built-in Chat page
 
 Configured models are selectable from `/chat` and participate in the same request cache, request browser, token statistics, per-user usage reporting, and persisted request-file statistics as existing endpoints. Configuration lives in a separate private `upstream-proxies.yaml` file and supports independent upstream authentication, profile/API/model headers, public-to-upstream model mapping, and response-header affinity persistence. See [Configured Upstream Proxy](UPSTREAM_PROXY.md).
@@ -796,7 +1016,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v1/systemone`, `/systemone`, `/v1/images/generations`, `/images/generations`, `/v1/images/edits`, `/images/edits`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
@@ -812,6 +1032,7 @@ server {
     server_name ghc.example.com;
 
     # ssl_certificate / ssl_certificate_key go here
+    client_max_body_size 50m;         # Image-edit uploads
 
     # Default for the whole server: admin basic-auth required.
     auth_basic "ghc-api admin";
@@ -827,7 +1048,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
     # Aliases without the /v1 prefix
-    location ~ ^/(chat/completions|responses|models)(/|$) {
+    location ~ ^/(chat/completions|responses|embeddings|systemone|images|models)(/|$) {
         auth_basic off;
         proxy_pass http://127.0.0.1:8313;
         proxy_buffering off;

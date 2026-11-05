@@ -1,5 +1,7 @@
 """
 OpenAI-compatible API routes
+
+Copilot requests omit the unsupported OpenAI service_tier parameter.
 """
 
 import copy
@@ -18,13 +20,16 @@ from ..api_helpers import (
     get_copilot_base_url,
     get_copilot_headers,
     is_configured_chat_completions_support_added,
+    is_non_chat_model,
     supports_embeddings_api,
     supports_responses_api,
+    systemone_upstream_path,
 )
 from ..auth import redact_auth_headers
 from ..cache import cache
 from ..counters import counters
 from ..config import chat_completions_model_support
+from ..model_metadata import normalize_model_metadata
 from ..perf_stats import is_output_event
 from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
 from ..sse.keepalive import (
@@ -1209,42 +1214,78 @@ def _normalize_responses_tool_descriptions(payload: Dict) -> int:
     return normalized_count
 
 
+def _public_model_data(model: Dict) -> Dict:
+    return {
+        "id": model["id"],
+        "object": "model",
+        "type": "model",
+        "created": 0,
+        "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
+        "owned_by": model.get("vendor", "unknown"),
+        "display_name": model.get("name", model["id"]),
+        **normalize_model_metadata(model),
+    }
+
+
+def _load_model_catalog():
+    """Use the cached catalog; only contact Copilot when it has not loaded."""
+    from ..api_helpers import fetch_models
+
+    if state.models is None and not fetch_models():
+        raise RuntimeError("Failed to fetch models from the Copilot API")
+    if not isinstance(state.models, dict) or not isinstance(state.models.get("data"), list):
+        raise RuntimeError("Invalid model catalog from the Copilot API")
+    return state.models["data"]
+
+
+def _model_catalog_error(error):
+    return jsonify({"error": {
+        "message": str(error),
+        "type": "upstream_error",
+        "code": "model_catalog_unavailable",
+    }}), 502
+
+
 @openai_bp.route("/v1/models", methods=["GET"])
 @openai_bp.route("/models", methods=["GET"])
 def list_models():
-    """List available models"""
-    from ..api_helpers import fetch_models
-
+    """List available models with limits and capabilities."""
     try:
-        ensure_copilot_token()
-        if not state.models:
-            fetch_models()
-
-        models = [
-            {
-                "id": m["id"],
-                "object": "model",
-                "type": "model",
-                "created": 0,
-                "created_at": datetime.utcfromtimestamp(0).isoformat() + "Z",
-                "owned_by": m.get("vendor", "unknown"),
-                "display_name": m.get("name", m["id"]),
-            }
-            for m in state.models.get("data", [])
-        ]
-
         return jsonify({
             "object": "list",
-            "data": models,
+            "data": [_public_model_data(model) for model in _load_model_catalog()],
             "has_more": False,
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return _model_catalog_error(e)
 
-@openai_bp.route("/v1/models/full/", methods=["GET"])
-@openai_bp.route("/models/full/", methods=["GET"])
+
+@openai_bp.route("/v1/models/<path:model_id>", methods=["GET"])
+@openai_bp.route("/models/<path:model_id>", methods=["GET"])
+def retrieve_model(model_id: str):
+    """Return the same public metadata as the list for an exact model id."""
+    try:
+        model = next((model for model in _load_model_catalog() if model.get("id") == model_id), None)
+        if model is None:
+            return jsonify({"error": {
+                "message": f"Model '{model_id}' not found.",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "model_not_found",
+            }}), 404
+        return jsonify(_public_model_data(model))
+    except Exception as e:
+        return _model_catalog_error(e)
+
+
+@openai_bp.route("/v1/models/full/", methods=["GET"], strict_slashes=False)
+@openai_bp.route("/models/full/", methods=["GET"], strict_slashes=False)
 def list_models_full():
-    return jsonify(state.models)
+    try:
+        _load_model_catalog()
+        return jsonify(state.models)
+    except Exception as e:
+        return _model_catalog_error(e)
 
 
 @openai_bp.route("/v1/models/full/refresh", methods=["POST"])
@@ -1413,6 +1454,131 @@ def embeddings():
         return jsonify({"error": str(exc)}), 500
 
 
+def _invalid_request(message: str, code: str, param: str = None, status: int = 400):
+    error = {"message": message, "type": "invalid_request_error", "code": code}
+    if param:
+        error["param"] = param
+    return jsonify({"error": error}), status
+
+
+@openai_bp.route("/v1/systemone", methods=["POST"])
+@openai_bp.route("/systemone", methods=["POST"])
+def systemone():
+    """System One decision API passthrough to Copilot (Microsoft-Decision-1).
+
+    Decision models score a closed set of options and return calibrated
+    probabilities. The body is forwarded unchanged apart from model-name
+    translation; question/answer shapes are not inspected so upstream
+    validation errors reach the client as-is.
+    """
+    try:
+        start_time = time.time()
+        ensure_copilot_token()
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _invalid_request("Request body must be a JSON object.", "invalid_json")
+
+        original_request_body = copy.deepcopy(payload)
+        request_id = str(uuid.uuid4())
+        request_headers = redact_auth_headers(dict(request.headers))
+        client_ip = get_client_ip(request)
+        user_id = _current_user_id()
+
+        original_model = payload.get("model")
+        if not isinstance(original_model, str) or not original_model:
+            return _invalid_request("The 'model' field is required.", "missing_model", "model")
+
+        if payload.get("stream"):
+            # The decision API only answers with a single JSON body.
+            return _invalid_request(
+                "This API does not support streaming responses.", "unsupported_stream", "stream"
+            )
+
+        translated_model = translate_model_name(original_model)
+        if not state.models:
+            from ..api_helpers import fetch_models
+            fetch_models()
+        upstream_path = systemone_upstream_path(translated_model)
+        if upstream_path is None:
+            return _invalid_request(
+                f"Model '{original_model}' does not support the System One decision API.",
+                "unsupported_model",
+                "model",
+            )
+
+        upstream_payload = dict(payload)
+        upstream_payload["model"] = translated_model
+        request_size = len(json.dumps(upstream_payload))
+        headers = get_copilot_headers()
+        headers["X-Initiator"] = "user"
+
+        connection_retries = state.max_connection_retries
+        last_connection_error = None
+        for conn_attempt in range(connection_retries + 1):
+            try:
+                response = requests.post(
+                    f"{get_copilot_base_url()}{upstream_path}",
+                    headers=headers,
+                    json=upstream_payload,
+                    timeout=state.upstream_read_timeout,
+                )
+                last_connection_error = None
+                break
+            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
+                last_connection_error = exc
+                log_connection_retry(request_id, "/v1/systemone", conn_attempt, connection_retries, exc)
+                ensure_copilot_token()
+                if conn_attempt < connection_retries:
+                    time.sleep(min(2 ** conn_attempt, 8))
+
+        if last_connection_error is not None:
+            return jsonify({
+                "error": f"Upstream connection error after {connection_retries + 1} attempts: "
+                         f"{type(last_connection_error).__name__}"
+            }), 504
+
+        duration = round(time.time() - start_time, 2)
+        response_size = len(response.content)
+        try:
+            result = response.json()
+        except ValueError:
+            result = response.text
+
+        # Decision models report flat token counts and have no cache tiers.
+        usage = result.get("usage", {}) if isinstance(result, dict) else {}
+        if not isinstance(usage, dict):
+            usage = {}
+        cache.add_request(request_id, {
+            "request_headers": request_headers,
+            "client_ip": client_ip,
+            "original_request_body": original_request_body,
+            "request_body": upstream_payload,
+            "response_body": result,
+            "model": original_model,
+            "translated_model": translated_model if translated_model != original_model else None,
+            "endpoint": "/v1/systemone",
+            "status_code": response.status_code,
+            "request_size": request_size,
+            "response_size": response_size,
+            "input_tokens": usage.get("input_tokens", 0) or 0,
+            "output_tokens": usage.get("output_tokens", 0) or 0,
+            "duration": duration,
+            "user_id": user_id,
+        })
+
+        if not response.ok:
+            log_error_request("/v1/systemone", upstream_payload, response.text, response.status_code, client_ip)
+        # Return the upstream body byte-for-byte so probabilities and
+        # validation errors are not re-serialized.
+        return Response(
+            response.content,
+            status=response.status_code,
+            content_type=response.headers.get("Content-Type", "application/json"),
+        )
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @openai_bp.route("/v1/chat/completions", methods=["POST"])
 @openai_bp.route("/chat/completions", methods=["POST"])
 def chat_completions():
@@ -1422,6 +1588,7 @@ def chat_completions():
         ensure_copilot_token()
         payload = request.get_json()
         original_request_body = copy.deepcopy(payload)
+        payload.pop("service_tier", None)
         request_id = str(uuid.uuid4())
 
         # Capture incoming request headers (auth values redacted before caching).
@@ -1437,6 +1604,12 @@ def chat_completions():
         if translated_model != original_model:
             payload = dict(payload)
             payload["model"] = translated_model
+
+        if is_non_chat_model(translated_model):
+            return _invalid_request(
+                f"Model '{original_model}' is not a chat model. Use its advertised endpoints.",
+                "unsupported_model", "model",
+            )
 
         # Web IQ is no longer applied inside the proxy path. Strip the retired
         # option so it can never reach Copilot as an unknown parameter, and
@@ -1716,6 +1889,7 @@ def responses():
             payload = json.loads(raw.decode('utf8'))
             print("after remove \\r \\n the json can be parsed")
         original_request_body = copy.deepcopy(payload)
+        payload.pop("service_tier", None)
         request_id = str(uuid.uuid4())
 
         # Capture incoming request headers (auth values redacted before caching).

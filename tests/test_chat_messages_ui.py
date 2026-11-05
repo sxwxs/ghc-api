@@ -31,10 +31,11 @@ function element() {
     return el;
 }
 const elements = {};
-for (const name of ['model-select', 'endpoint-select', 'web-search-enabled',
-    'web-search-toggle', 'webiq-search-enabled', 'webiq-search-toggle', 'messages-container']) {
+for (const name of ['model-select', 'endpoint-select', 'search-provider', 'messages-container']) {
     elements[name] = element();
 }
+elements['search-provider'].options = ['off', 'native', 'webiq', 'anysearch'].map(value => ({value}));
+elements['search-provider'].value = 'off';
 const document = {
     getElementById(name) { return elements[name]; },
     createElement() { return element(); },
@@ -53,9 +54,19 @@ let sse = [
 const normalSse = sse;
 let responseStreams = null;
 let calls = [];
+const modelFetches = [];
 async function fetch(url, options) {
-    if (url === '/v1/models' || url === '/v1/models/full/') {
-        return { ok: true, json: async () => ({ data: [] }) };
+    if (url === '/v1/models') {
+        modelFetches.push(url);
+        return { ok: true, json: async () => ({ data: [{
+            id: 'copilot-model', display_name: 'Copilot Model',
+            context_window: 200000, max_output_tokens: 1024,
+            supported_endpoints: ['/responses'],
+        }] }) };
+    }
+    if (url === '/v1/models/full/') {
+        modelFetches.push(url);
+        throw new Error('Chat should use the metadata in /v1/models');
     }
     if (url === '/proxy/models') {
         return { ok: true, json: async () => ({ data: [{
@@ -86,11 +97,16 @@ vm.createContext(sandbox);
 vm.runInContext(script, sandbox);
 (async () => {
     await vm.runInContext('loadModels()', sandbox);
+    assert.ok(modelFetches.length > 0);
+    assert.ok(modelFetches.every(url => url === '/v1/models'));
+    assert.equal(vm.runInContext("selectedModelTarget('copilot-model').contextWindow", sandbox), 200000);
+    assert.equal(vm.runInContext("selectedModelTarget('copilot-model').maxOutputTokens", sandbox), 1024);
+    assert.equal(vm.runInContext("supportsResponses('copilot-model')", sandbox), true);
     const key = vm.runInContext("configuredModelKey('example-profile', 'example-model')", sandbox);
     elements['model-select'].value = key;
     vm.runInContext('updateEndpointOptions()', sandbox);
     assert.equal(vm.runInContext('shouldUseMessages(document.getElementById("model-select").value)', sandbox), true);
-    assert.equal(vm.runInContext('canUseWebIq(document.getElementById("model-select").value)', sandbox), true);
+    assert.equal(vm.runInContext('canUseSearchProvider(document.getElementById("model-select").value, "webiq")', sandbox), true);
     const endpoints = elements['endpoint-select'].children.map(e => e.value);
     assert.deepEqual(endpoints, ['auto', '/proxy/example-profile/v1/messages']);
     assert.equal(vm.runInContext('resolveEndpoint({model:"example-model"})', sandbox),
@@ -142,7 +158,7 @@ vm.runInContext(script, sandbox);
         {type:'content_block_stop', index:2},
         {type:'message_stop'},
     ].map(frame).join('');
-    elements['webiq-search-enabled'].checked = true;
+    elements['search-provider'].value = 'webiq';
     vm.runInContext('executeWebIqCall = async args => ({ results: [], output: JSON.stringify({ query: JSON.parse(args).query, hits: 1 }) })', sandbox);
     responseStreams = [toolStream, normalSse];
     const toolSession = { messages: [{ role: 'user', content: 'search news' }] };

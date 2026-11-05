@@ -154,6 +154,45 @@ class ConfiguredProxyConfigTest(unittest.TestCase):
             "claude-deployment",
         )
 
+    def test_parses_header_command(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        for header in ("api-key", "X-Vendor-Key", "Authorization"):
+            with self.subTest(header=header):
+                config["proxies"]["demo-profile"]["auth"] = {
+                    "type": "header_command", "header": header,
+                    "command": ["credential-helper", "get-token"],
+                }
+                auth = parse_proxy_config(config).profiles["demo-profile"].auth
+                self.assertEqual(auth.type, "header_command")
+                self.assertEqual(auth.header, header)
+                self.assertEqual(auth.command, ("credential-helper", "get-token"))
+
+    def test_header_command_requires_a_valid_header_name(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        auth = {"type": "header_command", "command": ["credential-helper"]}
+        config["proxies"]["demo-profile"]["auth"] = auth
+        with self.assertRaisesRegex(ProxyConfigError, r"auth\.header"):
+            parse_proxy_config(config)
+        for header in (None, 123, False, "", " ", "X:Key", "X\rKey", "X\nKey",
+                       "X\tKey", "X Key", " api-key ", "密钥"):
+            with self.subTest(header=header):
+                auth["header"] = header
+                with self.assertRaisesRegex(ProxyConfigError, r"auth\.header"):
+                    parse_proxy_config(config)
+
+    def test_command_auth_requires_a_command(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        for auth_type in ("bearer_command", "header_command"):
+            with self.subTest(auth_type=auth_type):
+                auth = {"type": auth_type, "header": "api-key"}
+                config["proxies"]["demo-profile"]["auth"] = auth
+                with self.assertRaisesRegex(ProxyConfigError, r"auth\.command"):
+                    parse_proxy_config(config)
+                for command in (None, []):
+                    auth["command"] = command
+                    with self.assertRaisesRegex(ProxyConfigError, r"auth\.command"):
+                        parse_proxy_config(config)
+
     def test_header_bindings_are_opt_in_and_reject_credential_names(self):
         config = __import__("yaml").safe_load(CONFIG)
         api = config["proxies"]["demo-profile"]["apis"]["messages"]
@@ -378,61 +417,103 @@ class ConfiguredProxyAffinityTest(unittest.TestCase):
 
 class ConfiguredProxyAuthTest(unittest.TestCase):
     def test_command_token_is_cached(self):
-        provider = ProxyAuthProvider(ProxyAuthConfig(
-            type="bearer_command",
-            command=("credential-helper",),
-            cache_ttl_seconds=300,
-        ))
-        completed = mock.Mock(returncode=0, stdout="token-value\n", stderr="")
+        for auth_type in ("bearer_command", "header_command"):
+            with self.subTest(auth_type=auth_type):
+                provider = ProxyAuthProvider(ProxyAuthConfig(
+                    type=auth_type,
+                    command=("credential-helper",),
+                    cache_ttl_seconds=300,
+                ))
+                completed = mock.Mock(returncode=0, stdout="token-value\n", stderr="")
 
-        with mock.patch("ghc_api.proxy.auth.subprocess.run", return_value=completed) as run:
-            self.assertEqual(provider.get_token(), "token-value")
-            self.assertEqual(provider.get_token(), "token-value")
+                with mock.patch("ghc_api.proxy.auth.subprocess.run", return_value=completed) as run:
+                    self.assertEqual(provider.get_token(), "token-value")
+                    self.assertEqual(provider.get_token(), "token-value")
 
-        self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_count, 1)
 
-    def test_command_token_is_refreshed_after_upstream_401(self):
-        config = __import__("yaml").safe_load(CONFIG)
-        config["proxies"]["demo-profile"]["auth"] = {
-            "type": "bearer_command",
-            "command": ["credential-helper"],
-            "cache_ttl_seconds": 300,
-        }
-        config["proxies"]["demo-profile"]["apis"]["responses"]["header_bindings"] = [{
-            "client_name": "X-Test-Client-Context", "upstream_name": "X-Test-Upstream-Context",
-            "value_type": "uuid_v4",
-        }]
-        session_id = str(uuid.uuid4())
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "proxies.yaml"
-            path.write_text(__import__("yaml").safe_dump(config), encoding="utf-8")
-            runtime = ProxyRuntime(
-                registry=ProxyRegistry(path),
-                affinity_store=ProxyAffinityStore(Path(tmp) / "affinity.json"),
-            )
-            profile = runtime.registry.get_profile("demo-profile")
-            api, model, model_api = profile.resolve("responses", "demo-model")
-            unauthorized = FakeResponse(status_code=401, payload={"error": "expired"})
-            success = FakeResponse(payload={"id": "resp-1", "output": []})
-            command_results = [
-                mock.Mock(returncode=0, stdout="token-one\n", stderr=""),
-                mock.Mock(returncode=0, stdout="token-two\n", stderr=""),
-            ]
+    def test_custom_auth_wins_over_dynamic_and_affinity_headers(self):
+        for binding_header, affinity_header in (
+            ("x-vendor-key", "X-Route-Token"),
+            ("X-Upstream-Context", "X-VENDOR-KEY"),
+        ):
+            with self.subTest(binding_header=binding_header, affinity_header=affinity_header):
+                config = __import__("yaml").safe_load(CONFIG)
+                raw = config["proxies"]["demo-profile"]
+                raw["auth"] = {
+                    "type": "header_command", "header": "X-Vendor-Key",
+                    "command": ["credential-helper"],
+                }
+                raw["affinity"]["request_header"] = affinity_header
+                raw["apis"]["responses"]["header_bindings"] = [{
+                    "client_name": "X-Client-Context", "upstream_name": binding_header,
+                    "value_type": "uuid_v4",
+                }]
+                profile = parse_proxy_config(config).profiles["demo-profile"]
+                api, model, model_api = profile.resolve("responses", "demo-model")
+                session_id = str(uuid.uuid4())
+                completed = mock.Mock(returncode=0, stdout="command-credential\n", stderr="")
+                with mock.patch("ghc_api.proxy.auth.subprocess.run", return_value=completed):
+                    headers = ProxyRuntime()._build_headers(
+                        profile, api, model, model_api, ProxyAuthProvider(profile.auth),
+                        "route-token", {binding_header: session_id},
+                    )
 
-            with mock.patch("ghc_api.proxy.auth.subprocess.run", side_effect=command_results) as run, \
-                    mock.patch("ghc_api.proxy.client.requests.post", side_effect=[unauthorized, success]) as post:
-                result = runtime.post(profile, api, model, model_api, {"model": "demo-model"}, False,
-                                      dynamic_headers={"X-Test-Upstream-Context": session_id})
+                self.assertEqual(headers["X-Vendor-Key"], "command-credential")
+                self.assertEqual([name for name in headers if name.lower() == "x-vendor-key"], ["X-Vendor-Key"])
+                for name, value in ((binding_header, session_id), (affinity_header, "route-token")):
+                    if name.lower() != "x-vendor-key":
+                        self.assertEqual(headers[name], value)
 
-        self.assertIs(result.response, success)
-        self.assertTrue(unauthorized.closed)
-        self.assertEqual(run.call_count, 2)
-        self.assertEqual(post.call_args_list[0].kwargs["headers"]["Authorization"], "Bearer token-one")
-        self.assertEqual(post.call_args_list[1].kwargs["headers"]["Authorization"], "Bearer token-two")
-        self.assertEqual(
-            [call.kwargs["headers"]["X-Test-Upstream-Context"] for call in post.call_args_list],
-            [session_id, session_id],
-        )
+    def test_command_token_is_refreshed_once_after_upstream_401(self):
+        for auth_type, header, prefix in (
+            ("bearer_command", "Authorization", "Bearer "),
+            ("header_command", "api-key", ""),
+        ):
+            for final_status in (200, 401):
+                with self.subTest(auth_type=auth_type, final_status=final_status):
+                    config = __import__("yaml").safe_load(CONFIG)
+                    raw_profile = config["proxies"]["demo-profile"]
+                    raw_profile["affinity"]["enabled"] = False
+                    raw_profile["auth"] = {
+                        "type": auth_type, "command": ["credential-helper"],
+                    }
+                    if auth_type == "header_command":
+                        raw_profile["auth"]["header"] = header
+                    # An overridden credential must not require its old environment variable.
+                    raw_profile["headers"][header.upper()] = "${GHC_API_TEST_OLD_AUTH_KEY}"
+                    profile = parse_proxy_config(config).profiles["demo-profile"]
+                    api, model, model_api = profile.resolve("responses", "demo-model")
+                    runtime = ProxyRuntime()
+                    session_id = str(uuid.uuid4())
+                    unauthorized = FakeResponse(status_code=401, payload={"error": "expired"})
+                    final = FakeResponse(status_code=final_status, payload={"id": "resp-1"})
+                    command_results = [
+                        mock.Mock(returncode=0, stdout="token-one\n", stderr=""),
+                        mock.Mock(returncode=0, stdout="token-two\n", stderr=""),
+                    ]
+
+                    with mock.patch.dict("os.environ", {}, clear=True), \
+                            mock.patch("ghc_api.proxy.auth.subprocess.run", side_effect=command_results) as run, \
+                            mock.patch("ghc_api.proxy.client.requests.post", side_effect=[unauthorized, final]) as post:
+                        result = runtime.post(
+                            profile, api, model, model_api, {"model": "demo-model"}, False,
+                            dynamic_headers={"X-Test-Upstream-Context": session_id},
+                        )
+                        self.assertEqual(runtime._auth_provider(profile).get_token(), "token-two")
+
+                    self.assertIs(result.response, final)
+                    self.assertTrue(unauthorized.closed)
+                    self.assertFalse(final.closed)
+                    self.assertEqual(run.call_count, 2)
+                    self.assertEqual(post.call_count, 2)
+                    for call, token in zip(post.call_args_list, ("token-one", "token-two")):
+                        headers = call.kwargs["headers"]
+                        self.assertEqual(headers[header], prefix + token)
+                        self.assertEqual([name for name in headers if name.lower() == header.lower()], [header])
+                        self.assertEqual(headers["X-Test-Upstream-Context"], session_id)
+                        if auth_type == "header_command":
+                            self.assertNotIn("authorization", {name.lower() for name in headers})
 
 
 class ConfiguredProxyRouteTest(unittest.TestCase):
@@ -471,6 +552,41 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.temp_dir.cleanup()
         state.enable_auth = self.saved_enable_auth
         self._reset_request_cache()
+
+    def test_custom_auth_header_is_not_cached_or_taken_from_client(self):
+        config = __import__("yaml").safe_load(CONFIG)
+        config["proxies"]["demo-profile"]["auth"] = {
+            "type": "header_command", "header": "X-Vendor-Key",
+            "command": ["credential-helper"],
+        }
+        self.runtime.registry.path.write_text(__import__("yaml").safe_dump(config), encoding="utf-8")
+        completed = mock.Mock(returncode=0, stdout="server-credential\n", stderr="")
+
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                self._reset_request_cache()
+                upstream = FakeResponse(
+                    payload={"type": "message", "content": []},
+                    headers={"Content-Type": "text/event-stream" if stream else "application/json"},
+                    lines=[b'event: message_stop', b'data: {"type":"message_stop"}'],
+                )
+                with mock.patch("ghc_api.proxy.auth.subprocess.run", return_value=completed), \
+                        mock.patch("ghc_api.proxy.client.requests.post", return_value=upstream) as post:
+                    with self.app.test_client() as client:
+                        response = client.post(
+                            "/proxy/demo-profile/v1/messages",
+                            json={"model": "demo-model", "messages": [], "max_tokens": 16, "stream": stream},
+                            headers={"x-vendor-key": "client-credential", "X-Trace-Id": "trace-1"},
+                        )
+                        response.get_data()  # Drain SSE so its cache entry is finalized.
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(post.call_args.kwargs["headers"]["X-Vendor-Key"], "server-credential")
+                cached = next(iter(cache.cache.values()))
+                self.assertNotIn("x-vendor-key", {name.lower() for name in cached["request_headers"]})
+                self.assertEqual(cached["request_headers"]["X-Trace-Id"], "trace-1")
+                self.assertNotIn("client-credential", json.dumps(cached))
+                self.assertNotIn("server-credential", json.dumps(cached))
 
     def test_responses_proxy_omits_model_rewrites_response_and_reuses_affinity(self):
         first = FakeResponse(
@@ -701,6 +817,8 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
 
         entry = next(item for item in catalog["data"] if item["id"] == "decision-only")
         self.assertEqual(entry["supported_endpoints"], ["/systemone"])
+        self.assertEqual(entry["model_type"], "decision")
+        self.assertIs(entry["streaming"], False)
         self.assertEqual(rejected.status_code, 400)
         self.assertEqual(rejected.get_json()["error"]["code"], "unsupported_model")
 
@@ -1012,6 +1130,29 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertNotIn("headers", model)
         self.assertNotIn("upstream_url", model)
 
+    def test_model_detail_matches_list_and_exposes_only_public_metadata(self):
+        with self.app.test_client() as client:
+            listing = client.get("/proxy/demo-profile/v1/models")
+            detail = client.get("/proxy/demo-profile/v1/models/demo-model")
+            missing = client.get("/proxy/demo-profile/v1/models/missing")
+            missing_profile = client.get("/proxy/missing/v1/models/demo-model")
+
+        self.assertEqual(detail.status_code, 200)
+        model = detail.get_json()
+        self.assertEqual(model, listing.get_json()["data"][0])
+        self.assertEqual(model["context_window"], 64000)
+        self.assertEqual(model["max_output_tokens"], 4096)
+        self.assertEqual(model["input"], ["text"])
+        self.assertIs(model["reasoning"], True)
+        for field in ("max_input_tokens", "reasoning_efforts", "tool_calls", "streaming", "capabilities"):
+            self.assertIsNone(model[field], field)
+        for private in ("headers", "upstream_url", "upstream_model", "auth", "affinity"):
+            self.assertNotIn(private, model)
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.get_json()["error"]["code"], "model_not_found")
+        self.assertEqual(missing_profile.status_code, 404)
+        self.assertEqual(missing_profile.get_json()["error"]["code"], "proxy_not_found")
+
     def test_empty_success_response_becomes_bad_gateway(self):
         upstream = FakeResponse(payload=None, content=b"")
 
@@ -1071,10 +1212,11 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         )
         with mock.patch.object(proxy_routes, "require_auth", return_value=denied) as require:
             with self.app.test_client() as client:
-                response = client.get("/proxy/models")
+                for path in ("/proxy/models", "/proxy/demo-profile/v1/models/demo-model"):
+                    with self.subTest(path=path):
+                        self.assertEqual(client.get(path).status_code, 401)
 
-        self.assertEqual(response.status_code, 401)
-        require.assert_called_once()
+        self.assertEqual(require.call_count, 2)
         self.assertNotIn("/proxy/demo-profile/v1/models", PROTECTED_PATHS)
 
 

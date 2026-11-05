@@ -144,3 +144,39 @@ def test_responses_pre_header_grace_is_clamped(startup_env, configured, expected
     main_module.main()
 
     assert state.responses_pre_header_grace == expected
+
+
+def test_anysearch_config_loads_private_key_without_exposing_it(startup_env, capsys):
+    tmp_path, _ = startup_env
+    key_path = tmp_path / "anysearch.key"
+    key_path.write_text("ANYSEARCH-STARTUP-SECRET\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        "debug: true\nenable_anysearch: true\n"
+        f"anysearch_api_key_file: {key_path}\n"
+        "anysearch_base_url: http://127.0.0.1:9000/search-prefix\n"
+        "anysearch_timeout: 60\nanysearch_extract_timeout: 120\nlog_anysearch_requests: false\n",
+        encoding="utf-8",
+    )
+    main_module.main()
+    assert state.enable_anysearch is True
+    assert state.anysearch_api_key == "ANYSEARCH-STARTUP-SECRET"
+    assert state.anysearch_timeout == 60
+    assert state.anysearch_extract_timeout == 120
+    assert state.log_anysearch_requests is False
+    captured = capsys.readouterr()
+    for path in ("/v1/search", "/v1/extract", "/v1/sub-domains"):
+        assert f"AnySearch API: http://localhost:8313{path}" in captured.out
+    assert "ANYSEARCH-STARTUP-SECRET" not in captured.out + captured.err
+
+
+def test_invalid_anysearch_key_does_not_leak_during_startup(startup_env, capsys):
+    tmp_path, fake_app = startup_env
+    key_path = tmp_path / "anysearch.key"
+    key_path.write_text("STARTUP-SECRET with spaces\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(
+        f"debug: true\nanysearch_api_key_file: {key_path}\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        main_module.main()
+    fake_app.run.assert_not_called()
+    captured = capsys.readouterr()
+    assert "STARTUP-SECRET" not in captured.out + captured.err

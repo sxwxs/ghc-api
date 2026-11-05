@@ -22,7 +22,7 @@ SUPPORTED_APIS = frozenset({"responses", "chat_completions", "messages", "system
 NON_STREAMING_APIS = frozenset({"systemone"})
 MODEL_REQUEST_MODES = frozenset({"preserve", "omit", "upstream"})
 MODEL_RESPONSE_MODES = frozenset({"preserve", "public"})
-AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command"})
+AUTH_TYPES = frozenset({"none", "bearer_env", "bearer_command", "header_command"})
 AFFINITY_SCOPES = frozenset({"proxy", "model"})
 PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -47,6 +47,7 @@ class ProxyAuthConfig:
     command: Tuple[str, ...] = ()
     cache_ttl_seconds: int = 300
     command_timeout_seconds: int = 30
+    header: str = "Authorization"
 
     def fingerprint(self) -> Tuple:
         return (
@@ -55,6 +56,7 @@ class ProxyAuthConfig:
             self.command,
             self.cache_ttl_seconds,
             self.command_timeout_seconds,
+            self.header,
         )
 
 
@@ -203,13 +205,20 @@ def _parse_auth(value, field_name: str) -> ProxyAuthConfig:
     elif env_name is not None and not isinstance(env_name, str):
         raise ProxyConfigError(f"'{field_name}.env' must be a string")
 
-    if auth_type == "bearer_command" and not command_value:
-        raise ProxyConfigError(f"'{field_name}.command' is required for bearer_command auth")
+    if auth_type in ("bearer_command", "header_command") and not command_value:
+        raise ProxyConfigError(f"'{field_name}.command' is required for {auth_type} auth")
+
+    header = "Authorization"
+    if auth_type == "header_command":
+        header = raw.get("header")
+        if not isinstance(header, str) or not HEADER_NAME_RE.fullmatch(header):
+            raise ProxyConfigError(f"'{field_name}.header' must be a valid HTTP header name for header_command auth")
 
     return ProxyAuthConfig(
         type=auth_type,
         env=env_name,
         command=tuple(command_value),
+        header=header,
         cache_ttl_seconds=_parse_positive_int(
             raw.get("cache_ttl_seconds"), 300, f"{field_name}.cache_ttl_seconds"
         ),

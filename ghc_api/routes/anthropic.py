@@ -22,6 +22,7 @@ from ..api_helpers import (
     advertises_anthropic_messages_api,
     supports_direct_anthropic_api,
     supports_responses_api,
+    is_non_chat_model,
     supported_reasoning_efforts,
     count_tokens,
 )
@@ -1006,6 +1007,11 @@ def anthropic_messages():
     if translated_model != original_model:
         print(f"[Anthropic API] Model name translated: {original_model} -> {translated_model}")
         anthropic_payload = {**anthropic_payload, "model": translated_model}
+
+    if is_non_chat_model(translated_model):
+        return _anthropic_json_error(
+            f"Model '{original_model}' is not a chat model. Use its advertised endpoints.", 400
+        )
 
     use_direct_api = supports_direct_anthropic_api(translated_model)
 
