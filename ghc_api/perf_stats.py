@@ -71,30 +71,40 @@ Sample = Tuple[float, str, str, int, float, Optional[float], int, int, str]
 
 
 def parse_window(raw: Any) -> Tuple[str, Optional[int]]:
-    """Resolve a window request into ``(label, seconds)``.
+    """Resolve ``?window=`` into ``(label, seconds)``.
 
-    Accepts a preset label (``5m``/``1h``/``all``...) or a raw number of
-    seconds. Anything unrecognized falls back to the default window rather
-    than erroring: this is a monitoring view, not an API contract.
+    Only the presets the page offers are accepted; anything else falls back to
+    the default window. This is a monitoring view, not an API contract.
     """
-    if raw is None:
-        return DEFAULT_WINDOW, WINDOW_PRESETS[DEFAULT_WINDOW]
+    label = str(raw or "").strip().lower()
+    if label not in WINDOW_PRESETS:
+        label = DEFAULT_WINDOW
+    return label, WINDOW_PRESETS[label]
 
-    text = str(raw).strip().lower()
-    if not text:
-        return DEFAULT_WINDOW, WINDOW_PRESETS[DEFAULT_WINDOW]
-    if text in WINDOW_PRESETS:
-        return text, WINDOW_PRESETS[text]
-    if text in ("since-start", "start", "*", "run"):
-        return "all", None
 
-    try:
-        seconds = int(float(text))
-    except (TypeError, ValueError):
-        return DEFAULT_WINDOW, WINDOW_PRESETS[DEFAULT_WINDOW]
-    if seconds <= 0:
-        return "all", None
-    return f"{seconds}s", seconds
+# The first event of each kind that carries model output. Every Anthropic
+# content block (text, thinking, tool_use) opens with content_block_start and
+# every Responses item (reasoning, message, function_call) with
+# output_item.added, so these mark the moment generation starts. Envelope
+# events (message_start, response.created, ...) arrive earlier and do not.
+OUTPUT_START_EVENTS = frozenset({"content_block_start", "response.output_item.added"})
+
+
+def is_output_event(event: Dict[str, Any]) -> bool:
+    """True when a parsed upstream SSE event carries model output.
+
+    The first such event is what time-to-first-token measures. Chat
+    Completions chunks count once any delta field other than ``role`` is
+    non-empty (content, reasoning, tool_calls ...).
+    """
+    if event.get("type") in OUTPUT_START_EVENTS:
+        return True
+    return any(
+        value
+        for choice in event.get("choices") or ()
+        for key, value in (choice.get("delta") or {}).items()
+        if key != "role"
+    )
 
 
 def _percentile(sorted_values: Sequence[float], fraction: float) -> Optional[float]:
@@ -142,9 +152,10 @@ class PerfStats:
         self._lock = threading.Lock()
         self._samples: Deque[Sample] = deque(maxlen=max(1, int(capacity)))
         self.started_at: float = time.time()
-        # Samples evicted because the ring was full. Surfaced so the UI can say
-        # "window truncated" instead of silently under-reporting.
+        # Samples evicted because the ring was full. A window is incomplete
+        # exactly when the newest evicted sample falls inside it.
         self.dropped: int = 0
+        self.last_dropped_at: Optional[float] = None
         self.recorded: int = 0
 
     # ------------------------------------------------------------- lifecycle
@@ -154,20 +165,16 @@ class PerfStats:
         return self._samples.maxlen or DEFAULT_CAPACITY
 
     def set_capacity(self, capacity: int) -> None:
-        """Resize the ring, keeping the most recent samples."""
-        capacity = max(1, int(capacity))
+        """Size the ring. Called once at startup, before any sample exists."""
         with self._lock:
-            if capacity == self._samples.maxlen:
-                return
-            kept = list(self._samples)[-capacity:]
-            self.dropped += max(0, len(self._samples) - len(kept))
-            self._samples = deque(kept, maxlen=capacity)
+            self._samples = deque(self._samples, maxlen=max(1, int(capacity)))
 
     def reset(self) -> None:
         with self._lock:
             self._samples.clear()
             self.started_at = time.time()
             self.dropped = 0
+            self.last_dropped_at = None
             self.recorded = 0
 
     # ----------------------------------------------------------- hot path
@@ -197,8 +204,9 @@ class PerfStats:
             user_id or "anonymous",
         )
         with self._lock:
-            if self._samples.maxlen and len(self._samples) == self._samples.maxlen:
+            if len(self._samples) == self._samples.maxlen:
                 self.dropped += 1
+                self.last_dropped_at = self._samples[0][0]
             self._samples.append(sample)
             self.recorded += 1
 
@@ -218,6 +226,7 @@ class PerfStats:
             samples = list(self._samples)
             started_at = self.started_at
             dropped = self.dropped
+            last_dropped_at = self.last_dropped_at
             recorded = self.recorded
             capacity = self._samples.maxlen or DEFAULT_CAPACITY
 
@@ -233,14 +242,10 @@ class PerfStats:
             by_model.setdefault(sample[1], []).append(sample)
             by_endpoint.setdefault(sample[2], []).append(sample)
 
-        # A window wider than what the ring still holds cannot be answered in
-        # full; say so instead of implying the numbers cover it.
+        # The window is incomplete exactly when an evicted sample belonged to
+        # it; say so instead of implying the numbers cover it.
         window_start = cutoff if cutoff is not None else started_at
-        truncated = bool(
-            dropped
-            and oldest_retained is not None
-            and oldest_retained > window_start + 1
-        )
+        truncated = last_dropped_at is not None and last_dropped_at >= window_start
 
         models = [_aggregate(name, group, now) for name, group in by_model.items()]
         models.sort(key=lambda m: m["output_tokens"], reverse=True)
@@ -262,9 +267,6 @@ class PerfStats:
             "now": now,
             "window_seconds": window_seconds,
             "window_start": window_start,
-            "effective_window_seconds": round(
-                now - max(window_start, oldest_retained or window_start), 1
-            ),
             "sample_capacity": capacity,
             "samples_recorded": recorded,
             "samples_retained": len(samples),

@@ -262,7 +262,7 @@
 
         <div class="section">
             <h2>Running now</h2>
-            <p class="hint">In-flight requests in this process, newest first. <code>receiving</code> means the first token already arrived.</p>
+            <p class="hint">In-flight streaming requests in this process, newest first. <code>receiving</code> means the first token already arrived. Non-streaming requests appear in the tables below once they finish.</p>
             <div class="table-scroll">
                 <table>
                     <thead>
@@ -361,7 +361,9 @@
         let currentWindow = localStorage.getItem('liveStatsWindow') || '1h';
         let currentUser = '';
         let refreshTimer = null;
-        let inFlightRequest = false;
+        // Every load() fires; only the newest response is rendered, so a slow
+        // reply can never overwrite data for a filter selected after it.
+        let latestLoad = 0;
 
         function escapeHtml(text) {
             const div = document.createElement('div');
@@ -550,13 +552,13 @@
         }
 
         async function load() {
-            if (inFlightRequest) return;
-            inFlightRequest = true;
+            const loadId = ++latestLoad;
             try {
                 const params = new URLSearchParams({ window: currentWindow });
                 if (currentUser) params.set('user', currentUser);
                 const response = await fetch('/api/live-stats?' + params.toString());
                 const data = await response.json();
+                if (loadId !== latestLoad) return;
 
                 renderCards(data);
                 renderInFlight(data.in_flight || []);
@@ -564,10 +566,9 @@
                 renderEndpoints(data.endpoints || []);
                 renderMeta(data);
             } catch (error) {
+                if (loadId !== latestLoad) return;
                 console.error('Failed to load live stats:', error);
                 document.getElementById('updated-at').textContent = 'Update failed';
-            } finally {
-                inFlightRequest = false;
             }
         }
 

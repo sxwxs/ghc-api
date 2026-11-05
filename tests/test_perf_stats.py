@@ -8,7 +8,13 @@ from unittest import mock
 from flask import Flask
 
 from ghc_api.cache import RequestCache
-from ghc_api.perf_stats import PerfStats, parse_window, perf_stats, tokens_per_second
+from ghc_api.perf_stats import (
+    PerfStats,
+    is_output_event,
+    parse_window,
+    perf_stats,
+    tokens_per_second,
+)
 from ghc_api.routes import dashboard as dashboard_routes
 from ghc_api.sse import AnthropicDirectStreamHandler
 from ghc_api.sse import base as sse_base
@@ -41,14 +47,37 @@ class TokensPerSecondTests(unittest.TestCase):
 
 
 class ParseWindowTests(unittest.TestCase):
-    def test_presets_and_raw_seconds(self) -> None:
+    def test_presets(self) -> None:
         self.assertEqual(parse_window("1h"), ("1h", 3600))
+        self.assertEqual(parse_window(" 5M "), ("5m", 300))
         self.assertEqual(parse_window("all"), ("all", None))
-        self.assertEqual(parse_window("90"), ("90s", 90))
 
-    def test_unknown_values_fall_back_to_default(self) -> None:
-        self.assertEqual(parse_window("nonsense"), ("1h", 3600))
-        self.assertEqual(parse_window(None), ("1h", 3600))
+    def test_anything_else_falls_back_to_default(self) -> None:
+        for raw in (None, "", "nonsense", "90", "inf", "1e309"):
+            self.assertEqual(parse_window(raw), ("1h", 3600), raw)
+
+
+class OutputEventTests(unittest.TestCase):
+    def test_output_events_across_protocols(self) -> None:
+        for event in (
+            {"type": "content_block_start", "content_block": {"type": "thinking"}},
+            {"type": "response.output_item.added", "item": {"type": "reasoning"}},
+            {"choices": [{"delta": {"content": "Hi"}}]},
+            {"choices": [{"delta": {"reasoning_text": "Hmm"}}]},
+            {"choices": [{"delta": {"content": None, "tool_calls": [{"index": 0}]}}]},
+        ):
+            self.assertTrue(is_output_event(event), event)
+
+    def test_envelope_events_do_not_count(self) -> None:
+        for event in (
+            {"type": "message_start", "message": {"usage": {}}},
+            {"type": "ping"},
+            {"type": "response.created"},
+            {"type": "response.in_progress"},
+            {"choices": [], "prompt_filter_results": []},
+            {"choices": [{"delta": {"role": "assistant", "content": ""}}]},
+        ):
+            self.assertFalse(is_output_event(event), event)
 
 
 class PerfStatsSnapshotTests(unittest.TestCase):
@@ -138,6 +167,21 @@ class PerfStatsSnapshotTests(unittest.TestCase):
         # A window the retained samples do fully cover is not truncated.
         self.assertFalse(stats.snapshot(window_seconds=5, now=now)["truncated"])
 
+    def test_any_drop_truncates_since_start(self) -> None:
+        stats = PerfStats(capacity=1)
+        start = stats.started_at
+        for offset in (0.2, 0.4):
+            stats.record(
+                model="m",
+                endpoint="/v1/messages",
+                status_code=200,
+                duration=1.0,
+                output_tokens=10,
+                finished_at=start + offset,
+            )
+
+        self.assertTrue(stats.snapshot(window_seconds=None, now=start + 1)["truncated"])
+
     def test_user_filter(self) -> None:
         now = 10_000.0
         self._record("m", now - 5, user_id="alice")
@@ -190,6 +234,12 @@ class CacheSpeedFieldTests(unittest.TestCase):
         self.assertEqual(in_flight[0]["state"], "receiving")
         self.assertGreaterEqual(in_flight[0]["elapsed"], 0.0)
 
+    def test_imported_unfinished_request_is_not_in_flight(self) -> None:
+        self.cache.import_request({"id": "exported-mid-stream", "state": "receiving"})
+
+        self.assertEqual(self.cache.get_in_flight(), [])
+        self.assertEqual(self.cache.get_request("exported-mid-stream")["state"], "error")
+
     def test_import_does_not_feed_live_metrics(self) -> None:
         from ghc_api.perf_stats import perf_stats
 
@@ -221,10 +271,15 @@ class StreamingHandlerSpeedTests(unittest.TestCase):
         self._cache_patch.stop()
         perf_stats.reset()
 
-    def test_stream_records_ttft_speed_and_sample(self) -> None:
+    def test_stream_records_ttft_and_sample(self) -> None:
         message_start = json.dumps({
             "type": "message_start",
             "message": {"model": "claude-opus-4", "usage": {"input_tokens": 11}},
+        })
+        block_start = json.dumps({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
         })
         message_delta = json.dumps({
             "type": "message_delta",
@@ -234,15 +289,17 @@ class StreamingHandlerSpeedTests(unittest.TestCase):
         handler = AnthropicDirectStreamHandler(
             response=_FakeResponse([
                 b"event: message_start",
-                message_start.encode(),
+                f"data: {message_start}".encode(),
+                b"event: content_block_start",
+                f"data: {block_start}".encode(),
                 b"event: message_delta",
                 f"data: {message_delta}".encode(),
                 b"data: [DONE]",
             ]),
             request_id="req-1",
             request_size=42,
-            # Pretend the request started 10 seconds ago so the measured
-            # generation time is stable rather than ~0.
+            # The route received the request 10 seconds before the handler
+            # existed (upstream headers took that long). TTFT must include it.
             start_time=time.time() - 10,
             original_model="claude-opus-4",
             translated_model="claude-opus-4",
@@ -251,11 +308,9 @@ class StreamingHandlerSpeedTests(unittest.TestCase):
         list(handler._generate())
 
         entry = self.cache.get_request("req-1")
-        self.assertIsNotNone(entry["ttft"])
+        self.assertGreaterEqual(entry["ttft"], 10)
+        self.assertLessEqual(entry["ttft"], entry["duration"] + 0.01)
         self.assertEqual(entry["output_tokens"], 100)
-        # 100 tokens over ~10 generating seconds.
-        self.assertGreater(entry["tokens_per_second"], 5)
-        self.assertLess(entry["tokens_per_second"], 20)
 
         snapshot = perf_stats.snapshot(window_seconds=3600)
         self.assertEqual(snapshot["overall"]["requests"], 1)

@@ -463,10 +463,9 @@ def api_stats():
 def api_live_stats():
     """Live per-model throughput for the current process run.
 
-    ``?window=`` accepts a preset (5m/15m/1h/6h/24h/all) or a raw number of
-    seconds; ``?user=`` filters to one user. Everything is computed on read
-    from a bounded in-memory sample ring, so this endpoint costs nothing when
-    nobody is looking at it.
+    ``?window=`` takes a preset (5m/15m/1h/6h/24h/all); ``?user=`` filters to
+    one user. Everything is computed on read from a bounded in-memory sample
+    ring, so this endpoint costs nothing when nobody is looking at it.
     """
     user_filter = _user_filter_from_request()
     window_label, window_seconds = parse_window(request.args.get("window"))

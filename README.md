@@ -386,12 +386,13 @@ Every finished request records one small sample (model, endpoint, status, durati
 
 The page shows, for a selectable window (5m / 15m / 1h / 6h / 24h / since start):
 
-- **Running now** — in-flight requests with model, endpoint, state, elapsed time, and TTFT once the first token arrived. Derived from the existing request-cache states, so there is no second registry to leak.
+- **Running now** — in-flight streaming requests with model, endpoint, state, elapsed time, and TTFT once the first token arrived. Derived from the existing request-cache states, so there is no second registry to leak. Non-streaming requests are only tracked once they finish.
 - **Speed by model** — `tok/s` (token-weighted decode speed), its p10/median/p90 across individual requests, TTFT median/p90, duration median/p90, request and error counts, and token volume.
 - **Endpoints** — request, error, and output-token counts per proxy endpoint.
 
 Definitions that matter when reading the numbers:
 
+- **TTFT** runs from the moment the proxy received the request to the first upstream event that carries model output (a text, thinking, or tool-call block; envelope events such as `message_start` or `response.created` do not count).
 - `tokens_per_second` is **output tokens / generation seconds**, where generation seconds is the total duration minus the time to first token. Upstream queueing therefore shows up as a large **TTFT** instead of silently depressing the measured speed.
 - Non-streaming responses have no measurable TTFT; their full duration counts as generation time and they are excluded from the TTFT columns.
 - Requests with no output tokens, or under 0.05 s of generation, are excluded from speed metrics (they are rounding noise) but still counted as requests and errors.
@@ -641,7 +642,7 @@ Configured models are selectable from `/chat` and participate in the same reques
 
 - `GET /` - Web dashboard with statistics
 - `GET /live` - Live throughput page: tokens/second and TTFT per model for the current run
-- `GET /api/live-stats?window=5m|15m|1h|6h|24h|all|<seconds>&user=<id>` - Live throughput JSON, including in-flight requests
+- `GET /api/live-stats?window=5m|15m|1h|6h|24h|all&user=<id>` - Live throughput JSON, including in-flight requests
 - `GET /requests` - Request browser page
 - `GET /request-stats` - Multi-file persisted request statistics page
 - `GET /api/request-stats/files` - List daily request files and index state without scanning contents

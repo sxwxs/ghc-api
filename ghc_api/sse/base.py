@@ -26,6 +26,7 @@ from flask import Response, stream_with_context
 
 from ..cache import cache
 from ..counters import counters
+from ..perf_stats import is_output_event
 from ..state import state
 from .keepalive import KEEPALIVE, iter_lines_with_keepalive
 
@@ -211,6 +212,7 @@ class SSEStreamHandler:
                 "endpoint": self.endpoint,
                 "request_size": self.request_size,
                 "user_id": self.user_id,
+                "started_at": self.start_time,
             },
         )
 
@@ -265,7 +267,7 @@ class SSEStreamHandler:
         # Idempotent -- normally seeded by stream(); kept here so tests that
         # drive _generate() directly still produce a complete cache entry.
         self._seed_cache()
-        first_chunk_received = False
+        output_started = False
         try:
             cache.update_request_state(self.request_id, cache.STATE_SENDING)
             sse_event_type = ""
@@ -330,8 +332,8 @@ class SSEStreamHandler:
                         sse_event_type = ""
                         continue
 
-                    if not first_chunk_received:
-                        first_chunk_received = True
+                    if not output_started and is_output_event(event):
+                        output_started = True
                         cache.update_request_state(self.request_id, cache.STATE_RECEIVING)
 
                     event_type = sse_event_type or event.get("type", "")
@@ -367,7 +369,6 @@ class SSEStreamHandler:
             self.error_occurred = True
             self.status_code = 499
             print(f"{self.log_prefix} Client disconnected for request {self.request_id}")
-            cache.update_request_state(self.request_id, cache.STATE_ERROR, status_code=499)
             return
         except Exception as e:
             self.error_occurred = True
@@ -377,7 +378,6 @@ class SSEStreamHandler:
                 yield self._format_generic_error(e)
             except GeneratorExit:
                 self.status_code = 499
-                cache.update_request_state(self.request_id, cache.STATE_ERROR, status_code=499)
                 return
         finally:
             # Preserve partial raw events and diagnostics even when the client

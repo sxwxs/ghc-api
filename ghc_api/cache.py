@@ -109,9 +109,10 @@ class RequestCache:
             self.cache[request_id] = {
                 "id": request_id,
                 "timestamp": self._current_timestamp(),
-                # Sub-second start time. "timestamp" is whole seconds, which is
-                # too coarse to measure time-to-first-token against.
-                "started_at": time.time(),
+                # Sub-second start time, the origin for both TTFT and duration.
+                # Callers pass the route's start_time: streaming handlers often
+                # start tracking only after upstream headers arrived.
+                "started_at": data.get("started_at") or time.time(),
                 "client_ip": data.get("client_ip"),
                 "request_headers": data.get("request_headers"),
                 "original_request_body": data.get("original_request_body"),
@@ -147,21 +148,11 @@ class RequestCache:
                 for key, value in kwargs.items():
                     if key in entry:
                         entry[key] = value
-                # First streamed chunk: the transition into RECEIVING is the
-                # only place every streaming route agrees on, so TTFT is
-                # stamped here rather than in each handler.
+                # Streaming handlers enter RECEIVING on the first event that
+                # carries model output (perf_stats.is_output_event), so that
+                # transition is exactly the time to first token.
                 if state == self.STATE_RECEIVING and entry.get("ttft") is None:
-                    started = entry.get("started_at")
-                    if started:
-                        entry["ttft"] = round(max(0.0, time.time() - started), 3)
-                # Failed/errored requests often never reach complete_request (the
-                # streaming generators return early on disconnect/timeout), leaving
-                # duration at 0. Record elapsed time here so the UI can show it,
-                # unless the caller already supplied a duration.
-                if state == self.STATE_ERROR and "duration" not in kwargs and not entry.get("duration"):
-                    started = entry.get("timestamp")
-                    if started:
-                        entry["duration"] = max(0, self._current_timestamp() - started)
+                    entry["ttft"] = round(max(0.0, time.time() - entry["started_at"]), 3)
 
     def complete_request(self, request_id: str, data: Dict) -> None:
         """Finalize a request attempt and update statistics, including errors."""
@@ -343,6 +334,24 @@ class RequestCache:
         except Exception as exc:  # pragma: no cover - defensive
             print(f"[Perf Stats] Failed to record sample: {exc}")
 
+    def cancel_request(self, request_id: str) -> None:
+        """Finalize a request as 499 after the client disconnected.
+
+        A no-op when the request already finished, so stream wrappers can call
+        it unconditionally even when an inner handler completed the entry.
+        """
+        with self.lock:
+            entry = self.cache.get(request_id)
+            if entry is None or entry.get("state") not in IN_FLIGHT_STATES:
+                return
+            data = {
+                key: entry.get(key)
+                for key in ("model", "translated_model", "endpoint", "request_size", "user_id")
+            }
+            data["status_code"] = 499
+            data["duration"] = round(time.time() - entry["started_at"], 2)
+        self.complete_request(request_id, data)
+
     def get_in_flight(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Requests that have not been finalized yet, newest first.
 
@@ -358,7 +367,7 @@ class RequestCache:
                     continue
                 if user_id is not None and _coerce_user_id(entry.get("user_id")) != user_id:
                     continue
-                started = entry.get("started_at") or entry.get("timestamp") or now
+                started = entry["started_at"]
                 rows.append({
                     "id": entry.get("id"),
                     "model": entry.get("translated_model") or entry.get("model") or "unknown",
@@ -630,7 +639,13 @@ class RequestCache:
                 "duration": data.get("duration", 0),
                 "ttft": data.get("ttft"),
                 "tokens_per_second": data.get("tokens_per_second"),
-                "state": data.get("state", "completed"),
+                # An export can catch requests mid-flight; nothing in this
+                # process will ever finish them, so they must not look running.
+                "state": (
+                    self.STATE_ERROR
+                    if data.get("state") in IN_FLIGHT_STATES
+                    else data.get("state", "completed")
+                ),
                 "user_id": user_id,
             }
             # Imported rows are shown with a speed when it can be derived, but
