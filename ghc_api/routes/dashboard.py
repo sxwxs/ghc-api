@@ -200,6 +200,12 @@ def request_stats_page():
     return render_template("request_stats.html")
 
 
+@dashboard_bp.route("/request-perf", methods=["GET"])
+def request_perf_page():
+    """Serve historical performance analysis over the request-file indexes."""
+    return render_template("request_perf.html")
+
+
 @dashboard_bp.route("/request-file-detail", methods=["GET"])
 def request_file_detail_page():
     """Serve one stable request-file detail view."""
@@ -497,7 +503,7 @@ def api_request_stats_jobs_create():
     if not isinstance(payload, dict):
         return jsonify({"error": "Invalid JSON body"}), 400
     try:
-        job, reused = request_stats_jobs.start(payload.get("files"))
+        job, reused = request_stats_jobs.start(payload.get("files"), kind=payload.get("kind", "statistics"))
     except RequestStatsValidationError as exc:
         return jsonify({"error": str(exc)}), 400
     except RequestStatsBusyError as exc:

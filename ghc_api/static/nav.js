@@ -38,6 +38,7 @@
         { href: '/#runtime-config', label: 'Runtime Config Override', action: 'openRuntimeConfigModal' },
         { href: '/agent', label: 'Code Agent' },
         { href: '/request-stats', label: 'Request Stats' },
+        { href: '/request-perf', label: 'Historical Performance' },
         { separator: true },
         { href: '/api/stats', label: 'API Stats (JSON)' },
         { href: '/api/live-stats', label: 'Live Stats (JSON)' }

@@ -56,6 +56,7 @@ class RequestStatsRoutesTests(unittest.TestCase):
     def test_pages_are_served(self):
         self.assertIn(b"Request File Statistics", self.client.get("/request-stats").data)
         self.assertIn(b"Indexed request", self.client.get("/request-file-detail").data)
+        self.assertIn(b"Historical Performance", self.client.get("/request-perf").data)
 
     def test_file_list_does_not_scan_source_contents(self):
         path = self.write_file()
@@ -111,6 +112,50 @@ class RequestStatsRoutesTests(unittest.TestCase):
     def test_create_job_validates_selection(self):
         self.assertEqual(self.client.post("/api/request-stats/jobs", data="bad", content_type="application/json").status_code, 400)
         self.assertEqual(self.client.post("/api/request-stats/jobs", json={"files": []}).status_code, 400)
+
+    def test_performance_job_uses_shared_api_without_a_dataset(self):
+        self.write_file()
+        response = self.client.post("/api/request-stats/jobs", json={
+            "files": ["2026-07-14.jl"], "kind": "performance",
+        })
+        self.assertEqual(response.status_code, 202)
+        job = self.wait_for_terminal(response.get_json()["job"]["id"])
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["result"]["kind"], "performance")
+        self.assertEqual(job["result"]["perf"]["total_rows"], 1)
+        self.assertEqual(job["result"]["perf"]["cells"][0]["errors"], 1)
+        self.assertNotIn("dataset_id", job["result"])
+
+    def test_job_kind_validation(self):
+        self.write_file()
+        for kind in ("invalid", None, [], {}, 123):
+            with self.subTest(kind=kind):
+                response = self.client.post("/api/request-stats/jobs", json={
+                    "files": ["2026-07-14.jl"], "kind": kind,
+                })
+                self.assertEqual(response.status_code, 400)
+
+    def test_reuse_requires_same_kind_as_well_as_files(self):
+        self.write_file()
+        release = threading.Event()
+        real_build = stats.build_or_load_file_index
+        def slow_build(path, **kwargs):
+            release.wait(5)
+            return real_build(path, **kwargs)
+        payload = {"files": ["2026-07-14.jl"], "kind": "performance"}
+        with mock.patch.object(stats, "build_or_load_file_index", side_effect=slow_build):
+            first = self.client.post("/api/request-stats/jobs", json=payload)
+            job_id = first.get_json()["job"]["id"]
+            try:
+                reused = self.client.post("/api/request-stats/jobs", json=payload)
+                self.assertEqual(reused.status_code, 200)
+                self.assertTrue(reused.get_json()["reused"])
+                self.assertEqual(reused.get_json()["job"]["id"], job_id)
+                other_kind = self.client.post("/api/request-stats/jobs", json={"files": payload["files"]})
+                self.assertEqual(other_kind.status_code, 409)
+            finally:
+                release.set()
+                self.wait_for_terminal(job_id)
 
     def test_cancel_and_busy_routes(self):
         self.write_file(); self.write_file("2026-07-13.jl")
