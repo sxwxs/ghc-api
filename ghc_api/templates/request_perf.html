@@ -74,7 +74,7 @@
                         <option value="decode">Measured decode TPS</option><option value="ttft_est">Estimated TTFT (s)</option>
                         <option value="decode_est">Estimated decode TPS</option><option value="duration">Mean duration (s)</option>
                         <option value="count">Requests</option>
-                    </select></div><p class="hint">Context = logged input + cache read + cache write. Missing context is excluded.</p><div id="context" class="chart"></div>
+                    </select></div><p class="hint">Context = validated input + cache read + cache write. Missing or invalid context is excluded.</p><div id="context" class="chart"></div>
                 </section>
                 <section class="card">
                     <h2>Duration vs output tokens</h2><p class="hint">Sampled requests and Theil–Sen fitted lines (always estimates). Up to 300 points for each of the first six selected models.</p>
@@ -92,6 +92,7 @@
                 <section class="card full note">
                     <h2>Metric definitions and limitations</h2>
                     <p><b>Effective TPS</b> = total output tokens / total duration, for successful completed requests with positive output and duration. It includes first-token wait. Errors, cancellations, unknown status, and zero-output calls are excluded from speed metrics, but remain in request counts and duration totals.</p>
+                    <p><b>Context totals and cache share</b> use only requests with a valid context total. Missing optional cache fields may be zero; explicitly invalid components make the context unavailable, without discarding the request's other metrics.</p>
                     <p><b>Measured TTFT</b> is the mean of valid persisted <code>ttft</code> values on successful requests. Decode TPS uses only generating requests with <code>duration &gt; ttft</code>: total output / total (duration − ttft). Missing timing is never treated as zero.</p>
                     <p><b>Estimated timing</b> fits <code>duration ≈ TTFT + output / decode TPS</code> using at most 90 reservoir samples per day/model and at most 220 points per fit. Fits require at least 10 samples and a positive slope. This is a rough trend indicator, not a reconstruction of actual first-token times. Daily samples and changing request mix can bias multi-day estimates. Measured and estimated trend series are separate.</p>
                     <p><b>Approximate percentiles</b> interpolate within 48 logarithmic bins (duration: 0.05–3000 s; TPS: 0.5–400). Out-of-range values are clipped to end bins and counted in data-quality notices. Totals and measured means are not histogram estimates.</p>

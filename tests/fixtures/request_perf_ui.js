@@ -6,14 +6,19 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 function element(tag = 'div') {
     const classes = new Set();
     const node = {
-        tag, children: [], attributes: {}, disabled: false, hidden: false, checked: false,
+        tag, children: [], attributes: {}, dataset: {}, disabled: false, hidden: false, checked: false,
         style: {setProperty(key, value) { this[key] = value; }},
         classList: {
             add(name) { classes.add(name); }, remove(name) { classes.delete(name); },
             contains(name) { return classes.has(name); },
         },
         appendChild(child) { this.children.push(child); return child; },
-        replaceChildren(...children) { this.children = children; this._text = ''; },
+        contains(child) { return this === child || this.children.some(c => c.contains(child)); },
+        focus() { document.activeElement = this; },
+        replaceChildren(...children) {
+            if (this.children.some(c => c.contains(document.activeElement))) document.activeElement = null;
+            this.children = children; this._text = '';
+        },
         setAttribute(name, value) { this.attributes[name] = String(value); },
         removeAttribute(name) { delete this.attributes[name]; },
     };
@@ -96,6 +101,19 @@ const legacy = M.aggregate(input.result.perf.cells.filter(c => c.model.startsWit
 assert.equal(M.summary(legacy, input.result.perf).ttftSource, 'estimated');
 const zero = {...combined, ttft_sum: 0};
 assert.equal(M.summary(zero, input.result.perf).ttft, 0);
+const measuredOnly = {...zero, get samples() { throw new Error('Measured summary must not read fit samples'); }};
+assert.equal(M.summary(measuredOnly, input.result.perf).ttft, 0);
+for (const [ttftCount, decodeCount] of [[0, 1], [1, 0], [0, 0]]) {
+    let sampleReads = 0;
+    const group = {...combined, ttft_count: ttftCount, decode_count: decodeCount,
+        get samples() { sampleReads++; return fitPoints; }};
+    const result = M.summary(group, input.result.perf);
+    assert.equal(sampleReads, 1, 'Fit once when either timing metric needs an estimate');
+    assert.equal(result.ttftSource, ttftCount ? 'measured' : 'estimated');
+    assert.equal(result.decodeSource, decodeCount ? 'measured' : 'estimated');
+    if (!ttftCount) assert.ok(Math.abs(result.ttft - 2) < 1e-8);
+    if (!decodeCount) assert.ok(Math.abs(result.decode - 20) < 1e-8);
+}
 
 async function flush() { for (let i = 0; i < 10; i++) await Promise.resolve(); }
 async function tick() {
@@ -141,8 +159,31 @@ function assertFiniteCharts() {
     for (const option of $('trend-metric').children) {
         $('trend-metric').value = option.value; $('trend-metric').onchange(); assertFiniteCharts();
     }
-    for (const value of ['tps', 'ttft', 'decode', 'ttft_est', 'decode_est', 'duration', 'count']) {
+    const data = input.result.perf;
+    const calculations = {
+        tps: a => M.ratio(a.gen_output, a.gen_duration), ttft: a => M.ratio(a.ttft_sum, a.ttft_count),
+        decode: a => M.ratio(a.decode_output, a.decode_duration), ttft_est: a => M.fit(a.samples)?.ttft ?? null,
+        decode_est: a => M.fit(a.samples)?.decode ?? null, duration: a => M.ratio(a.duration, a.duration_count), count: a => a.count,
+    };
+    for (const [value, calculate] of Object.entries(calculations)) {
+        let contextScans = 0, cellScans = 0;
+        data.contexts.filter = function (...args) { contextScans++; return Array.prototype.filter.apply(this, args); };
+        data.cells.filter = function (...args) { cellScans++; return Array.prototype.filter.apply(this, args); };
         $('context-metric').value = value; $('context-metric').onchange(); assertFiniteCharts();
+        assert.equal(contextScans, 1, 'Select context rows once, not once per model/bucket');
+        assert.equal(cellScans, value.endsWith('_est') ? 1 : 0, 'Only estimates need sampled cells');
+        delete data.contexts.filter; delete data.cells.filter;
+        const titles = allNodes($('context')).filter(n => n.tag === 'title').map(n => n.textContent);
+        const unit = {tps: 'tok/s', ttft: 's', decode: 'tok/s', ttft_est: 's', decode_est: 'tok/s', duration: 's', count: ''}[value];
+        const expected = [];
+        for (const model of data.models) for (let bucket = 0; bucket < data.context_labels.length; bucket++) {
+            const group = M.aggregate(data.contexts.filter(r => r.model === model && r.bucket === bucket), data.total_fields);
+            group.samples = data.cells.filter(c => c.model === model).flatMap(c => c.samples)
+                .filter(p => p[2] != null && data.context_bounds.filter(b => p[2] >= b).length === bucket);
+            const result = group.count ? calculate(group) : null;
+            if (result != null) expected.push(`${model} · ${data.context_labels[bucket]}: ${result.toLocaleString(undefined, {maximumFractionDigits: 2})} ${unit}`);
+        }
+        assert.deepEqual(titles.sort(), expected.sort(), 'Grouped chart must preserve the reference values');
     }
     for (const value of ['output', 'count', 'wait', 'context']) {
         $('volume-metric').value = value; $('volume-metric').onchange(); assertFiniteCharts();
@@ -150,8 +191,26 @@ function assertFiniteCharts() {
     for (const value of ['tps', 'duration', 'count']) {
         $('heat-metric').value = value; $('heat-metric').onchange(); assertFiniteCharts();
     }
-    const headerButton = $('model-table').children[0].children[0].children[1].children[0];
-    headerButton.onclick(); assertFiniteCharts();
+    const chip = $('model-chips').children[0];
+    chip.focus(); chip.onclick();
+    assert.equal($('model-chips').children[0], chip, 'Model controls must not be recreated on toggle');
+    assert.equal(document.activeElement, chip);
+    assert.equal(chip.attributes['aria-pressed'], 'false');
+    chip.onclick();
+    assert.equal(document.activeElement, chip);
+    assert.equal(chip.attributes['aria-pressed'], 'true');
+    const headerButton = $('model-table').children[0].children[0].children[0].children[0];
+    const chartsBeforeSort = ['trend', 'context', 'scatter'].map(id => $(id).children[0]);
+    headerButton.focus(); headerButton.onclick();
+    assert.equal(document.activeElement, headerButton, 'Sorting must preserve the focused header');
+    assert.equal($('model-table').children[0].children[0].children[0].children[0], headerButton);
+    const rowNames = () => $('model-table').children[1].children.map(tr => tr.children[0].textContent);
+    assert.deepEqual(rowNames(), [...data.models].sort((a, b) => b.localeCompare(a)));
+    headerButton.onclick();
+    assert.deepEqual(rowNames(), [...data.models].sort((a, b) => a.localeCompare(b)));
+    assert.equal(document.activeElement, headerButton);
+    ['trend', 'context', 'scatter'].forEach((id, i) => assert.equal($(id).children[0], chartsBeforeSort[i], 'Sorting must not redraw charts'));
+    assertFiniteCharts();
     $('clear-models').onclick();
     assertFiniteCharts();
     assert.equal($('endpoint-table').children[1].children.length, 0, 'Auxiliary tables must respect the model filter');

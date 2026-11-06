@@ -62,7 +62,7 @@
     const shiftDate = (date, days) => new Date(dateMs(date) + days * 86400000).toISOString().slice(0, 10);
 
     function summary(group, data) {
-        const estimated = fit(group.samples);
+        const estimated = group.ttft_count && group.decode_count ? null : fit(group.samples);
         return {
             tps: ratio(group.gen_output, group.gen_duration),
             tpsMedian: percentile(group.tps_hist, data.tps_edges, 0.5),

@@ -47,6 +47,47 @@ def test_timing_validation(value, expected):
     assert row["duration_ms"] == row["ttft_ms"] == expected
 
 
+@pytest.mark.parametrize("fields,expected", [
+    ({"input_tokens": 8000}, 8000),  # omitted optional cache fields
+    ({"input_tokens": 8000, "cache_read_input_tokens": None}, 8000),
+    ({"input_tokens": 0}, 0),
+    ({"input_tokens": None}, None),
+    ({"input_tokens": 8000, "cache_read_input_tokens": -1}, None),
+    ({"input_tokens": -1, "cache_read_input_tokens": 100}, None),
+    ({"cache_creation_input_tokens": "invalid"}, None),
+    ({"cache_read_input_tokens": False}, None),
+    ({"input_tokens": stats.MAX_METRIC_VALUE, "cache_read_input_tokens": 1}, None),
+    ({"output_tokens": -1}, 20),  # invalid output does not invalidate context
+])
+def test_index_validates_context_without_confusing_invalid_and_missing(fields, expected):
+    assert indexed(**fields)["context_tokens"] == expected
+
+
+def test_invalid_context_is_excluded_from_all_context_views_not_speed_metrics():
+    cube = perf.build_performance_cube([
+        indexed(input_tokens=8000, cache_read_input_tokens=2000, ttft=2),
+        indexed(input_tokens=8000, cache_read_input_tokens=-1, ttft=2),
+        indexed(input_tokens=-1, cache_read_input_tokens=2000),
+        indexed(input_tokens=None),
+    ])
+    cell = cube["cells"][0]
+    assert cell["context_count"] == 1
+    assert cell["context_sum"] == 10000
+    assert cell["input"] == 8000
+    assert cell["cache_read"] == 2000
+    assert cell["cache_write"] == 0
+    assert [sample[2] for sample in cell["samples"]] == [10000, None, None, None]
+    assert sum(group["count"] for group in cube["contexts"]) == 1
+    assert cube["quality"]["missing_context"] == 3
+    assert cell["count"] == cell["gen_count"] == 4
+    assert cell["gen_output"] == 400
+    assert cell["gen_duration"] == 40
+    assert cell["ttft_count"] == 2
+    for dimension in ("hourly", "upstream", "endpoints"):
+        assert sum(group["input"] + group["cache_read"] + group["cache_write"]
+                   for group in cube[dimension]) == 10000
+
+
 def test_disjoint_failures_and_speed_denominators():
     rows = [
         indexed(ttft=2, cache_read_input_tokens=30, cache_creation_input_tokens=40),
@@ -156,7 +197,7 @@ def log_file(tmp_path, monkeypatch):
     monkeypatch.setenv("GHC_API_CONFIG_DIR", str(tmp_path))
     path = tmp_path / "requests" / DAY
     path.parent.mkdir()
-    records = [dict(model="a", duration=10, output_tokens=100, status_code=200, ttft=2)] * 30
+    records = [dict(model="a", duration=10, input_tokens=8000, output_tokens=100, status_code=200, ttft=2)] * 30
     path.write_text("".join(json.dumps(row) + "\n" for row in records) + "broken JSON\n", encoding="utf-8")
     return path
 
@@ -198,16 +239,19 @@ def test_performance_job_bypasses_dataset_limits_and_reuses_index(log_file, monk
     assert cached["result"]["perf"] == result["perf"]
 
 
-def test_schema_upgrade_rebuilds_old_sidecar(log_file):
+@pytest.mark.parametrize("old_version", [3, 4])
+def test_schema_upgrade_rebuilds_old_sidecar(log_file, old_version):
     stats.build_or_load_file_index(log_file)
     path = stats._meta_path_for(log_file)
     meta = json.loads(path.read_text(encoding="utf-8"))
-    meta["schema_version"] = 3
+    meta["schema_version"] = old_version
     path.write_text(json.dumps(meta), encoding="utf-8")
     _, mode, warnings = stats.build_or_load_file_index(log_file)
     assert mode == "rebuild"
     assert any(w["code"] == "index_rebuilt" for w in warnings)
-    assert stats.load_indexed_rows([log_file.name])[0]["ttft_ms"] == 2000
+    row = stats.load_indexed_rows([log_file.name])[0]
+    assert row["ttft_ms"] == 2000
+    assert row["context_tokens"] == 8000
 
 
 def test_cancel_during_performance_aggregation(log_file):

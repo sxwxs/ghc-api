@@ -99,10 +99,7 @@ def build_performance_cube(rows: Iterable[Dict[str, Any]], *, max_models: int = 
         duration_ms = row.get("duration_ms")
         duration = duration_ms / 1000 if duration_ms is not None else None
         output = row.get("output_tokens")
-        components = [row.get(key) for key in (
-            "input_not_cached_tokens", "cache_read_tokens", "cache_write_tokens",
-        )]
-        context = sum(value or 0 for value in components) if any(v is not None for v in components) else None
+        context = row.get("context_tokens")
         generating = successful and output is not None and output > 0 and duration is not None and duration > 0
         ttft_ms = row.get("ttft_ms")
         valid_ttft = ttft_ms is not None and duration_ms is not None and 0 <= ttft_ms <= duration_ms
@@ -116,9 +113,14 @@ def build_performance_cube(rows: Iterable[Dict[str, Any]], *, max_models: int = 
             "count": 1, "errors": int(failed), "cancelled": int(cancelled),
             "unknown_status": int(status is None),
             "duration_count": int(duration is not None), "duration": duration or 0,
-            "output": output or 0, "input": components[0] or 0,
-            "cache_read": components[1] or 0, "cache_write": components[2] or 0,
+            "output": output or 0,
         })
+        # Context totals and cache share must use the same validated requests
+        # as the context chart, not partial sums from invalid components.
+        if context is not None:
+            values.update(input=row.get("input_not_cached_tokens") or 0,
+                          cache_read=row.get("cache_read_tokens") or 0,
+                          cache_write=row.get("cache_write_tokens") or 0)
         if generating:
             values.update(gen_count=1, gen_duration=duration, gen_output=output)
             if context is not None:

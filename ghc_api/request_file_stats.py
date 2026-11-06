@@ -22,7 +22,7 @@ from .request_perf import build_performance_cube
 from .utils import get_config_dir
 
 
-INDEX_SCHEMA_VERSION = 4
+INDEX_SCHEMA_VERSION = 5
 INDEX_DIR_NAME = ".request-stats-index"
 REQUEST_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jl$")
 MAX_SELECTED_FILES = 366
@@ -282,6 +282,17 @@ def _index_number(value: Optional[int], metric_name: str) -> Optional[int]:
     return _bucket_index(metric_name, value) if value is not None else None
 
 
+def _validated_token_total(entry: Dict[str, Any], token_values: Dict[str, Optional[int]]) -> Optional[int]:
+    """Missing components may be zero; explicitly invalid components may not."""
+    if not any(value is not None for value in token_values.values()):
+        return None
+    if any(entry.get(TOKEN_FIELD_BY_METRIC[metric]) is not None and value is None
+           for metric, value in token_values.items()):
+        return None
+    total = sum(value or 0 for value in token_values.values())
+    return total if total <= MAX_METRIC_VALUE else None
+
+
 def _extract_index_row(
     entry: Dict[str, Any],
     source_file: str,
@@ -293,15 +304,10 @@ def _extract_index_row(
         metric_name: _coerce_nonnegative_int(entry, field_name)
         for metric_name, field_name in TOKEN_FIELD_BY_METRIC.items()
     }
-    total_billed = None
-    if any(field_name in entry and entry.get(field_name) is not None for field_name in TOKEN_FIELD_BY_METRIC.values()):
-        invalid_present_component = any(
-            field_name in entry and entry.get(field_name) is not None and token_values[metric_name] is None
-            for metric_name, field_name in TOKEN_FIELD_BY_METRIC.items()
-        )
-        if not invalid_present_component:
-            total = sum(value or 0 for value in token_values.values())
-            total_billed = total if total <= MAX_METRIC_VALUE else None
+    total_billed = _validated_token_total(entry, token_values)
+    context_tokens = _validated_token_total(entry, {
+        metric: token_values[metric] for metric in (INPUT_NOT_CACHED, CACHE_WRITE, CACHE_READ)
+    })
 
     request_size = _coerce_nonnegative_int(entry, "request_size")
     response_size = _coerce_nonnegative_int(entry, "response_size")
@@ -338,6 +344,7 @@ def _extract_index_row(
         CACHE_READ: token_values[CACHE_READ],
         OUTPUT: token_values[OUTPUT],
         TOTAL_BILLED: total_billed,
+        "context_tokens": context_tokens,
         "user_id": str(entry.get("user_id") or "anonymous"),
         "client_ip": str(entry.get("client_ip") or "unknown"),
         **{

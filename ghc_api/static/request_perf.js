@@ -164,6 +164,13 @@
         state.order = [...state.data.models].sort((a, b) => totals.get(b) - totals.get(a) || a.localeCompare(b));
         state.colors = new Map(state.order.map((model, i) => [model, colors[i % colors.length]]));
         state.models = new Set(state.order.slice(0, 6));
+        $('model-chips').replaceChildren();
+        for (const model of state.order) {
+            const button = text('button', model, $('model-chips')); button.type = 'button'; button.className = 'chip';
+            button.dataset.model = model;
+            button.style.setProperty('--model-color', state.colors.get(model));
+            button.onclick = () => { state.models.has(model) ? state.models.delete(model) : state.models.add(model); render(); };
+        }
         setRange(30);
     }
 
@@ -285,16 +292,25 @@
         for (let hour = 0; hour < 24; hour += 3) svgNode('text', {x: p.left - 5, y: p.top + (hour + .8) * ch, 'text-anchor': 'end', class: 'axis'}, p.svg, hour + ':00');
     }
     function renderContext() {
-        const metric = metrics[$('context-metric').value], data = state.data;
+        const key = $('context-metric').value, metric = metrics[key], data = state.data;
         const models = selectedModels();
-        const series = models.map(model => {
-            const samples = sum(selected(data.cells).filter(c => c.model === model)).samples;
-            return data.context_labels.map((_, bucket) => {
-                const group = sum(selected(data.contexts).filter(r => r.model === model && r.bucket === bucket));
-                group.samples = samples.filter(p => p[2] != null && data.context_bounds.filter(bound => p[2] >= bound).length === bucket);
-                return group.count ? metric.calc(group) : null;
-            });
-        });
+        const byModel = new Map(models.map(model => [model,
+            data.context_labels.map(() => ({rows: [], samples: []}))]));
+        for (const row of selected(data.contexts)) byModel.get(row.model)[row.bucket].rows.push(row);
+        if (key === 'ttft_est' || key === 'decode_est') {
+            for (const cell of selected(data.cells)) {
+                for (const sample of cell.samples) {
+                    if (sample[2] == null) continue;
+                    const bucket = data.context_bounds.filter(bound => sample[2] >= bound).length;
+                    byModel.get(cell.model)[bucket].samples.push(sample);
+                }
+            }
+        }
+        const series = models.map(model => byModel.get(model).map(({rows, samples}) => {
+            const group = sum(rows);
+            group.samples = samples;
+            return group.count ? metric.calc(group) : null;
+        }));
         let maximum = 1; series.forEach(values => values.forEach(v => { if (v != null) maximum = Math.max(maximum, v); }));
         const p = plot('context'), y = axes(p, maximum, metric.unit);
         const groupWidth = p.iw / data.context_labels.length, width = groupWidth * .8 / Math.max(1, models.length);
@@ -347,24 +363,32 @@
 
     function table(id, headings, rows) {
         const host = $(id); host.replaceChildren();
-        const sort = state.sorts[id];
-        if (sort) rows.sort((a, b) => {
-            const x = a[sort.index], y = b[sort.index];
-            if (x == null) return y == null ? 0 : 1;
-            if (y == null) return -1;
-            return sort.direction * (typeof x === 'number' ? x - y : String(x).localeCompare(String(y)));
-        });
         const header = document.createElement('thead'), tr = document.createElement('tr'); header.appendChild(tr); host.appendChild(header);
         headings.forEach((heading, index) => {
             const th = document.createElement('th'); tr.appendChild(th);
             const button = text('button', heading, th); button.type = 'button';
-            button.onclick = () => { state.sorts[id] = {index, direction: sort?.index === index ? -sort.direction : -1}; render(); };
+            button.onclick = () => {
+                const sort = state.sorts[id];
+                state.sorts[id] = {index, direction: sort?.index === index ? -sort.direction : -1};
+                renderRows();
+            };
         });
         const body = document.createElement('tbody'); host.appendChild(body);
-        for (const row of rows) {
-            const tr = document.createElement('tr'); body.appendChild(tr);
-            row.forEach(value => text('td', typeof value === 'number' ? number(value, 2) : value ?? '—', tr));
+        function renderRows() {
+            const sort = state.sorts[id];
+            if (sort) rows.sort((a, b) => {
+                const x = a[sort.index], y = b[sort.index];
+                if (x == null) return y == null ? 0 : 1;
+                if (y == null) return -1;
+                return sort.direction * (typeof x === 'number' ? x - y : String(x).localeCompare(String(y)));
+            });
+            body.replaceChildren();
+            for (const row of rows) {
+                const tr = document.createElement('tr'); body.appendChild(tr);
+                row.forEach(value => text('td', typeof value === 'number' ? number(value, 2) : value ?? '—', tr));
+            }
         }
+        renderRows();
     }
     function renderTables(groups) {
         table('model-table', ['Model', 'Requests', 'Fail + cancel %', 'Output', 'Mean context', 'Hours', 'Effective TPS', 'TPS median ≈', 'TTFT (s)', 'TTFT source', 'Measured TTFT n', 'Decode TPS', 'Decode source', 'Measured decode n', 'Duration P50 ≈', 'P90 ≈', 'P99 ≈'], groups.map(g => {
@@ -430,11 +454,8 @@
     }
     function render() {
         if (!state.data?.dates.length) return;
-        $('model-chips').replaceChildren();
-        for (const model of state.order) {
-            const button = text('button', model, $('model-chips')); button.type = 'button'; button.className = 'chip';
-            button.style.setProperty('--model-color', state.colors.get(model)); button.setAttribute('aria-pressed', state.models.has(model));
-            button.onclick = () => { state.models.has(model) ? state.models.delete(model) : state.models.add(model); render(); };
+        for (const button of $('model-chips').children) {
+            button.setAttribute('aria-pressed', state.models.has(button.dataset.model));
         }
         const cells = selected(state.data.cells), groups = selectedModels().map(model => ({model, data: sum(cells.filter(c => c.model === model))}));
         renderKpis(sum(cells)); renderDiagnosis(); renderTrend(); renderVolume(); renderHeat(); renderContext();
