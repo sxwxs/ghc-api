@@ -265,6 +265,17 @@ class GeminiResponsesTest(unittest.TestCase):
         self.assertEqual(events[-1]["response"]["error"]["code"], "invalid_request_error")
         self.assertEqual(self.post.call_count, 1)
 
+    def test_invalid_request_stream_error_with_code_is_not_retried(self):
+        state.enable_responses_early_failure_retry = True
+        state.max_connection_retries = 1
+        self.post.return_value = _UpstreamResponse(chunks=[{"error": {
+            "type": "invalid_request_error", "code": "context_length_exceeded", "message": "Too long",
+        }}])
+        events = _events(self.client.post("/v1/responses", json={"model": MODEL, "input": "Hi", "stream": True}))
+        error = events[-1]["response"]["error"]
+        self.assertEqual((error["code"], error["type"]), ("context_length_exceeded", "invalid_request_error"))
+        self.assertEqual(self.post.call_count, 1)
+
     def test_stream_ending_without_finish_reason_is_reported_as_failed(self):
         self.post.return_value = _UpstreamResponse(chunks=[{"choices": [{"delta": {"content": "Partial"}}]}])
         events = _events(self.client.post("/v1/responses", json={"model": MODEL, "input": "Hi", "stream": True}))

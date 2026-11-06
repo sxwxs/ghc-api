@@ -463,6 +463,9 @@ class ChatToResponsesStream:
             "code": error.get("code") or error.get("type") or "upstream_error",
             "message": error.get("message") or "Upstream Chat Completions stream failed.",
         }
+        # Keep the upstream type so invalid requests stay non-retryable.
+        if error.get("type"):
+            self.response["error"]["type"] = error["type"]
         return self.event("response.failed", response=self.response)
 
     def finish(self):
