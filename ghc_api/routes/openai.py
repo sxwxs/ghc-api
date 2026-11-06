@@ -25,6 +25,7 @@ from ..api_helpers import (
     supports_responses_api,
     systemone_upstream_path,
 )
+from .. import gemini_responses_bridge
 from ..auth import redact_auth_headers
 from ..cache import cache
 from ..counters import counters
@@ -60,15 +61,24 @@ def _current_user_id() -> str:
     return getattr(g, "user_id", "anonymous") or "anonymous"
 
 
-def _start_responses_post(headers: Dict, payload: Dict) -> BackgroundResult:
-    """Start a streaming Responses request without blocking the client route."""
-    return BackgroundResult(lambda: requests.post(
+def _post_responses_request(headers: Dict, payload: Dict, stream: bool):
+    """POST to native Responses, or through the experimental Gemini bridge."""
+    if gemini_responses_bridge.applies(payload.get("model")):
+        return gemini_responses_bridge.post(
+            get_copilot_base_url(), headers, payload, stream, state.upstream_read_timeout,
+        )
+    return requests.post(
         f"{get_copilot_base_url()}/v1/responses",
         headers=headers,
         json=payload,
-        stream=True,
+        stream=stream,
         timeout=state.upstream_read_timeout,
-    ), label="responses")
+    )
+
+
+def _start_responses_post(headers: Dict, payload: Dict) -> BackgroundResult:
+    """Start a streaming Responses request without blocking the client route."""
+    return BackgroundResult(lambda: _post_responses_request(headers, payload, True), label="responses")
 
 
 def _responses_keepalive() -> str:
@@ -172,13 +182,7 @@ def _build_responses_stream_handler(
         def retry_streaming_response():
             ensure_copilot_token()
             retry_headers = get_copilot_headers(enable_vision)
-            return requests.post(
-                f"{get_copilot_base_url()}/v1/responses",
-                headers=retry_headers,
-                json=payload,
-                stream=True,
-                timeout=state.upstream_read_timeout,
-            )
+            return _post_responses_request(retry_headers, payload, True)
 
         def retry_encrypted_content(error):
             nonlocal payload, encrypted_content_retry_attempted
@@ -1875,7 +1879,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
 @openai_bp.route("/v1/responses", methods=["POST"])
 @openai_bp.route("/responses", methods=["POST"])
 def responses():
-    """Handle OpenAI Responses API (passthrough for supported models only)"""
+    """Handle native Responses and Gemini's Chat Completions compatibility path."""
     try:
         start_time = time.time()
         ensure_copilot_token()
@@ -1913,7 +1917,8 @@ def responses():
             }}), 400
 
         # Check if this model supports the Responses API
-        if not supports_responses_api(translated_model):
+        use_gemini_bridge = gemini_responses_bridge.applies(translated_model)
+        if not (supports_responses_api(translated_model) or use_gemini_bridge):
             return jsonify({
                 "error": {
                     "message": f"Model '{original_model}' does not support the /v1/responses endpoint.",
@@ -1940,6 +1945,14 @@ def responses():
         headers = get_copilot_headers(enable_vision)
 
         _normalize_responses_tool_descriptions(payload)
+
+        # Experimental Gemini bridge: reject unsupported input before any
+        # streaming headers are committed.
+        if use_gemini_bridge:
+            bridge_error = gemini_responses_bridge.validation_error(payload)
+            if bridge_error:
+                return jsonify(bridge_error), 400
+
         _filter_responses_web_search_tools(payload, translated_model, request_id)
 
         # Non-streaming request
@@ -2008,13 +2021,7 @@ def responses():
             request_size = len(json.dumps(payload))
             try:
                 if response is None:
-                    response = requests.post(
-                        f"{get_copilot_base_url()}/v1/responses",
-                        headers=headers,
-                        json=payload,
-                        stream=use_streaming,
-                        timeout=state.upstream_read_timeout,
-                    )
+                    response = _post_responses_request(headers, payload, use_streaming)
                 if use_streaming and response.ok:
                     return _build_responses_stream_handler(
                         response, payload, request_id, request_size,
