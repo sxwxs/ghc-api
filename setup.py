@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="ghc-api",
-    version="1.0.30",
+    version="1.0.35",
     author="sxwxs",
     author_email="",
     description="GitHub Copilot API Proxy - A Flask application serving as a proxy server for GitHub Copilot API",
@@ -28,6 +28,7 @@ setup(
     python_requires=">=3.8",
     install_requires=[
         "Flask>=2.0.0",
+        "Werkzeug>=2.3.2",
         "requests>=2.25.0",
         "PyYAML>=5.4.0",
         "tiktoken>=0.3.0",

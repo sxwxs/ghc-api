@@ -54,9 +54,19 @@ let sse = [
 const normalSse = sse;
 let responseStreams = null;
 let calls = [];
+const modelFetches = [];
 async function fetch(url, options) {
-    if (url === '/v1/models' || url === '/v1/models/full/') {
-        return { ok: true, json: async () => ({ data: [] }) };
+    if (url === '/v1/models') {
+        modelFetches.push(url);
+        return { ok: true, json: async () => ({ data: [{
+            id: 'copilot-model', display_name: 'Copilot Model',
+            context_window: 200000, max_output_tokens: 1024,
+            supported_endpoints: ['/responses'],
+        }] }) };
+    }
+    if (url === '/v1/models/full/') {
+        modelFetches.push(url);
+        throw new Error('Chat should use the metadata in /v1/models');
     }
     if (url === '/proxy/models') {
         return { ok: true, json: async () => ({ data: [{
@@ -87,6 +97,11 @@ vm.createContext(sandbox);
 vm.runInContext(script, sandbox);
 (async () => {
     await vm.runInContext('loadModels()', sandbox);
+    assert.ok(modelFetches.length > 0);
+    assert.ok(modelFetches.every(url => url === '/v1/models'));
+    assert.equal(vm.runInContext("selectedModelTarget('copilot-model').contextWindow", sandbox), 200000);
+    assert.equal(vm.runInContext("selectedModelTarget('copilot-model').maxOutputTokens", sandbox), 1024);
+    assert.equal(vm.runInContext("supportsResponses('copilot-model')", sandbox), true);
     const key = vm.runInContext("configuredModelKey('example-profile', 'example-model')", sandbox);
     elements['model-select'].value = key;
     vm.runInContext('updateEndpointOptions()', sandbox);

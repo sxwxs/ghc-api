@@ -6,7 +6,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ## Features
 
-- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, and `/v1/embeddings` endpoints
+- **OpenAI API Compatibility**: `/v1/chat/completions`, `/v1/responses`, `/v1/embeddings`, and `/v1/images/{generations,edits}` endpoints, plus the `/v1/systemone` decision API
 - **Anthropic API Compatibility**: `/v1/messages` endpoint with automatic request/response translation
 - **Model Listing**: `/v1/models` endpoint listing available models
 - **Model Name Mapping**: Translate model names with exact and prefix-based matching
@@ -14,6 +14,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Vision Support**: Handle image inputs and enable vision capabilities
 - **Memory Caching**: Cache all requests and responses (up to 1000 entries)
 - **Web Dashboard**: Real-time statistics and request browser
+- **Live Throughput**: Per-model tokens/second, time to first token, and currently running requests for the active process run
 - **Request Details**: View full request/response bodies with JSON formatting
 - **Export/Import**: Export and import request history as JSON Lines files
 - **Optional Request File Logging**: Save completed requests to daily JSON Lines files
@@ -34,7 +35,10 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 - [Responses pre-header keepalive](docs/decisions/RESPONSES_PRE_HEADER_KEEPALIVE.md) - review notes and decisions behind the `/v1/responses` pre-header keepalive (PR #42): why upstream errors keep their HTTP status, why the synthetic event is `error`, and what is still open
 
-### Gemini through the Responses API
+### Gemini through the Responses API (experimental)
+
+> **Experimental.** Implemented in `ghc_api/gemini_responses_bridge.py`. Gemini 3
+> multi-turn tool use is not verified: thought signatures are not replayed.
 
 Gemini models advertised by Copilot with Chat Completions support also accept
 `POST /v1/responses` (and `/responses`). ghc-api translates requests through
@@ -58,6 +62,15 @@ the terminal response's `output` array. Text deltas still stream immediately;
 tool `call_id`, encrypted reasoning content, and response IDs are preserved.
 Events whose IDs are already consistent pass through unchanged, and request
 history retains the original upstream events for diagnosis.
+
+### OpenAI service tiers
+
+Copilot does not support the OpenAI `service_tier` request parameter. ghc-api
+omits this field from requests forwarded through the Copilot Responses and Chat
+Completions routes, including streaming requests, so clients such as Codex can
+send it without triggering an upstream rejection. The original request remains
+available in request history. Configured `/proxy/<profile>/v1/...` routes
+continue forwarding `service_tier` unchanged.
 
 ## Installation
 
@@ -91,7 +104,7 @@ By default, the server will start on `http://localhost:8313`.
 - `--ghe-endpoint HOST`: Configure both GHE data-residency endpoints and exit
 - `--delete-github-token`: Delete the locally saved `github_token.txt` and exit
 - `--github-device-login`: Run GitHub Device Flow, replace the locally saved token, and exit
-- `-v` or `--version`: Show version (for example `ghc-api 1.0.30`)
+- `-v` or `--version`: Show version (for example `ghc-api 1.0.35`)
 - `--help`: Show help message
 
 ### Configuration
@@ -199,6 +212,12 @@ responses_pre_header_grace: 0.5 # How long a Responses request waits for upstrea
                               # only be reported as an SSE error event, so keep this below
                               # the shortest client read timeout. Clamped to [0, 5]
                               # seconds; sse_keepalive_interval: 0 disables it entirely.
+
+# Live throughput dashboard (/live)
+perf_sample_capacity: 2000    # Finished requests kept in memory for tokens-per-second
+                              # aggregation. One small tuple per request (well under
+                              # 1 MB at the default); windows wider than the retained
+                              # samples are reported as truncated rather than wrong.
 
 # Recover from undecryptable encrypted content (disabled by default)
 auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns HTTP 400
@@ -385,6 +404,29 @@ Each JSONL line includes:
   - `output_tokens`
   - `total_tokens`
 
+### Live Throughput
+
+`/live` answers one question: *why does it feel slow right now, and which model is to blame?*
+
+Every finished request records one small sample (model, endpoint, status, duration, time to first token, tokens) into a bounded in-memory ring sized by `perf_sample_capacity`. Nothing is aggregated on the request path — the page computes everything on read — so the feature costs one tuple append per request and nothing at all when the page is closed.
+
+The page shows, for a selectable window (5m / 15m / 1h / 6h / 24h / since start):
+
+- **Running now** — in-flight streaming requests with model, endpoint, state, elapsed time, and TTFT once the first token arrived. Derived from the existing request-cache states, so there is no second registry to leak. Non-streaming requests are only tracked once they finish.
+- **Speed by model** — `tok/s` (token-weighted decode speed), its p10/median/p90 across individual requests, TTFT median/p90, duration median/p90, request and error counts, and token volume.
+- **Endpoints** — request, error, and output-token counts per proxy endpoint.
+
+Definitions that matter when reading the numbers:
+
+- **TTFT** runs from the moment the proxy received the request to the first upstream event that carries model output (a text, thinking, or tool-call block; envelope events such as `message_start` or `response.created` do not count).
+- `tokens_per_second` is **output tokens / generation seconds**, where generation seconds is the total duration minus the time to first token. Upstream queueing therefore shows up as a large **TTFT** instead of silently depressing the measured speed.
+- Non-streaming responses have no measurable TTFT; their full duration counts as generation time and they are excluded from the TTFT columns.
+- Requests with no output tokens, or under 0.05 s of generation, are excluded from speed metrics (they are rounding noise) but still counted as requests and errors.
+
+The same two fields, `ttft` and `tokens_per_second`, are attached to every cached request, so they also appear in the request browser, in `/api/requests`, and in persisted `.jl` request files.
+
+Scope is deliberate: these metrics cover the **current process run only** and reset on restart. A window wider than the retained samples is reported as truncated instead of under-reporting silently; raise `perf_sample_capacity` for a longer history, or use [Request File Logging](#request-file-logging) and `/request-stats` for cross-day analysis. Imported `.jl` requests never feed the live metrics — replaying an export must not invent throughput this process never produced.
+
 ### Request File Logging
 
 When `save_request_to_file: true`, ghc-api appends each completed request to:
@@ -400,6 +442,29 @@ Open `/request-stats` to select one or more daily files and generate request-siz
 Histogram bars are interactive: selecting a bucket shows the exact indexed requests that contributed to it. Each result opens a stable `/request-file-detail` link which seeks directly to the original `.jl` line and verifies its SHA-256 before returning the complete persisted record. These links remain valid while the source file is unchanged; a changed source reports that the index must be rebuilt. Detail rendering is capped at 4 MiB per JSONL line.
 
 The token views follow the fields persisted by ghc-api: input not cached (`input_tokens`), cache write (`cache_creation_input_tokens`), cache read (`cache_read_input_tokens`), output (`output_tokens`), and their total. Provider compatibility paths use the same existing field mappings as the request log itself. Distributions include every persisted request attempt, including failed attempts; failures commonly record zero usage tokens.
+
+### Historical Performance
+
+Open **Other → Historical Performance** (`/request-perf`) to compare persisted requests across days. Select daily logs (up to 366 files), then click **Analyze performance**. Nothing is scanned automatically when the page opens. The page shares file indexes, job progress, cancellation, and the single-job concurrency limit with `/request-stats`.
+
+The report includes effective TPS, measured/estimated TTFT and decode speed, approximate latency/TPS percentiles, daily trends and stacked usage, an hourly heatmap, context-size buckets, sampled duration/output scatter plots, model/upstream/endpoint comparisons, and slowdown indicators. Date and model filters apply to all charts and tables. Recent-period comparisons use calendar days; slowdown indicators describe correlations, not proven causes.
+
+- **Effective TPS:** total output / total duration on successful completed requests with positive output and duration. Failed, cancelled, unknown-status and zero-output calls remain in counts and duration totals, but not speed metrics.
+- **Measured timing:** valid persisted `ttft` values supply mean TTFT; decode TPS is total output / total (duration − TTFT), on generating requests with a positive measured interval. Coverage counts are displayed.
+- **Historical estimates:** when measured timing is unavailable, summary tables use a clearly labelled Theil–Sen fit. Trend selectors keep measured and estimated series separate. Fits use bounded reservoirs of up to 90 requests per day/model and at most 220 points per fit; small samples and changing request mix can make them noisy or unavailable.
+- **Percentiles:** approximate interpolation in 48 log-spaced bins. Out-of-range values are clipped to end bins and counted in quality notices. Missing metrics are not silently converted to measured zeroes.
+- **Context:** a validated sum of input, cache-read and cache-write tokens. Omitted optional cache fields can be zero, but an explicitly invalid component excludes that request from context comparisons, context totals and cache-share calculations. Its other valid metrics remain available.
+- **Data quality:** normal JSON parsing, no regex recovery. Invalid/non-object/oversized lines and partial tails are reported. Failures and cancellations are disjoint; their combined rate counts each request once. Time is server-local; missing timestamps fall back to the file date but are omitted from the hourly heatmap.
+
+Index schema v5 includes timing, completion state, upstream metadata and a validated context total. Earlier indexes, including v4, cannot distinguish invalid token components from missing fields. **The first analysis of a file with an older index rebuilds that index**; unchanged files then reuse it without reopening the original log. First-time indexing of a large archive can take minutes and runs in the background. Performance analysis streams the lightweight indexes into grouped totals, histograms and bounded samples, without retaining a per-request dataset; it is not subject to the 256 MiB drill-down dataset limit. Memory still depends on the number of date/model/hour/upstream groups. The first version does not provide per-request drill-down; use `/request-stats` for that.
+
+The page is served by ghc-api and needs no external chart library or network service; it is not a standalone exported HTML file. The API entry point is `POST /api/request-stats/jobs` with an explicit kind:
+
+```json
+{"files": ["2026-07-14.jl"], "kind": "performance"}
+```
+
+Omitting `kind` preserves the existing `statistics` behavior. Completed performance jobs return `result.perf` and quality/file metadata, not a `dataset_id`.
 
 ### Code Agent Interaction
 
@@ -430,7 +495,7 @@ ghc-api --enable-auth
 #   enable_auth: true
 ```
 
-Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
+Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/embeddings`, `/v1/systemone`, `/v1/images/generations`, `/v1/images/edits`, `/v1/models`, their non-`/v1` aliases, all documented `/v3/...` Web IQ routes, and configured `/proxy/<profile>/v1/...` routes) require an approved user token. Dashboard and admin endpoints stay open at the Flask layer — they're expected to be gated by a reverse proxy in production (see [Production Deployment](#production-deployment)).
 
 **Self-signup flow**:
 
@@ -505,8 +570,100 @@ The registry file is re-read whenever its mtime changes (checked every 5 seconds
 - `POST /chat/completions` - Chat completions (without v1 prefix)
 - `POST /v1/embeddings` - Create embeddings
 - `POST /embeddings` - Create embeddings (without v1 prefix)
-- `GET /v1/models` - List available models
-- `GET /models` - List available models (without v1 prefix)
+- `POST /v1/systemone` - System One decision API (e.g. Microsoft-Decision-1)
+- `POST /systemone` - System One decision API (without v1 prefix)
+- `POST /v1/images/generations` / `POST /images/generations` - Generate images
+- `POST /v1/images/edits` / `POST /images/edits` - Edit reference images
+- `GET /v1/models` - List available models with token limits and capabilities
+- `GET /models` - Same listing without the v1 prefix
+- `GET /v1/models/<model_id>` / `GET /models/<model_id>` - Retrieve one model's metadata
+- `GET /v1/models/full/` / `GET /models/full/` - Full upstream model catalog
+
+Model entries include `context_window`, `max_input_tokens`, `max_output_tokens`,
+input types, reasoning capabilities, and supported endpoints. Unknown metadata
+is `null`. See [Model metadata](docs/MODEL_METADATA.md) for the schema, cache
+behavior, and field mapping for pi integrations.
+
+### Images (Copilot)
+
+Image models such as `gpt-image-2.5-flare` use dedicated Images endpoints, not Chat
+Completions or Responses. Only endpoints advertised in the model catalog are
+accepted. The `gpt-*` / `mai-code-*` Chat Completions compatibility overrides apply
+to text models, never known image, embedding, or decision models. Known non-chat
+models are also rejected by the text-generation APIs rather than sent upstream.
+
+```bash
+# Generate one low-quality image (response contains data[].b64_json).
+curl http://127.0.0.1:8313/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-image-2.5-flare","prompt":"A blue circle on white","size":"1024x1024","quality":"low","n":1}'
+
+# Edit an image. Repeat image[] for multiple reference images; mask is optional.
+curl http://127.0.0.1:8313/v1/images/edits \
+  -F model=gpt-image-2.5-flare \
+  -F 'prompt=Change the circle to red' \
+  -F quality=low \
+  -F 'image[]=@circle.png'
+```
+
+Add `Authorization: Bearer <user-token>` when user authentication is enabled.
+Model mappings, request statistics, per-user usage, and upstream errors work as
+on the other APIs. JSON generation and multipart editing have been verified
+against Copilot; JSON edit bodies are also forwarded for upstream validation.
+Additional parameters are passed through, so unsupported options are reported
+by Copilot rather than silently removed. Responses (including image bytes,
+usage breakdown, and content provenance metadata) are returned unchanged.
+Image payloads are omitted from request logs; token counts and timing are kept.
+
+- Non-streaming only for now; `stream: true` returns HTTP 400.
+- Upload limit: 50 MiB per image request. Set your reverse proxy's
+  `client_max_body_size` accordingly (nginx defaults to 1 MiB).
+- Image requests are **never automatically retried**, even after a timeout.
+  A timed-out request may have completed and been billed upstream; check usage
+  before manually resubmitting.
+- Images are billed separately by image/text tokens against Copilot AI credits,
+  and organization model policies still apply. See [GitHub's image-generation documentation](https://docs.github.com/en/copilot/concepts/agent-capabilities/agent-powered-workflows-and-operations/image-generation).
+
+The built-in `/chat` page has an **Image** mode. Image models have an `[image]`
+label and selecting one enters Image mode. Choose Generate or Edit, size,
+quality, output format, and count; upload reference images or click **Use as
+reference** on a generated result. Results include previews and **Download
+original** without re-encoding. Search tools and text-chat history are not sent
+to image models. Raw mode offers the Images endpoints too.
+
+Image results are stored in the browser's IndexedDB, not localStorage. Session
+history keeps only references and small metadata. If browser storage is blocked
+or full, the current result remains downloadable with a warning; clearing browser
+data removes saved previews. Download originals for durable storage.
+
+### System One decisions (Copilot)
+
+Copilot decision models such as Microsoft-Decision-1 score a closed set of options and return a calibrated probability per option instead of generating text. ghc-api forwards `POST /v1/systemone` to the endpoint the model advertises in Copilot's `supported_endpoints` (currently `/v1/systemone`, with `capabilities.type: "decisions"`).
+
+- The body is passed through unchanged except for model-name mapping; responses and upstream validation errors (for example HTTP 422) are returned as-is.
+- Only decision models (advertising the System One endpoint or `capabilities.type: "decisions"`) are accepted; others get HTTP 400 `unsupported_model`.
+- Non-streaming only: `"stream": true` is rejected with HTTP 400 `unsupported_stream`.
+- The response `model` field reports the underlying model rather than the requested id, as Copilot returns it.
+- Usage is read from flat `usage.input_tokens` / `usage.output_tokens`; there are no cache tiers.
+- The built-in `/chat` page has a **Decision** mode next to Chat and Raw. Decision models are listed with a `[decision]` tag; selecting one switches to Decision mode, which starts from a `state` + `questions` template, fills in the model, and shows each answer as probability bars (choice/score) or a yes/no split (noul), with the raw JSON available. Raw mode can also target `/v1/systemone`.
+
+```bash
+curl http://127.0.0.1:8313/v1/systemone \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "microsoft-decision-1",
+    "state": "The payment callback API returns 500 on every call.",
+    "questions": {
+      "team": {
+        "type": "choice",
+        "instructions": "Which team should handle this ticket?",
+        "criteria": {"billing": "Charges and refunds", "engineering": "Bugs and outages"}
+      }
+    }
+  }'
+```
+
+For decision models served by your own gateway or Microsoft Foundry, use the configured proxy's `systemone` API instead (see [UPSTREAM_PROXY.md](UPSTREAM_PROXY.md)).
 
 ### Anthropic Compatible
 
@@ -736,6 +893,7 @@ Optional private upstream profiles expose isolated routes without changing the e
 - `POST /proxy/<profile>/v1/chat/completions`
 - `POST /proxy/<profile>/v1/messages`
 - `GET /proxy/<profile>/v1/models`
+- `GET /proxy/<profile>/v1/models/<model_id>` - Model metadata using the same schema as `/v1/models`
 - `GET /proxy/models` - First-party model catalog used by the built-in Chat page
 
 Configured models are selectable from `/chat` and participate in the same request cache, request browser, token statistics, per-user usage reporting, and persisted request-file statistics as existing endpoints. Configuration lives in a separate private `upstream-proxies.yaml` file and supports independent upstream authentication, profile/API/model headers, public-to-upstream model mapping, and response-header affinity persistence. See [Configured Upstream Proxy](UPSTREAM_PROXY.md).
@@ -743,10 +901,13 @@ Configured models are selectable from `/chat` and participate in the same reques
 ### Dashboard & Monitoring
 
 - `GET /` - Web dashboard with statistics
+- `GET /live` - Live throughput page: tokens/second and TTFT per model for the current run
+- `GET /api/live-stats?window=5m|15m|1h|6h|24h|all&user=<id>` - Live throughput JSON, including in-flight requests
 - `GET /requests` - Request browser page
 - `GET /request-stats` - Multi-file persisted request statistics page
+- `GET /request-perf` - Historical performance dashboard over the same file indexes
 - `GET /api/request-stats/files` - List daily request files and index state without scanning contents
-- `POST /api/request-stats/jobs` - Start an asynchronous statistics/index job for selected files
+- `POST /api/request-stats/jobs` - Start an asynchronous job for selected files (`kind`: `statistics` by default, or `performance`)
 - `GET /api/request-stats/jobs/<id>` - Read job progress and completed statistics
 - `POST /api/request-stats/jobs/<id>/cancel` - Cancel an active statistics job
 - `GET /api/request-stats/datasets/<id>/requests` - Paginate requests contributing to a selected histogram bucket
@@ -856,7 +1017,9 @@ Access the web dashboard at `http://localhost:8313/` to:
 - See per-endpoint analytics
 - Browse recent requests
 - View detailed request/response bodies
+- Use Live Throughput (`/live`) to see what is running right now and why it feels slow (see [Live Throughput](#live-throughput))
 - Use Request Stats (`/request-stats`) to multi-select persisted daily files, compare overall/model/response-code distributions, click histogram buckets for matching requests, and open hash-verified historical details
+- Use Historical Performance (`/request-perf`) for cross-day speed, timing, context, upstream and slowdown comparisons without loading per-request datasets
 - Use Code Agent Manager to:
   - Install code-agent CLIs
   - Sync config files to/from OneDrive
@@ -870,6 +1033,23 @@ Access the web dashboard at `http://localhost:8313/` to:
   - Browse sessions across machines via OneDrive
   - Resume viewing past session history
 
+### Shared navigation
+
+Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Code Agent, Request Stats, Historical Performance, and the raw JSON stats endpoints) live behind the **Other** menu.
+
+A template only declares its title and any page-specific buttons:
+
+```html
+<nav class="navbar" id="app-nav" data-title="Request Browser">
+    <template id="nav-extras">
+        <button onclick="downloadRequests()">Download .jl</button>
+    </template>
+</nav>
+<script src="{{ url_for('static', filename='nav.js') }}"></script>
+```
+
+The active entry is derived from the current path (`data-active="/request-stats"` overrides it for detail pages), and the measured bar height is published as the `--nav-height` CSS variable for the full-height pages. "Runtime Config Override" opens the modal in place on the dashboard and links to `/#runtime-config` from anywhere else.
+
 ## Production deployment
 
 When you expose ghc-api beyond `localhost` (sharing a single instance with other people, putting it on a VPS, etc.), put a reverse proxy in front to authenticate admin paths. ghc-api intentionally does **not** authenticate dashboard pages or admin APIs at the Flask layer — that responsibility is delegated to your reverse proxy.
@@ -878,11 +1058,11 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 
 | Category | Paths | How to gate |
 |---|---|---|
-| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
+| **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v1/systemone`, `/systemone`, `/v1/images/generations`, `/images/generations`, `/v1/images/edits`, `/images/edits`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
-| **Admin — dashboard & inspection** | `GET /`, `/requests`, `/request-stats`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
+| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
 
 ### Sample nginx config
 
@@ -894,6 +1074,7 @@ server {
     server_name ghc.example.com;
 
     # ssl_certificate / ssl_certificate_key go here
+    client_max_body_size 50m;         # Image-edit uploads
 
     # Default for the whole server: admin basic-auth required.
     auth_basic "ghc-api admin";
@@ -909,7 +1090,7 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
     # Aliases without the /v1 prefix
-    location ~ ^/(chat/completions|responses|models)(/|$) {
+    location ~ ^/(chat/completions|responses|embeddings|systemone|images|models)(/|$) {
         auth_basic off;
         proxy_pass http://127.0.0.1:8313;
         proxy_buffering off;

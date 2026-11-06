@@ -1,9 +1,82 @@
-"""Serve the Responses protocol using a native Chat Completions backend."""
+"""Experimental: serve ``/v1/responses`` for Gemini via Copilot Chat Completions.
+
+Copilot exposes Gemini models only on ``/chat/completions``. This module
+translates stateless Responses requests to Chat Completions and translates the
+result (JSON or SSE) back, so the existing Responses route pipeline
+(keepalive, retries, stats) can treat it like a native upstream response.
+
+The route integrates through three entry points only:
+
+* ``applies(model_id)`` - should this request use the bridge?
+* ``validation_error(payload)`` - client error body for unsupported input, or None
+* ``post(base_url, headers, payload, stream, timeout)`` - send upstream
+
+Known limitations: no server-side state (``previous_response_id``,
+``conversation``, ``background``), function tools only, and Responses
+reasoning items (including Gemini thought signatures) are not replayed.
+"""
 
 import copy
 import json
 import time
 import uuid
+
+import requests
+
+from .api_helpers import is_configured_chat_completions_support_added, supports_responses_api
+from .state import state
+
+
+def supports_bridge(model_id) -> bool:
+    """Gemini models with native Chat Completions can use the Responses bridge."""
+    if not isinstance(model_id, str) or not model_id.lower().startswith("gemini-"):
+        return False
+    if not state.models or not state.models.get("data"):
+        return False
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    if not model:
+        return False
+    endpoints = model.get("supported_endpoints", []) or []
+    return "/chat/completions" in endpoints or (
+        "/v1/chat/completions" in endpoints
+        and not is_configured_chat_completions_support_added(state.models, model_id)
+    )
+
+
+def applies(model_id) -> bool:
+    """Use the bridge only when native Responses is unavailable."""
+    return not supports_responses_api(model_id) and supports_bridge(model_id)
+
+
+def validation_error(payload):
+    """Return an OpenAI-style error body for unsupported input, else None."""
+    try:
+        responses_to_chat_payload(payload)
+    except ResponsesChatRequestError as exc:
+        return {"error": {
+            "message": str(exc),
+            "type": "invalid_request_error",
+            "code": "unsupported_parameter",
+            "param": exc.param,
+        }}
+    return None
+
+
+def post(base_url, headers, payload, stream, timeout):
+    """Send a Responses payload to Chat Completions; return a Responses-shaped response."""
+    chat_payload = responses_to_chat_payload(payload)
+    headers = dict(headers)
+    headers["X-Initiator"] = "agent" if any(
+        message.get("role") in ("assistant", "tool") for message in chat_payload["messages"]
+    ) else "user"
+    response = requests.post(
+        f"{base_url}/chat/completions",
+        headers=headers,
+        json=chat_payload,
+        stream=stream,
+        timeout=timeout,
+    )
+    return ChatCompletionResponsesAdapter(response, payload)
 
 
 class ResponsesChatRequestError(ValueError):

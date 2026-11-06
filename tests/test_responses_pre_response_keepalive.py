@@ -367,6 +367,8 @@ class ResponsesPreResponseKeepaliveTest(unittest.TestCase):
         entry = next(iter(self.cache.cache.values()))
         self.assertEqual(entry["status_code"], 499)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
+        # Finalized (and counted) exactly once, not just relabelled.
+        self.assertEqual(self.cache.request_count, 1)
 
     def test_keepalive_disabled_restores_the_blocking_path(self):
         """sse_keepalive_interval = 0 is the documented "inject nothing" switch

@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlencode
 
+from .request_perf import build_performance_cube
 from .utils import get_config_dir
 
 
-INDEX_SCHEMA_VERSION = 3
+INDEX_SCHEMA_VERSION = 5
 INDEX_DIR_NAME = ".request-stats-index"
 REQUEST_FILENAME_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.jl$")
 MAX_SELECTED_FILES = 366
@@ -244,17 +245,17 @@ def _coerce_nonnegative_int(entry: Dict[str, Any], field_name: str) -> Optional[
     return result
 
 
-def _coerce_duration_ms(entry: Dict[str, Any]) -> Optional[int]:
-    if "duration" not in entry or entry.get("duration") is None:
+def _coerce_seconds_ms(entry: Dict[str, Any], field_name: str) -> Optional[int]:
+    value = entry.get(field_name)
+    if value is None:
         return None
-    value = entry.get("duration")
     if isinstance(value, bool):
         return None
     try:
         seconds = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if not math.isfinite(seconds) or seconds < 0:
+    if not math.isfinite(seconds) or seconds < 0 or seconds > MAX_METRIC_VALUE / 1000:
         return None
     milliseconds = int(round(seconds * 1000))
     return milliseconds if milliseconds <= MAX_METRIC_VALUE else None
@@ -281,6 +282,17 @@ def _index_number(value: Optional[int], metric_name: str) -> Optional[int]:
     return _bucket_index(metric_name, value) if value is not None else None
 
 
+def _validated_token_total(entry: Dict[str, Any], token_values: Dict[str, Optional[int]]) -> Optional[int]:
+    """Missing components may be zero; explicitly invalid components may not."""
+    if not any(value is not None for value in token_values.values()):
+        return None
+    if any(entry.get(TOKEN_FIELD_BY_METRIC[metric]) is not None and value is None
+           for metric, value in token_values.items()):
+        return None
+    total = sum(value or 0 for value in token_values.values())
+    return total if total <= MAX_METRIC_VALUE else None
+
+
 def _extract_index_row(
     entry: Dict[str, Any],
     source_file: str,
@@ -292,19 +304,14 @@ def _extract_index_row(
         metric_name: _coerce_nonnegative_int(entry, field_name)
         for metric_name, field_name in TOKEN_FIELD_BY_METRIC.items()
     }
-    total_billed = None
-    if any(field_name in entry and entry.get(field_name) is not None for field_name in TOKEN_FIELD_BY_METRIC.values()):
-        invalid_present_component = any(
-            field_name in entry and entry.get(field_name) is not None and token_values[metric_name] is None
-            for metric_name, field_name in TOKEN_FIELD_BY_METRIC.items()
-        )
-        if not invalid_present_component:
-            total = sum(value or 0 for value in token_values.values())
-            total_billed = total if total <= MAX_METRIC_VALUE else None
+    total_billed = _validated_token_total(entry, token_values)
+    context_tokens = _validated_token_total(entry, {
+        metric: token_values[metric] for metric in (INPUT_NOT_CACHED, CACHE_WRITE, CACHE_READ)
+    })
 
     request_size = _coerce_nonnegative_int(entry, "request_size")
     response_size = _coerce_nonnegative_int(entry, "response_size")
-    duration_ms = _coerce_duration_ms(entry)
+    duration_ms = _coerce_seconds_ms(entry, "duration")
     metric_values = {
         "request_size": request_size,
         "duration_ms": duration_ms,
@@ -325,6 +332,11 @@ def _extract_index_row(
         "endpoint": str(entry.get("endpoint") or ""),
         "status_code": _effective_status_code(entry),
         "duration_ms": duration_ms,
+        "ttft_ms": _coerce_seconds_ms(entry, "ttft"),
+        "state": str(entry.get("state") or ""),
+        "upstream_provider": str(entry.get("upstream_provider") or ""),
+        "upstream_profile": str(entry.get("upstream_profile") or ""),
+        "upstream_api": str(entry.get("upstream_api") or ""),
         "request_size": request_size,
         "response_size": response_size,
         INPUT_NOT_CACHED: token_values[INPUT_NOT_CACHED],
@@ -332,6 +344,7 @@ def _extract_index_row(
         CACHE_READ: token_values[CACHE_READ],
         OUTPUT: token_values[OUTPUT],
         TOTAL_BILLED: total_billed,
+        "context_tokens": context_tokens,
         "user_id": str(entry.get("user_id") or "anonymous"),
         "client_ip": str(entry.get("client_ip") or "unknown"),
         **{
@@ -491,7 +504,7 @@ def _scan_to_sidecar(
             else:
                 try:
                     entry = json.loads(raw)
-                except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RecursionError):
                     quality["invalid_json_lines"] += 1
                 else:
                     if not isinstance(entry, dict):
@@ -965,26 +978,34 @@ class RequestStatsDatasetCache:
             return dataset
 
 
-def _load_dataset(files: List[str]) -> RequestStatsDataset:
-    rows: List[Dict[str, Any]] = []
-    estimated_bytes = 0
+def _iter_indexed_rows(files: List[str], cancel_event: Optional[threading.Event] = None):
+    """Stream validated sidecar rows and their estimated in-memory sizes."""
     for filename in files:
+        _check_cancelled(cancel_event)
         request_path = resolve_request_file(filename)
         _load_meta(request_path)
         index_path = _index_path_for(request_path)
         with index_path.open("r", encoding="utf-8") as file:
             for line in file:
+                _check_cancelled(cancel_event)
                 if not line.strip():
                     continue
                 row = json.loads(line)
                 if not isinstance(row, dict) or row.get("schema_version") != INDEX_SCHEMA_VERSION:
                     raise RequestIndexValidationError(f"Invalid sidecar row in {index_path.name}")
-                rows.append(row)
-                estimated_bytes += len(line) + 256
-                if len(rows) > MAX_DATASET_ROWS or estimated_bytes > MAX_DATASET_ESTIMATED_BYTES:
-                    raise RequestStatsValidationError(
-                        "Selected indexes exceed the in-memory dataset limit; select fewer request files"
-                    )
+                yield row, len(line) + 256
+
+
+def _load_dataset(files: List[str]) -> RequestStatsDataset:
+    rows: List[Dict[str, Any]] = []
+    estimated_bytes = 0
+    for row, row_bytes in _iter_indexed_rows(files):
+        rows.append(row)
+        estimated_bytes += row_bytes
+        if len(rows) > MAX_DATASET_ROWS or estimated_bytes > MAX_DATASET_ESTIMATED_BYTES:
+            raise RequestStatsValidationError(
+                "Selected indexes exceed the in-memory dataset limit; select fewer request files"
+            )
     rows.sort(key=lambda row: (row.get("timestamp") or 0, row["source_file"], row["offset"]), reverse=True)
     return RequestStatsDataset(uuid.uuid4().hex, files, rows, estimated_bytes)
 
@@ -1000,7 +1021,7 @@ def _merge_quality(target: Dict[str, int], source: Dict[str, int]) -> None:
 
 
 class RequestStatsJobManager:
-    """Run one scan job and publish completed in-memory datasets."""
+    """Run one index job, then publish a drill-down dataset or performance cube."""
 
     TERMINAL_STATUSES = {"completed", "cancelled", "failed"}
 
@@ -1043,9 +1064,11 @@ class RequestStatsJobManager:
             job = self._jobs.get(self._active_job_id)
             return [job["current_file"]] if job and job.get("current_file") else []
 
-    def start(self, filenames: Any) -> Tuple[Dict[str, Any], bool]:
+    def start(self, filenames: Any, *, kind: str = "statistics") -> Tuple[Dict[str, Any], bool]:
+        if kind not in ("statistics", "performance"):
+            raise RequestStatsValidationError("Invalid job kind. Use: statistics, performance")
         selected = normalize_selected_files(filenames)
-        selection_key = tuple(sorted(selected))
+        selection_key = (kind, tuple(sorted(selected)))
         with self._lock:
             self._cleanup_locked()
             if self._active_job_id:
@@ -1057,6 +1080,7 @@ class RequestStatsJobManager:
             job_id = uuid.uuid4().hex
             job = {
                 "id": job_id,
+                "kind": kind,
                 "status": "queued",
                 "files": selected,
                 "created_at": _utc_now(),
@@ -1115,6 +1139,7 @@ class RequestStatsJobManager:
             job["status"] = "running"
             job["started_at"] = _utc_now()
             filenames = list(job["files"])
+            kind = job["kind"]
             cancel_event = job["_cancel_event"]
         try:
             planned = []
@@ -1193,13 +1218,27 @@ class RequestStatsJobManager:
                     active[{"cached": "cache_hits", "incremental": "incremental_scans"}.get(mode, "rebuild_scans")] += 1
 
             _check_cancelled(cancel_event)
-            dataset = _load_dataset(indexed_files)
-            result = dataset.build_result(file_results, quality)
+            self._set_job(job_id, current_file=None, current_mode="aggregating")
+            if kind == "performance":
+                rows = (row for row, _ in _iter_indexed_rows(sorted(indexed_files), cancel_event))
+                result = {
+                    "schema_version": INDEX_SCHEMA_VERSION,
+                    "generated_at": _utc_now(),
+                    "files": file_results,
+                    "quality": quality,
+                    "perf": build_performance_cube(rows),
+                }
+            else:
+                dataset = _load_dataset(indexed_files)
+                result = dataset.build_result(file_results, quality)
+                _check_cancelled(cancel_event)
+                self.datasets.put(dataset)
+            _check_cancelled(cancel_event)
+            result["kind"] = kind
             with self._lock:
                 active = self._jobs[job_id]
                 result["skipped_files"] = list(active["skipped_files"])
                 result["warnings"] = list(active["warnings"])
-            self.datasets.put(dataset)
             self._set_job(job_id, result=result, status="completed", current_file=None, current_mode=None)
         except RequestStatsCancelled:
             self._set_job(job_id, status="cancelled", current_file=None, current_mode=None)

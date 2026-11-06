@@ -84,7 +84,7 @@ class FileLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(read_log_lines(), [])
 
     def test_disk_failure_does_not_break_the_search(self):
-        with mock.patch("ghc_api.webiq_log.open", side_effect=OSError("disk full")):
+        with mock.patch("ghc_api.file_logging.open", side_effect=OSError("disk full")):
             record_search_to_file({"id": "a", "query": "one"})  # must not raise
 
     def test_non_serializable_values_do_not_lose_the_record(self):

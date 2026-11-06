@@ -27,6 +27,7 @@ from ..api_helpers import (
     get_github_web_base_url,
 )
 from ..auth import ANONYMOUS_USER_ID, get_user_registry
+from ..perf_stats import WINDOW_PRESETS, parse_window, perf_stats
 from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
 from ..anysearch import is_configured as anysearch_is_configured, tool_definitions as anysearch_tool_definitions
@@ -187,10 +188,22 @@ def code_agent_manager_config_page():
     return render_template("code_agent_manager_config.html")
 
 
+@dashboard_bp.route("/live", methods=["GET"])
+def live_stats_page():
+    """Serve the live throughput (tokens/second) dashboard."""
+    return render_template("live_stats.html")
+
+
 @dashboard_bp.route("/request-stats", methods=["GET"])
 def request_stats_page():
     """Serve the persisted request-file statistics page."""
     return render_template("request_stats.html")
+
+
+@dashboard_bp.route("/request-perf", methods=["GET"])
+def request_perf_page():
+    """Serve historical performance analysis over the request-file indexes."""
+    return render_template("request_perf.html")
 
 
 @dashboard_bp.route("/request-file-detail", methods=["GET"])
@@ -459,6 +472,24 @@ def api_stats():
     return jsonify(stats)
 
 
+@dashboard_bp.route("/api/live-stats", methods=["GET"])
+def api_live_stats():
+    """Live per-model throughput for the current process run.
+
+    ``?window=`` takes a preset (5m/15m/1h/6h/24h/all); ``?user=`` filters to
+    one user. Everything is computed on read from a bounded in-memory sample
+    ring, so this endpoint costs nothing when nobody is looking at it.
+    """
+    user_filter = _user_filter_from_request()
+    window_label, window_seconds = parse_window(request.args.get("window"))
+
+    payload = perf_stats.snapshot(window_seconds=window_seconds, user_id=user_filter)
+    payload["window"] = window_label
+    payload["window_presets"] = list(WINDOW_PRESETS.keys())
+    payload["in_flight"] = cache.get_in_flight(user_id=user_filter)
+    return jsonify(payload)
+
+
 @dashboard_bp.route("/api/request-stats/files", methods=["GET"])
 def api_request_stats_files():
     """List persisted request files and their request-statistics index state."""
@@ -472,7 +503,7 @@ def api_request_stats_jobs_create():
     if not isinstance(payload, dict):
         return jsonify({"error": "Invalid JSON body"}), 400
     try:
-        job, reused = request_stats_jobs.start(payload.get("files"))
+        job, reused = request_stats_jobs.start(payload.get("files"), kind=payload.get("kind", "statistics"))
     except RequestStatsValidationError as exc:
         return jsonify({"error": str(exc)}), 400
     except RequestStatsBusyError as exc:

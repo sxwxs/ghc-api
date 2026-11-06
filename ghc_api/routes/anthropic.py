@@ -22,6 +22,7 @@ from ..api_helpers import (
     advertises_anthropic_messages_api,
     supports_direct_anthropic_api,
     supports_responses_api,
+    is_non_chat_model,
     supported_reasoning_efforts,
     count_tokens,
 )
@@ -45,6 +46,7 @@ from ..compat_redaction import (
 from ..cache import cache
 from ..counters import counters
 from ..auth import redact_auth_headers
+from ..perf_stats import is_output_event
 from ..streaming import AnthropicStreamState, reconstruct_openai_response_from_chunks, translate_chunk_to_anthropic_events
 from ..sse import (
     AnthropicDirectStreamHandler,
@@ -534,6 +536,7 @@ def _stream_pending_direct_anthropic_request(
         "endpoint": "/v1/messages",
         "request_size": filtered_request_size,
         "user_id": user_id,
+        "started_at": start_time,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -708,7 +711,7 @@ def _stream_pending_direct_anthropic_request(
                 return
 
         except GeneratorExit:
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+            cache.cancel_request(request_id)
             return
         except Exception as e:
             print(f"[Direct Anthropic] Error while waiting for upstream stream for request {request_id}: {type(e).__name__}: {e}")
@@ -730,7 +733,7 @@ def _stream_pending_direct_anthropic_request(
             try:
                 yield _anthropic_error_event(response_body, 500)
             except GeneratorExit:
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
+                cache.cancel_request(request_id)
                 return
 
     return Response(
@@ -1004,6 +1007,11 @@ def anthropic_messages():
     if translated_model != original_model:
         print(f"[Anthropic API] Model name translated: {original_model} -> {translated_model}")
         anthropic_payload = {**anthropic_payload, "model": translated_model}
+
+    if is_non_chat_model(translated_model):
+        return _anthropic_json_error(
+            f"Model '{original_model}' is not a chat model. Use its advertised endpoints.", 400
+        )
 
     use_direct_api = supports_direct_anthropic_api(translated_model)
 
@@ -1323,6 +1331,7 @@ def _stream_pending_anthropic_responses_request(
         "endpoint": "/v1/messages",
         "request_size": request_size,
         "user_id": user_id,
+        "started_at": start_time,
     })
     cache.update_request_state(request_id, cache.STATE_SENDING)
 
@@ -1432,8 +1441,9 @@ def _stream_pending_anthropic_responses_request(
                 request_audit=request_audit,
             )
             handler._cache_seeded = True
-            yield from handler._generate()
+            # From here the handler finalizes the entry, disconnects included.
             cache_finished = True
+            yield from handler._generate()
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
             failure_warnings = _merge_compatibility_warnings(
                 warnings,
@@ -1475,6 +1485,8 @@ def _stream_pending_anthropic_responses_request(
                     response.close()
                 except Exception:
                     pass
+            if cache_finished:
+                return
             disconnect_warnings = _merge_compatibility_warnings(
                 warnings,
                 [_compatibility_warning("responses.client_disconnected", "/", "error")],
@@ -2471,6 +2483,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         "endpoint": "/v1/messages",
         "request_size": request_size,
         "user_id": user_id,
+        "started_at": start_time,
     })
 
     def generate() -> Generator[str, None, None]:
@@ -2481,7 +2494,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
         total_cache_read_input_tokens = 0
         error_occurred = False
         status_code = 200
-        first_chunk_received = False
+        output_started = False
         final_openai_payload = openai_payload
         final_request_size = request_size
 
@@ -2544,9 +2557,8 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                         chunk = json.loads(data)
                         response_chunks.append(chunk)
 
-                        # Update state to receiving on first chunk
-                        if not first_chunk_received:
-                            first_chunk_received = True
+                        if not output_started and is_output_event(chunk):
+                            output_started = True
                             cache.update_request_state(request_id, cache.STATE_RECEIVING)
 
                         if chunk.get("usage"):
@@ -2570,12 +2582,10 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             status_code = 504
             print(f"[Stream Anthropic] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
         except GeneratorExit:
-            # Client disconnected - this is normal, just clean up
+            # Client disconnected: fall through and record what we have.
             error_occurred = True
+            status_code = 499
             print(f"[Stream Anthropic] Client disconnected for request {request_id}")
-            # Update state to error since client disconnected
-            cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-            return
         except Exception as e:
             error_occurred = True
             status_code = 500
@@ -2583,9 +2593,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             try:
                 yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': {'type': 'api_error', 'message': str(e)}})}\n\n"
             except GeneratorExit:
-                # Client already disconnected, can't yield
-                cache.update_request_state(request_id, cache.STATE_ERROR, status_code=499)
-                return
+                status_code = 499
 
         duration = round(time.time() - start_time, 2)
 

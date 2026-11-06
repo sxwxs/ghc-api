@@ -139,13 +139,19 @@ class State:
 
         # User authentication settings
         # When True, /v1/chat/completions, /v1/messages, /v1/responses,
-        # /v1/embeddings, and /v1/models require an approved user token.
+        # /v1/embeddings, /v1/systemone, /v1/images/*, and /v1/models require an approved user token.
         # When False (default), all requests are tagged with user_id="anonymous"
         # and no auth check is performed.
         self.enable_auth: bool = False
 
         # Session persistence settings
         self.session_flush_interval: int = 5  # seconds between buffered writes
+
+        # Live throughput metrics (/live). Number of finished-request samples
+        # kept in memory for tokens-per-second aggregation. Each sample is one
+        # small tuple, so the default stays well under 1 MB; windows wider than
+        # the retained samples are reported as truncated rather than wrong.
+        self.perf_sample_capacity: int = 2000
 
         # Request cache memory limits
         self.cache_max_entries: int = 1000  # Max number of requests kept in memory

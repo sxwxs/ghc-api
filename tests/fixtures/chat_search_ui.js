@@ -135,10 +135,10 @@ async function turn(style) {
     assert.equal(run("searchTools('m', 'chat')").length, 0);
     run("modelTargets.m.type = 'configured_proxy'");
     assert.equal(run("searchTools('m', 'responses')").length, 0);
-    run("modelTargets.m.type = 'copilot'; rawMode = true");
+    run("modelTargets.m.type = 'copilot'; chatMode = 'raw'");
     elements['search-provider'].value = 'anysearch';
     assert.equal(run("searchTools('m', 'responses')").length, 0);
-    run('rawMode = false; SEARCH_PROVIDERS.anysearch.available = false; updateWebSearchAvailability()');
+    run("chatMode = 'chat'; SEARCH_PROVIDERS.anysearch.available = false; updateWebSearchAvailability()");
     assert.equal(elements['search-provider'].value, 'anysearch', 'no silent switch');
     assert.equal(elements['search-provider'].options.find(o => o.value === 'anysearch').disabled, true);
     assert.equal(run("searchTools('m', 'chat')").length, 0);

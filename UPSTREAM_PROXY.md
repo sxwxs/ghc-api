@@ -14,10 +14,16 @@ POST /proxy/example-llm/v1/chat/completions
 POST /proxy/example-llm/v1/messages
 POST /proxy/example-llm/v1/systemone
 GET  /proxy/example-llm/v1/models
+GET  /proxy/example-llm/v1/models/<model_id>
 GET  /proxy/models
 ```
 
 `GET /proxy/models` is a first-party discovery catalog used by the built-in `/chat` page. It adds the profile name and profile base URL to each public model entry without exposing upstream URLs, headers, credentials, or affinity values.
+
+Both model lists and the single-model route use the shared [model metadata
+schema](docs/MODEL_METADATA.md), including context and output limits, input
+types, and reasoning support. A detail response is the same object as its list
+entry. Unknown models return HTTP 404 with `error.code: "model_not_found"`.
 
 The existing `/v1/responses`, `/v1/chat/completions`, and `/v1/models` routes remain Copilot-only.
 
@@ -270,7 +276,7 @@ Affinity values are persisted atomically and are not exposed through the API or 
 
 ## Built-in Chat page and accounting
 
-The built-in `/chat` page loads both Copilot models and configured-proxy models. Configured models are grouped by profile, and both Chat mode and Raw mode send requests directly to the selected profile's `/proxy/<profile>/v1/...` route. Model ids remain the public ids declared in this file.
+The built-in `/chat` page loads both Copilot models and configured-proxy models. Configured models are grouped by profile, and Chat, Raw, and Decision modes send requests directly to the selected profile's `/proxy/<profile>/v1/...` route. Model ids remain the public ids declared in this file.
 
 Configured-proxy requests use the same request cache, request browser, in-memory statistics, per-user statistics, persisted request JSONL, request-file statistics, and token-usage reporter as the existing endpoints. Token fields are extracted using the matching API shape:
 
@@ -333,7 +339,7 @@ Behavioural notes:
 - `response_model: public` matters here because the upstream reports the underlying model name in `model`, not the deployment name it was called with.
 - Usage accounting reads the flat `usage.input_tokens` and `usage.output_tokens` fields. Decision models have no cache tiers, so cached-token counters stay at zero.
 - Question and answer bodies are not inspected, validated, or rewritten. Upstream validation errors (HTTP 422) are returned unchanged.
-- Decision models are excluded from the built-in `/chat` page because they return probabilities rather than messages. They still appear in `GET /proxy/models` and `GET /proxy/<profile>/v1/models` with `supported_endpoints: ["/systemone"]`.
+- Decision models appear in `GET /proxy/models` and `GET /proxy/<profile>/v1/models` with `supported_endpoints: ["/systemone"]`. The built-in `/chat` page lists them with a `[decision]` tag and sends them to `/proxy/<profile>/v1/systemone` from its Decision mode (or Raw mode); Chat mode does not use them because they return probabilities rather than messages.
 
 Calling it through ghc-api:
 

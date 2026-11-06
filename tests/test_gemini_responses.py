@@ -6,7 +6,8 @@ from unittest import mock
 
 import requests
 
-from ghc_api.api_helpers import supports_responses_api, supports_responses_via_chat_completions
+from ghc_api.api_helpers import supports_responses_api
+from ghc_api.gemini_responses_bridge import supports_bridge
 from ghc_api.app import create_app
 from ghc_api.cache import RequestCache
 from ghc_api.routes import openai
@@ -80,12 +81,12 @@ class GeminiResponsesTest(unittest.TestCase):
 
     def test_native_and_bridged_capabilities_are_separate(self):
         self.assertFalse(supports_responses_api(MODEL))
-        self.assertTrue(supports_responses_via_chat_completions(MODEL))
-        self.assertFalse(supports_responses_via_chat_completions("gemini-unknown"))
+        self.assertTrue(supports_bridge(MODEL))
+        self.assertFalse(supports_bridge("gemini-unknown"))
         state.models["data"][0]["supported_endpoints"] = ["/v1/chat/completions"]
-        self.assertTrue(supports_responses_via_chat_completions(MODEL))
-        with mock.patch("ghc_api.api_helpers.is_configured_chat_completions_support_added", return_value=True):
-            self.assertFalse(supports_responses_via_chat_completions(MODEL))
+        self.assertTrue(supports_bridge(MODEL))
+        with mock.patch("ghc_api.gemini_responses_bridge.is_configured_chat_completions_support_added", return_value=True):
+            self.assertFalse(supports_bridge(MODEL))
 
     def test_nonstreaming_request_returns_responses_json_and_caches_usage(self):
         self.post.return_value = self.completion()

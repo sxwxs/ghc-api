@@ -28,7 +28,7 @@ from .config import (
     DEFAULT_CHAT_COMPLETIONS_MODEL_SUPPORT,
 )
 from .config_sync import print_sync_diff_status
-from .generate_config import generate_config_file
+from .generate_config import generate_config_file, open_config_in_editor
 from .state import state
 from .token_manager import (
     authenticate_github_device_flow,
@@ -198,7 +198,7 @@ def main():
     args = parser.parse_args()
 
     if args.config:
-        generate_config_file()
+        open_config_in_editor(generate_config_file())
         return
     if args.delete_github_token:
         delete_github_token_file()
@@ -238,7 +238,7 @@ def main():
     # Load config from file if it exists
     if not os.path.exists(config_path):
         print(f"No config file found at {config_path}, will generate one.")
-        generate_config_file()
+        open_config_in_editor(generate_config_file())
     # Server defaults; a config error aborts startup instead of silently
     # running with a half-applied configuration.
     host = 'localhost'
@@ -315,6 +315,12 @@ def main():
         from .cache import cache as _request_cache
         _request_cache.max_entries = state.cache_max_entries
         _request_cache.max_request_size = state.cache_max_request_size
+
+        # Live throughput sample ring (/live dashboard)
+        if 'perf_sample_capacity' in config:
+            state.perf_sample_capacity = int(config['perf_sample_capacity'])
+        from .perf_stats import perf_stats as _perf_stats
+        _perf_stats.set_capacity(state.perf_sample_capacity)
 
         # Load web search proxy settings
         if 'enable_web_search_proxy' in config:
@@ -452,9 +458,12 @@ def main():
 
     print(f"Starting GitHub Copilot API Proxy on {host}:{port}")
     print(f"Dashboard: http://{host}:{port}/")
+    print(f"Live throughput: http://{host}:{port}/live")
     print(f"OpenAI API: http://{host}:{port}/v1/chat/completions")
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
+    print(f"System One decision API: http://{host}:{port}/v1/systemone")
+    print(f"Images API: http://{host}:{port}/v1/images/generations, /v1/images/edits")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
     if webiq.is_configured(state):
         print(f"Web IQ v3 REST APIs: http://{host}:{port}/v3/")

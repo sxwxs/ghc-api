@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Historical Performance</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='request_perf.css') }}">
+</head>
+<body>
+    <nav class="navbar" id="app-nav" data-title="Historical Performance"></nav>
+    <script src="{{ url_for('static', filename='nav.js') }}"></script>
+    <main>
+        <section class="card">
+            <div class="controls">
+                <h2>Select daily request logs</h2>
+                <button id="refresh-files" type="button">Refresh files</button>
+                <button id="select-all" type="button">Select all (up to 366)</button>
+                <button id="clear-files" type="button">Clear</button>
+                <button id="generate" class="primary" type="button" disabled>Analyze performance</button>
+            </div>
+            <p class="hint">Only selected files are scanned. Indexes are shared with Request Stats; older indexes rebuild once. No request bodies are sent to this page.</p>
+            <div id="file-list" class="file-list">Loading files…</div>
+            <p id="selection" class="hint"></p>
+        </section>
+        <section id="job-panel" class="card" hidden aria-live="polite">
+            <div class="controls"><strong id="job-title"></strong><button id="cancel" type="button">Cancel</button></div>
+            <p id="job-meta" class="hint"></p>
+            <progress id="progress" max="100"></progress>
+        </section>
+        <div id="notices" role="status" aria-live="polite"></div>
+        <section id="report" hidden>
+            <section class="card">
+                <p id="report-meta" class="hint"></p>
+                <div class="controls">
+                    <label>From <select id="from"></select></label>
+                    <label>To <select id="to"></select></label>
+                    <button id="range-7" type="button">Last 7 days</button>
+                    <button id="range-30" type="button">Last 30 days</button>
+                    <button id="range-all" type="button">All dates</button>
+                    <button id="all-models" type="button">All models</button>
+                    <button id="clear-models" type="button">Clear models</button>
+                </div>
+                <div id="model-chips" class="chips" aria-label="Model filter"></div>
+                <p class="hint">All charts and tables use the date/model selection. The six highest-output models are selected initially.</p>
+            </section>
+            <div id="kpis" class="kpis"></div>
+            <div class="grid">
+                <section class="card full">
+                    <h2>Slowdown indicators</h2>
+                    <p id="diagnosis-hint" class="hint"></p>
+                    <ul id="diagnosis"></ul>
+                    <p class="hint">These are correlations, not a causal diagnosis. Timing changes are compared only when both periods use the same measured/estimated source.</p>
+                </section>
+                <section class="card full">
+                    <div class="controls"><h2>Daily trends by model</h2><select id="trend-metric" aria-label="Trend metric"></select></div>
+                    <p id="trend-hint" class="hint"></p><div id="trend" class="chart"></div>
+                </section>
+                <section class="card">
+                    <div class="controls"><h2>Daily usage</h2><select id="volume-metric" aria-label="Usage metric">
+                        <option value="output">Output tokens</option><option value="count">Requests</option>
+                        <option value="wait">Cumulative request hours</option><option value="context">Context tokens</option>
+                    </select></div><div id="volume" class="chart"></div>
+                </section>
+                <section class="card">
+                    <div class="controls"><h2>Hour-of-day heatmap</h2><select id="heat-metric" aria-label="Heatmap metric">
+                        <option value="tps">Effective TPS</option><option value="duration">Mean duration (s)</option><option value="count">Requests</option>
+                    </select></div><p class="hint">Server local time. Requests without timestamps are excluded here.</p><div id="heat" class="chart"></div>
+                </section>
+                <section class="card">
+                    <div class="controls"><h2>Context size → speed</h2><select id="context-metric" aria-label="Context metric">
+                        <option value="tps">Effective TPS</option><option value="ttft">Measured TTFT mean (s)</option>
+                        <option value="decode">Measured decode TPS</option><option value="ttft_est">Estimated TTFT (s)</option>
+                        <option value="decode_est">Estimated decode TPS</option><option value="duration">Mean duration (s)</option>
+                        <option value="count">Requests</option>
+                    </select></div><p class="hint">Context = validated input + cache read + cache write. Missing or invalid context is excluded.</p><div id="context" class="chart"></div>
+                </section>
+                <section class="card">
+                    <h2>Duration vs output tokens</h2><p class="hint">Sampled requests and Theil–Sen fitted lines (always estimates). Up to 300 points for each of the first six selected models.</p>
+                    <div id="scatter" class="chart"></div>
+                </section>
+                <section class="card full">
+                    <h2>Duration distribution</h2><p class="hint">Logarithmic bins, normalized per model. Hover over points for bin counts.</p><div id="distribution" class="chart"></div>
+                </section>
+                <section class="card full">
+                    <h2>Model comparison</h2><p class="hint">Click column headings to sort. TTFT and decode values prefer measured data when available; the source and coverage are shown explicitly.</p>
+                    <div class="scroll"><table id="model-table"></table></div>
+                </section>
+                <section class="card"><h2>Upstream profile / provider</h2><div class="scroll"><table id="upstream-table"></table></div></section>
+                <section class="card"><h2>Endpoints</h2><div class="scroll"><table id="endpoint-table"></table></div></section>
+                <section class="card full note">
+                    <h2>Metric definitions and limitations</h2>
+                    <p><b>Effective TPS</b> = total output tokens / total duration, for successful completed requests with positive output and duration. It includes first-token wait. Errors, cancellations, unknown status, and zero-output calls are excluded from speed metrics, but remain in request counts and duration totals.</p>
+                    <p><b>Context totals and cache share</b> use only requests with a valid context total. Missing optional cache fields may be zero; explicitly invalid components make the context unavailable, without discarding the request's other metrics.</p>
+                    <p><b>Measured TTFT</b> is the mean of valid persisted <code>ttft</code> values on successful requests. Decode TPS uses only generating requests with <code>duration &gt; ttft</code>: total output / total (duration − ttft). Missing timing is never treated as zero.</p>
+                    <p><b>Estimated timing</b> fits <code>duration ≈ TTFT + output / decode TPS</code> using at most 90 reservoir samples per day/model and at most 220 points per fit. Fits require at least 10 samples and a positive slope. This is a rough trend indicator, not a reconstruction of actual first-token times. Daily samples and changing request mix can bias multi-day estimates. Measured and estimated trend series are separate.</p>
+                    <p><b>Approximate percentiles</b> interpolate within 48 logarithmic bins (duration: 0.05–3000 s; TPS: 0.5–400). Out-of-range values are clipped to end bins and counted in data-quality notices. Totals and measured means are not histogram estimates.</p>
+                    <p><b>Failures / cancellations</b> are disjoint; the displayed combined rate counts each request once. Status 499 is cancellation, not an additional failure. Unknown status is shown separately. Cumulative request time is a sum across requests, not elapsed wall-clock time when requests overlap.</p>
+                    <p>Source JSONL is parsed normally; malformed and oversized lines are skipped and counted, never recovered with regex. Partial trailing lines wait for the next scan. Dates and hours use the server's local timezone; missing timestamps fall back to the source file date without inventing an hour. No external chart libraries or network services are used.</p>
+                </section>
+            </div>
+        </section>
+    </main>
+    <script src="{{ url_for('static', filename='request_perf_math.js') }}"></script>
+    <script src="{{ url_for('static', filename='request_perf.js') }}"></script>
+</body>
+</html>

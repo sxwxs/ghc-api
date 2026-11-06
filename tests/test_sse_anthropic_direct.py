@@ -119,5 +119,86 @@ class RecoverySubclassRoutingTest(unittest.TestCase):
         self.assertEqual(entry["raw_events"], [message_start, delta])
 
 
+class UsageAccountingTest(unittest.TestCase):
+    """Usage counters must survive Anthropic-compatible gateways that report
+    ``input_tokens`` only in the trailing ``message_delta`` event."""
+
+    def setUp(self) -> None:
+        self.cache = RequestCache()
+        self._cache_patch = mock.patch.object(base_module, "cache", self.cache)
+        self._cache_patch.start()
+
+    def tearDown(self) -> None:
+        self._cache_patch.stop()
+
+    def _entry_after(self, message_start_usage, message_delta_usage):
+        message_start = json.dumps(
+            {"type": "message_start", "message": {"model": "m", "usage": message_start_usage}}
+        )
+        delta = json.dumps(
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "hi"}}
+        )
+        message_delta = json.dumps(
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": message_delta_usage}
+        )
+        lines = [
+            b"event: message_start",
+            f"data: {message_start}".encode(),
+            b"event: content_block_delta",
+            f"data: {delta}".encode(),
+            b"event: message_delta",
+            f"data: {message_delta}".encode(),
+            b"event: message_stop",
+            b'data: {"type": "message_stop"}',
+        ]
+        handler = AnthropicDirectStreamHandler(
+            response=_FakeResponse(lines),
+            request_id="req-usage",
+            request_size=0,
+            start_time=0.0,
+            original_model="m",
+            translated_model="m",
+            request_body_for_cache={},
+        )
+        "".join(handler._generate())
+        entry = self.cache.get_request("req-usage")
+        self.assertIsNotNone(entry)
+        return entry
+
+    def test_input_tokens_reported_only_in_message_delta_are_recorded(self):
+        entry = self._entry_after(
+            {"input_tokens": 0, "output_tokens": 0},
+            {"input_tokens": 128207, "output_tokens": 136, "cache_read_input_tokens": 0},
+        )
+        self.assertEqual(entry["input_tokens"], 128207)
+        self.assertEqual(entry["output_tokens"], 136)
+        self.assertEqual(entry["cache_read_input_tokens"], 0)
+
+    def test_message_delta_does_not_erase_counters_it_omits(self):
+        entry = self._entry_after(
+            {"input_tokens": 11, "output_tokens": 0, "cache_creation_input_tokens": 2, "cache_read_input_tokens": 3},
+            {"output_tokens": 9},
+        )
+        self.assertEqual(entry["input_tokens"], 11)
+        self.assertEqual(entry["output_tokens"], 9)
+        self.assertEqual(entry["cache_creation_input_tokens"], 2)
+        self.assertEqual(entry["cache_read_input_tokens"], 3)
+
+    def test_message_delta_overrides_stale_cache_counters(self):
+        entry = self._entry_after(
+            {"input_tokens": 5, "cache_creation_input_tokens": 1, "cache_read_input_tokens": 2},
+            {"input_tokens": 40, "output_tokens": 7, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 20},
+        )
+        self.assertEqual(entry["input_tokens"], 40)
+        self.assertEqual(entry["output_tokens"], 7)
+        self.assertEqual(entry["cache_creation_input_tokens"], 10)
+        self.assertEqual(entry["cache_read_input_tokens"], 20)
+
+    def test_non_dict_usage_is_ignored(self):
+        entry = self._entry_after({"input_tokens": 5}, None)
+        # A null usage object must not raise nor reset what message_start reported.
+        self.assertEqual(entry["input_tokens"], 5)
+
+
 if __name__ == "__main__":
     unittest.main()

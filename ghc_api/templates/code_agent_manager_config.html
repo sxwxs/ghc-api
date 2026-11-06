@@ -4,14 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
     <title>Copilot API Proxy - Code Agent Config & Tools</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; background:#f5f5f5; color:#333; line-height:1.6; }
-        .navbar { background:linear-gradient(135deg,#667eea 0%,#764ba2 100%); color:#fff; padding:1rem 2rem; display:flex; justify-content:space-between; align-items:center; }
-        .navbar h1 { font-size:1.25rem; }
-        .navbar-actions { display:flex; gap:.75rem; flex-wrap:wrap; }
-        .navbar-actions a { color:#fff; text-decoration:none; padding:.45rem .8rem; border-radius:6px; background:rgba(255,255,255,.2); font-size:.875rem; }
         .container { max-width:1400px; margin:0 auto; padding:1.5rem; }
         .page-intro { margin-bottom:1rem; padding:.875rem 1rem; border-radius:8px; background:#fff8e1; border:1px solid #ffe082; color:#6d4c41; font-size:.9rem; }
         .section { background:#fff; border-radius:12px; padding:1.25rem; box-shadow:0 2px 8px rgba(0,0,0,.08); margin-bottom:1rem; }
@@ -26,16 +23,12 @@
         table { width:100%; border-collapse:collapse; } th,td { padding:.6rem .75rem; border-bottom:1px solid #efefef; text-align:left; font-size:.85rem; }
         th { background:#f8f9fa; color:#555; position:sticky; top:0; } .shared-row { background:#f4f7ff; font-weight:600; }
         .software-installed { color:#2e7d32; font-weight:600; } .software-missing { color:#c62828; font-weight:600; }
-        @media(max-width:768px){.navbar{padding:.9rem 1rem;flex-direction:column;align-items:flex-start;gap:.6rem}.container{padding:1rem}}
+        @media(max-width:768px){.container{padding:1rem}}
     </style>
 </head>
 <body>
-<nav class="navbar">
-    <h1>Code Agent Config & Tools</h1>
-    <div class="navbar-actions">
-        <a href="/code-agent-manager">Code Agent Manager</a><a href="/">Dashboard</a><a href="/agent">Code Agent</a><a href="/request-stats">Request Stats</a>
-    </div>
-</nav>
+<nav class="navbar" id="app-nav" data-title="Code Agent Config &amp; Tools" data-active="/code-agent-manager"></nav>
+<script src="{{ url_for('static', filename='nav.js') }}"></script>
 <div class="container">
     <div class="page-intro">Tool installation, config synchronization, software versions, and config hashes are maintained on this separate page.</div>
     <div class="section">
