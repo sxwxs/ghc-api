@@ -426,6 +426,29 @@ Histogram bars are interactive: selecting a bucket shows the exact indexed reque
 
 The token views follow the fields persisted by ghc-api: input not cached (`input_tokens`), cache write (`cache_creation_input_tokens`), cache read (`cache_read_input_tokens`), output (`output_tokens`), and their total. Provider compatibility paths use the same existing field mappings as the request log itself. Distributions include every persisted request attempt, including failed attempts; failures commonly record zero usage tokens.
 
+### Historical Performance
+
+Open **Other → Historical Performance** (`/request-perf`) to compare persisted requests across days. Select daily logs (up to 366 files), then click **Analyze performance**. Nothing is scanned automatically when the page opens. The page shares file indexes, job progress, cancellation, and the single-job concurrency limit with `/request-stats`.
+
+The report includes effective TPS, measured/estimated TTFT and decode speed, approximate latency/TPS percentiles, daily trends and stacked usage, an hourly heatmap, context-size buckets, sampled duration/output scatter plots, model/upstream/endpoint comparisons, and slowdown indicators. Date and model filters apply to all charts and tables. Recent-period comparisons use calendar days; slowdown indicators describe correlations, not proven causes.
+
+- **Effective TPS:** total output / total duration on successful completed requests with positive output and duration. Failed, cancelled, unknown-status and zero-output calls remain in counts and duration totals, but not speed metrics.
+- **Measured timing:** valid persisted `ttft` values supply mean TTFT; decode TPS is total output / total (duration − TTFT), on generating requests with a positive measured interval. Coverage counts are displayed.
+- **Historical estimates:** when measured timing is unavailable, summary tables use a clearly labelled Theil–Sen fit. Trend selectors keep measured and estimated series separate. Fits use bounded reservoirs of up to 90 requests per day/model and at most 220 points per fit; small samples and changing request mix can make them noisy or unavailable.
+- **Percentiles:** approximate interpolation in 48 log-spaced bins. Out-of-range values are clipped to end bins and counted in quality notices. Missing metrics are not silently converted to measured zeroes.
+- **Context:** a validated sum of input, cache-read and cache-write tokens. Omitted optional cache fields can be zero, but an explicitly invalid component excludes that request from context comparisons, context totals and cache-share calculations. Its other valid metrics remain available.
+- **Data quality:** normal JSON parsing, no regex recovery. Invalid/non-object/oversized lines and partial tails are reported. Failures and cancellations are disjoint; their combined rate counts each request once. Time is server-local; missing timestamps fall back to the file date but are omitted from the hourly heatmap.
+
+Index schema v5 includes timing, completion state, upstream metadata and a validated context total. Earlier indexes, including v4, cannot distinguish invalid token components from missing fields. **The first analysis of a file with an older index rebuilds that index**; unchanged files then reuse it without reopening the original log. First-time indexing of a large archive can take minutes and runs in the background. Performance analysis streams the lightweight indexes into grouped totals, histograms and bounded samples, without retaining a per-request dataset; it is not subject to the 256 MiB drill-down dataset limit. Memory still depends on the number of date/model/hour/upstream groups. The first version does not provide per-request drill-down; use `/request-stats` for that.
+
+The page is served by ghc-api and needs no external chart library or network service; it is not a standalone exported HTML file. The API entry point is `POST /api/request-stats/jobs` with an explicit kind:
+
+```json
+{"files": ["2026-07-14.jl"], "kind": "performance"}
+```
+
+Omitting `kind` preserves the existing `statistics` behavior. Completed performance jobs return `result.perf` and quality/file metadata, not a `dataset_id`.
+
 ### Code Agent Interaction
 
 The Code Agent page (`/agent`) provides a web interface for interacting with AI coding agents via the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/). Supported agents:
@@ -865,8 +888,9 @@ Configured models are selectable from `/chat` and participate in the same reques
 - `GET /api/live-stats?window=5m|15m|1h|6h|24h|all&user=<id>` - Live throughput JSON, including in-flight requests
 - `GET /requests` - Request browser page
 - `GET /request-stats` - Multi-file persisted request statistics page
+- `GET /request-perf` - Historical performance dashboard over the same file indexes
 - `GET /api/request-stats/files` - List daily request files and index state without scanning contents
-- `POST /api/request-stats/jobs` - Start an asynchronous statistics/index job for selected files
+- `POST /api/request-stats/jobs` - Start an asynchronous job for selected files (`kind`: `statistics` by default, or `performance`)
 - `GET /api/request-stats/jobs/<id>` - Read job progress and completed statistics
 - `POST /api/request-stats/jobs/<id>/cancel` - Cancel an active statistics job
 - `GET /api/request-stats/datasets/<id>/requests` - Paginate requests contributing to a selected histogram bucket
@@ -978,6 +1002,7 @@ Access the web dashboard at `http://localhost:8313/` to:
 - View detailed request/response bodies
 - Use Live Throughput (`/live`) to see what is running right now and why it feels slow (see [Live Throughput](#live-throughput))
 - Use Request Stats (`/request-stats`) to multi-select persisted daily files, compare overall/model/response-code distributions, click histogram buckets for matching requests, and open hash-verified historical details
+- Use Historical Performance (`/request-perf`) for cross-day speed, timing, context, upstream and slowdown comparisons without loading per-request datasets
 - Use Code Agent Manager to:
   - Install code-agent CLIs
   - Sync config files to/from OneDrive
@@ -993,7 +1018,7 @@ Access the web dashboard at `http://localhost:8313/` to:
 
 ### Shared navigation
 
-Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Code Agent, Request Stats, and the raw JSON stats endpoints) live behind the **Other** menu.
+Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Code Agent, Request Stats, Historical Performance, and the raw JSON stats endpoints) live behind the **Other** menu.
 
 A template only declares its title and any page-specific buttons:
 
@@ -1020,7 +1045,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
-| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
+| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
 
 ### Sample nginx config
 
