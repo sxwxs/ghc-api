@@ -9,7 +9,7 @@ import msgspec
 from ..events import BlockEvent
 from ..http import raise_for_status, shared_client, sse_data
 from ..models import Model
-from ..provider import Blocks, ProviderError, StreamOptions
+from ..provider import STREAM_CUT, Blocks, ProviderError, StreamOptions
 from ..replay import replayable, same_model
 from ..types import (
     AssistantMessage,
@@ -41,9 +41,11 @@ async def stream(
         blocks = Blocks(message)
         tool_blocks: dict[int, int] = {}
         finish_reason: str | None = None
+        done = False
         usage = Usage()
         async for data in sse_data(response):
             if data == "[DONE]":
+                done = True
                 break
             chunk = CHUNK.decode(data)
             if chunk.error is not None:
@@ -55,6 +57,8 @@ async def stream(
                     for event in _delta(blocks, tool_blocks, choice.delta):
                         yield event
                 finish_reason = choice.finish_reason or finish_reason
+        if finish_reason is None and not done:
+            raise ProviderError(STREAM_CUT)
         for event in blocks.finish(model, _stop_reason(finish_reason), usage):
             yield event
 

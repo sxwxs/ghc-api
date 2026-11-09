@@ -9,7 +9,7 @@ import msgspec
 from ..events import BlockEvent
 from ..http import raise_for_status, shared_client, sse_data
 from ..models import Model
-from ..provider import Blocks, ProviderError, StreamOptions
+from ..provider import STREAM_CUT, Blocks, ProviderError, StreamOptions
 from ..replay import replayable, same_model
 from ..types import (
     AssistantMessage,
@@ -41,6 +41,8 @@ async def stream(
         async for data in sse_data(response):
             for event in state.handle(EVENT.decode(data), data):
                 yield event
+        if not state.finished:
+            raise ProviderError(STREAM_CUT)
         for event in state.blocks.finish(model, state.stop_reason(), state.usage):
             yield event
 
@@ -106,6 +108,7 @@ class _State:
         self.usage = Usage()
         self.status: str | None = None
         self.incomplete_reason: str | None = None
+        self.finished = False  # response.completed or response.incomplete arrived
 
     def handle(self, event: _Event, data: str) -> list[BlockEvent]:
         index = self.items.get(event.output_index) if event.output_index is not None else None
@@ -169,6 +172,7 @@ class _State:
         return events
 
     def _finished(self, response: _Response) -> None:
+        self.finished = True
         self.status = response.status
         self.incomplete_reason = response.incomplete_details.reason if response.incomplete_details else None
         if response.usage is not None:

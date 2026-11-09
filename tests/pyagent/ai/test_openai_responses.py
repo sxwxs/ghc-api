@@ -8,7 +8,7 @@ import msgspec
 import pytest
 
 from ghc_api.pyagent.ai.models import Model
-from ghc_api.pyagent.ai.provider import StreamOptions
+from ghc_api.pyagent.ai.provider import STREAM_CUT, StreamOptions
 from ghc_api.pyagent.ai.providers.openai_responses import build_request
 from ghc_api.pyagent.ai.stream import empty_reply, stream_assistant
 from ghc_api.pyagent.ai.types import (
@@ -131,6 +131,13 @@ async def test_incomplete_and_failed_responses() -> None:
         sse({"type": "response.failed", "response": {"status": "failed", "error": {"message": "quota"}}})
     )
     assert (failed.stop_reason, failed.error_message) == ("error", "quota")
+    cut, _ = await run_stream(
+        sse(
+            {"type": "response.output_item.added", "output_index": 0, "item": {"type": "message"}},
+            {"type": "response.output_text.delta", "output_index": 0, "delta": "Half"},
+        )
+    )
+    assert (cut.stop_reason, cut.error_message) == ("error", STREAM_CUT)
 
 
 def test_request_replays_reasoning_phase_and_tool_outputs_for_the_same_model() -> None:

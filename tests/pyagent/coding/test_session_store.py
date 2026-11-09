@@ -81,6 +81,13 @@ def test_damaged_lines_are_skipped(tmp_path: Path) -> None:
         file.write(b'{"type":"message","id":"x","parentId"')  # a crash in the middle of a write
     reopened = SessionStore.open(store.path)
     assert len(reopened.context().messages) == 1
+    # Appending after the damaged line must not glue the new entry onto it.
+    reopened.append_message(user_message("after the crash"))
+    reopened.close()
+    assert [m.id for m in SessionStore.open(store.path).context().messages] == [
+        m.id for m in reopened.context().messages
+    ]
+    assert len(reopened.context().messages) == 2
 
 
 def test_memory_only_sessions_write_nothing(tmp_path: Path) -> None:
@@ -112,8 +119,9 @@ def test_find_and_list_sessions(tmp_path: Path) -> None:
 
 
 def test_list_all_sessions_spans_working_directories(tmp_path: Path) -> None:
-    for cwd in ("/a", "/b"):
+    assert sessions_dir(tmp_path, "/") == tmp_path / "sessions" / "-"
+    for cwd in ("/", "/b"):
         store = SessionStore.create(cwd, sessions_dir(tmp_path, cwd))
         store.append_message(user_message(f"in {cwd}"))
         store.close()
-    assert sorted(s.cwd for s in list_all_sessions(tmp_path)) == ["/a", "/b"]
+    assert sorted(s.cwd for s in list_all_sessions(tmp_path)) == ["/", "/b"]

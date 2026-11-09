@@ -9,6 +9,7 @@ import pytest
 from ghc_api.pyagent.agent.agent import Agent, AgentBusyError, AgentIdleError
 from ghc_api.pyagent.agent.events import AgentEvent, ToolEnd, ToolStart
 from ghc_api.pyagent.agent.tool import Tool, ToolContext, ToolResult, text_result
+from ghc_api.pyagent.ai.events import MessageEnd
 from ghc_api.pyagent.ai.models import Model
 from ghc_api.pyagent.ai.providers.faux import FauxProvider, Reply, text_reply, tool_reply
 from ghc_api.pyagent.ai.types import (
@@ -225,6 +226,25 @@ async def test_abort_during_tools_gives_every_call_a_result(model: Model) -> Non
     results = [m for m in agent.messages if isinstance(m, ToolResultMessage)]
     assert [(r.tool_call_id, r.is_error) for r in results] == [("c1", True), ("c2", True)]
     assert sum(isinstance(e, ToolEnd) for e in events) == 2
+
+
+async def test_abort_still_ends_the_run_when_its_cleanup_fails(model: Model) -> None:
+    gate = asyncio.Event()
+    tool = EchoTool(wait=gate)
+    agent, _, events = make_agent(model, [tool_reply(("c1", "echo", {"text": "A"}))], [tool])
+
+    def fail_on_tool_results(event: AgentEvent) -> None:  # the store cannot write the Aborted results
+        if isinstance(event, MessageEnd) and isinstance(event.message, ToolResultMessage):
+            raise OSError("disk full")
+
+    agent.subscribe(fail_on_tool_results)
+    task = agent.start("go")
+    while tool.running < 1:
+        await asyncio.sleep(0.001)
+    agent.abort()
+    end = await task
+    assert (end.reason, end.error_message) == ("error", "OSError: disk full")
+    assert types(events)[-1] == "agent_end" and not agent.running
 
 
 async def test_abort_before_the_run_starts_ends_it_immediately(model: Model) -> None:

@@ -192,6 +192,9 @@ class SessionStore:
         if self._file is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._file = self.path.open("ab")
+            if _ends_mid_line(self.path):
+                # A crash cut the last line short. End it, or the next entry would join it and be lost too.
+                self._file.write(b"\n")
         if self._pending is not None:
             lines = self._pending + lines
             self._pending = None
@@ -222,9 +225,17 @@ def _read(path: Path) -> tuple[Header, list[Entry]]:
     return header, entries
 
 
+def _ends_mid_line(path: Path) -> bool:
+    with path.open("rb") as file:
+        if file.seek(0, os.SEEK_END) == 0:
+            return False
+        file.seek(-1, os.SEEK_END)
+        return file.read(1) != b"\n"
+
+
 def sessions_dir(home: Path, cwd: str) -> Path:
-    """Where sessions for `cwd` live: one directory per working directory."""
-    return home / "sessions" / re.sub(r"[\\/:]+", "-", cwd).strip("-")
+    """Where sessions for `cwd` live: one directory per working directory (the root directory gets "-")."""
+    return home / "sessions" / (re.sub(r"[\\/:]+", "-", cwd).strip("-") or "-")
 
 
 def find_session(home: Path, session_id: str) -> Path:

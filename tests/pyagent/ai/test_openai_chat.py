@@ -9,7 +9,7 @@ import pytest
 
 from ghc_api.pyagent.ai.events import BlockStart, MessageEvent
 from ghc_api.pyagent.ai.models import Model
-from ghc_api.pyagent.ai.provider import StreamOptions
+from ghc_api.pyagent.ai.provider import STREAM_CUT, StreamOptions
 from ghc_api.pyagent.ai.providers.openai_chat import build_request
 from ghc_api.pyagent.ai.stream import empty_reply, stream_assistant
 from ghc_api.pyagent.ai.types import (
@@ -105,6 +105,15 @@ async def test_http_errors_end_the_reply_with_the_provider_message(model: Model)
 async def test_stream_error_chunks_end_the_reply_as_error(model: Model) -> None:
     reply, _ = await run_stream(model, client_for(sse({"error": {"message": "overloaded"}})))
     assert (reply.stop_reason, reply.error_message) == ("error", "overloaded")
+
+
+async def test_a_stream_cut_before_its_finish_reason_is_an_error(model: Model) -> None:
+    call = {"index": 0, "id": "c1", "function": {"name": "bash", "arguments": '{"command": "rm'}}
+    reply, _ = await run_stream(model, client_for(sse({"choices": [{"delta": {"tool_calls": [call]}}]})))
+    assert (reply.stop_reason, reply.error_message) == ("error", STREAM_CUT)
+    # [DONE] without a finish reason is a complete stream from a lax server.
+    reply, _ = await run_stream(model, client_for(sse({"choices": [{"delta": {"content": "hi"}}]}, "[DONE]")))
+    assert (reply.stop_reason, reply.text()) == ("stop", "hi")
 
 
 def deepseek() -> Model:

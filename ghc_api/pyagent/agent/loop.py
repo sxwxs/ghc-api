@@ -1,7 +1,6 @@
 """The agent loop: stream a reply, run its tool calls, repeat until the model stops; aborts keep transcripts valid."""
 
 import asyncio
-import contextlib
 import sys
 import time
 import traceback
@@ -99,22 +98,32 @@ async def run(state: RunState, prompts: list[Message]) -> AgentEnd:
         task = asyncio.current_task()
         assert task is not None  # run() always executes inside the Agent's task
         task.uncancel()
-        _finish_aborted(state)
-        # Every await sits inside a turn, so an abort always interrupts an open turn.
-        state.emit(TurnEnd(turn=turn))
-        end = AgentEnd(reason="aborted")
+        end = _wind_down(state, turn, "Aborted", AgentEnd(reason="aborted"))
     except Exception as error:
         # A bug or a failing listener, such as a session store on a full disk. End the run rather than leave it
-        # running forever. The cleanup may fail the same way; replay answers any tool call it leaves open.
+        # running forever.
         traceback.print_exc(file=sys.stderr)
         if state.reply is not None and state.reply.stop_reason not in ("error", "aborted"):
             state.reply.stop_reason = "error"
-        with contextlib.suppress(Exception):
-            _finish_aborted(state, "Not run: the run failed")
-            state.emit(TurnEnd(turn=turn))
-        end = AgentEnd(reason="error", error_message=f"{type(error).__name__}: {error}")
+        end = _wind_down(state, turn, "Not run: the run failed", _failed(error))
     state.emit(end)
     return end
+
+
+def _wind_down(state: RunState, turn: int, note: str, end: AgentEnd) -> AgentEnd:
+    """Answer the open tool calls and close the turn; every await sits inside a turn, so one is open. A listener
+    failing here, e.g. the same full disk, must not stop agent_end; replay answers any call left open."""
+    try:
+        _finish_aborted(state, note)
+        state.emit(TurnEnd(turn=turn))
+    except Exception as error:
+        traceback.print_exc(file=sys.stderr)
+        return _failed(error)
+    return end
+
+
+def _failed(error: Exception) -> AgentEnd:
+    return AgentEnd(reason="error", error_message=f"{type(error).__name__}: {error}")
 
 
 def _append(state: RunState, message: Message) -> None:

@@ -8,7 +8,7 @@ import msgspec
 import pytest
 
 from ghc_api.pyagent.ai.models import Model
-from ghc_api.pyagent.ai.provider import StreamOptions
+from ghc_api.pyagent.ai.provider import STREAM_CUT, StreamOptions
 from ghc_api.pyagent.ai.providers.anthropic import build_request
 from ghc_api.pyagent.ai.stream import empty_reply, stream_assistant
 from ghc_api.pyagent.ai.types import (
@@ -80,6 +80,17 @@ async def test_streams_thinking_text_and_tool_use() -> None:
 async def test_error_events_end_the_reply_as_error() -> None:
     reply = await run_stream(sse({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))
     assert (reply.stop_reason, reply.error_message) == ("error", "Overloaded")
+
+
+async def test_a_stream_cut_before_the_stop_reason_is_an_error() -> None:
+    reply = await run_stream(
+        sse(
+            {"type": "message_start", "message": {"usage": {"input_tokens": 5}}},
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Half"}},
+        )
+    )
+    assert (reply.stop_reason, reply.error_message) == ("error", STREAM_CUT)
 
 
 def test_request_merges_tool_results_and_sets_cache_breakpoints() -> None:

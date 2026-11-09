@@ -44,6 +44,10 @@ class ProviderError(Exception):
         self.status = status
 
 
+# A stream that stops before its final event holds an unfinished reply: not one to keep or whose tools to run.
+STREAM_CUT = "The stream ended before the reply was complete"
+
+
 class Blocks:
     """Builds an assistant message's content blocks in place and returns the matching block events.
 

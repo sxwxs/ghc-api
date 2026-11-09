@@ -9,7 +9,7 @@ import msgspec
 from ..events import BlockEvent
 from ..http import raise_for_status, shared_client, sse_data
 from ..models import Model
-from ..provider import Blocks, ProviderError, StreamOptions
+from ..provider import STREAM_CUT, Blocks, ProviderError, StreamOptions
 from ..replay import replayable, same_model
 from ..types import (
     AssistantMessage,
@@ -45,6 +45,7 @@ async def stream(
         indices: dict[int, int] = {}
         usage = Usage()
         stop_reason: StopReason = "stop"
+        finished = False  # message_stop, or a message_delta carrying the stop reason
         async for data in sse_data(response):
             event = EVENT.decode(data)
             match event.type:
@@ -64,10 +65,15 @@ async def stream(
                         usage = _usage(event.usage, usage)
                     if event.delta is not None:
                         stop_reason = _stop_reason(event.delta.stop_reason, message)
+                        finished = finished or event.delta.stop_reason is not None
+                case "message_stop":
+                    finished = True
                 case "error":
                     raise ProviderError((event.error.message if event.error else None) or data)
                 case _:
                     pass
+        if not finished:
+            raise ProviderError(STREAM_CUT)
         for out in blocks.finish(model, stop_reason, usage):
             yield out
 
