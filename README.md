@@ -484,6 +484,8 @@ Once enabled, LLM endpoints (`/v1/chat/completions`, `/v1/messages`, `/v1/respon
 3. Admin opens the dashboard → **Code Agent Manager** → **Users** section → clicks **Approve** next to the new user. (Or `curl -X POST http://localhost:8313/api/users/<id>/approve`.)
 4. The user can now use the token. Revocation and deletion are available from the same panel.
 
+**Built-in pages**: the Chat page (`/chat`) and the Code Agent (`/agent`) call these endpoints too. ghc-api generates an internal token at each start (kept in memory only) and hands it to them; their requests are recorded as user `internal`, a name nobody can sign up with. Anyone who can open those pages can read the token, which is one more reason to keep them behind the reverse-proxy auth described in [Production Deployment](#production-deployment).
+
 **Token presentation** (middleware accepts any of these, first match wins):
 
 1. `Authorization: Bearer <token>` — OpenAI SDK, Claude Code (`ANTHROPIC_AUTH_TOKEN`), Codex, curl

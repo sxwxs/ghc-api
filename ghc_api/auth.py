@@ -13,6 +13,12 @@ Token presentation precedence (handled in extract_token):
 
 When state.enable_auth is False, callers should bypass require_auth entirely
 and tag requests with user_id="anonymous". The middleware in app.py does this.
+
+ghc-api's own pages and the /agent coding agent call the LLM endpoints too.
+They use INTERNAL_TOKEN, generated per process and never stored, which
+require_auth accepts as user "internal". Whoever can open those admin pages
+can read it, so they must stay behind the same reverse-proxy auth as
+/api/users/*, which can approve tokens anyway.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 
 ANONYMOUS_USER_ID = "anonymous"
+INTERNAL_USER_ID = "internal"
 TOKEN_PREFIX = "gha_"
 RELOAD_INTERVAL_SECONDS = 5.0
 REGISTRY_SCHEMA_VERSION = 1
@@ -63,6 +70,9 @@ class UserRecord:
 
 def generate_token() -> str:
     return f"{TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+
+
+INTERNAL_TOKEN = generate_token()
 
 
 def _registry_path() -> Path:
@@ -224,8 +234,8 @@ class UserRegistry:
             return None, "user_id is required"
         if len(user_id) > 64:
             return None, "user_id is too long (max 64 chars)"
-        if user_id == ANONYMOUS_USER_ID:
-            return None, f"'{ANONYMOUS_USER_ID}' is reserved"
+        if user_id in (ANONYMOUS_USER_ID, INTERNAL_USER_ID):
+            return None, f"'{user_id}' is reserved"
         # Keep IDs URL-safe and easy to type in the dashboard.
         for ch in user_id:
             if not (ch.isalnum() or ch in "_-."):
@@ -392,6 +402,9 @@ def require_auth(request) -> AuthResult:
             error_message="Provide an API token via 'Authorization: Bearer <token>', 'x-api-key: <token>', or '?api_key=<token>'.",
             http_status=401,
         )
+
+    if secrets.compare_digest(token.encode(), INTERNAL_TOKEN.encode()):
+        return AuthResult(user_id=INTERNAL_USER_ID)
 
     registry = get_user_registry()
     record = registry.lookup_by_token(token)

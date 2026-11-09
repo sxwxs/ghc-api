@@ -824,6 +824,14 @@
         // client-side and only the selected provider is declared to the model.
         const WEBIQ_TOOL_CHAT = {{ webiq_tool_chat | tojson }};
         const ANYSEARCH_TOOLS_CHAT = {{ anysearch_tools_chat | tojson }};
+        // With enable_auth, every endpoint this page calls needs a token. The server
+        // hands the page its per-process internal token (empty when auth is off).
+        const INTERNAL_TOKEN = {{ internal_token | tojson }};
+        function apiFetch(url, options = {}) {
+            if (!INTERNAL_TOKEN) return fetch(url, options);
+            const headers = {Authorization: 'Bearer ' + INTERNAL_TOKEN, ...(options.headers || {})};
+            return fetch(url, {...options, headers});
+        }
         const SEARCH_PROVIDERS = {
             webiq: {
                 available: WEBIQ_AVAILABLE, tools: [WEBIQ_TOOL_CHAT.function],
@@ -1264,7 +1272,7 @@
             modelsData = [];
 
             try {
-                const res = await fetch('/v1/models');
+                const res = await apiFetch('/v1/models');
                 const data = await res.json();
                 if (res.ok && Array.isArray(data.data)) copilotModels.push(...data.data);
             } catch {
@@ -1272,7 +1280,7 @@
             }
 
             try {
-                const proxyRes = await fetch('/proxy/models');
+                const proxyRes = await apiFetch('/proxy/models');
                 const proxyData = await proxyRes.json();
                 if (proxyRes.ok && Array.isArray(proxyData.data)) {
                     configuredModels.push(...proxyData.data);
@@ -1642,7 +1650,7 @@
                 // so it applies no defaults of its own: whatever is not sent here gets
                 // Microsoft's default (10 results, full HTML, 10000 chars), which would
                 // burn a lot of model tokens. The values below are this UI's policy.
-                const res = await fetch('/v3/search/web', {
+                const res = await apiFetch('/v3/search/web', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
@@ -1734,7 +1742,7 @@
                     options.body = JSON.stringify(extracting ? {url: args.url} :
                         {...args, max_results: args.max_results ?? 5, format: args.format ?? 'markdown'});
                 }
-                const res = await fetch(path + query, options);
+                const res = await apiFetch(path + query, options);
                 // Search AND Extract may return credentials in a raw 402.
                 // Never read/echo error bodies, even through a bad intermediary.
                 if (!res.ok) return failed('AnySearch failed: HTTP ' + res.status);
@@ -2029,7 +2037,7 @@
                 body.tool_choice = { type: toolChoice };
             }
             const headers = { 'Content-Type': 'application/json', ...extraHeaders };
-            const res = await fetch(endpoint, {
+            const res = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: headers,
                 body: JSON.stringify(body),
@@ -2211,7 +2219,7 @@
                 body.tool_choice = toolChoice;
             }
 
-            const res = await fetch(endpoint, {
+            const res = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -2435,7 +2443,7 @@
                 body.tool_choice = toolChoice;
             }
 
-            const res = await fetch(endpoint, {
+            const res = await apiFetch(endpoint, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
@@ -2706,7 +2714,7 @@
                     const modelKey = 'raw:' + document.getElementById('model-select').value + ':' + payload.model;
                     headers = { ...headers, ...configuredRequestHeaders(session, modelKey, target, '/messages') };
                 }
-                const res = await fetch(endpoint, {
+                const res = await apiFetch(endpoint, {
                     method: 'POST',
                     headers: headers,
                     body: JSON.stringify(payload),
@@ -2990,7 +2998,7 @@
             abortController = new AbortController();
             const startTime = performance.now();
             try {
-                const res = await fetch(endpoint, {
+                const res = await apiFetch(endpoint, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),

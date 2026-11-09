@@ -226,7 +226,7 @@ async function sendImageMessage() {
     const start = performance.now();
     scrollToBottom();
     try {
-        const response = await fetch(endpoint, options);
+        const response = await apiFetch(endpoint, options);
         const text = await response.text();
         let result;
         try { result = JSON.parse(text); } catch { result = {error: {message: text || 'Empty upstream response'}}; }

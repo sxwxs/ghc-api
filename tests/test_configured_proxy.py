@@ -1110,7 +1110,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn("fetch('/proxy/models')", html)
+        self.assertIn("apiFetch('/proxy/models')", html)
         self.assertIn("Configured proxy unavailable: ", html)
         self.assertIn("Configured proxy: ", html)
         self.assertIn("baseUrl + (apiStyle === 'responses'", html)
