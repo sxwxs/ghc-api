@@ -27,8 +27,9 @@ class TokenUsageReporter:
         self.interval_seconds = interval_seconds
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        # Keyed by (user_id, model) so we can emit per-user deltas.
-        self._last_snapshot: Dict[Tuple[str, str], Dict[str, int]] = cache.get_user_model_token_snapshot()
+        # Keyed by (user_id, provider, model) so we can emit per-user deltas
+        # with the upstream provider dimension needed for billing.
+        self._last_snapshot: Dict[Tuple[str, str, str], Dict[str, int]] = cache.get_user_provider_model_token_snapshot()
         self._write_lock = threading.Lock()
 
     def start(self) -> None:
@@ -57,7 +58,7 @@ class TokenUsageReporter:
         if not usage_file:
             return
 
-        current = cache.get_user_model_token_snapshot()
+        current = cache.get_user_provider_model_token_snapshot()
 
         # Group deltas by user so we emit one JSONL line per (timestamp, user_id)
         # with all of that user's per-model deltas in a single line. That keeps
@@ -66,7 +67,7 @@ class TokenUsageReporter:
 
         all_keys = set(self._last_snapshot.keys()) | set(current.keys())
         for key in sorted(all_keys):
-            user_id, model_name = key
+            user_id, provider, model_name = key
             prev = self._last_snapshot.get(key, {})
             now = current.get(key, {})
 
@@ -86,6 +87,7 @@ class TokenUsageReporter:
                 continue
 
             by_user.setdefault(user_id, []).append({
+                "provider": provider,
                 "model": model_name,
                 "request_count": delta_request_count,
                 "input_tokens": delta_input,

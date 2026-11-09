@@ -29,10 +29,10 @@ class ProxyChatCompletionsStreamHandler(SSEStreamHandler):
         usage = event.get("usage")
         if not isinstance(usage, dict):
             return
-        self.input_tokens = usage.get("prompt_tokens", 0)
+        cached_tokens = (usage.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
+        self.input_tokens = usage.get("prompt_tokens", 0) - cached_tokens
         self.output_tokens = usage.get("completion_tokens", 0)
-        details = usage.get("prompt_tokens_details", {}) or {}
-        self.cache_read_input_tokens = details.get("cached_tokens", 0)
+        self.cache_read_input_tokens = cached_tokens
 
     def forward_event(
         self, event_type: str, event: Dict, raw_data: str

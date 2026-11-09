@@ -49,6 +49,7 @@ from ..utils import (
     log_connection_retry,
     log_error_request,
     remove_encrypted_content_items,
+    responses_usage_counts,
 )
 from ..webiq import LEGACY_OPTION_MESSAGE, pop_legacy_option
 
@@ -815,6 +816,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
         response_data = {}
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation_input_tokens = 0
         total_cache_read_input_tokens = 0
         status_code = response.status_code
         error_occurred = False
@@ -932,9 +934,11 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                         response_data = event.get("response", {}) or {}
                         usage = response_data.get("usage", {})
                         chat_usage = _responses_usage_to_chat_usage(usage)
-                        total_input_tokens = chat_usage.get("prompt_tokens", 0)
-                        total_output_tokens = chat_usage.get("completion_tokens", 0)
-                        total_cache_read_input_tokens = chat_usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                        counts = responses_usage_counts(usage)
+                        total_input_tokens = counts["input_tokens"]
+                        total_output_tokens = counts["output_tokens"]
+                        total_cache_creation_input_tokens = counts["cache_creation_input_tokens"]
+                        total_cache_read_input_tokens = counts["cache_read_input_tokens"]
                         if not role_sent:
                             role_chunk = _chat_completion_chunk(
                                 chunk_id,
@@ -1011,6 +1015,7 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
             "response_size": sum(len(json.dumps(c)) for c in response_chunks),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
+            "cache_creation_input_tokens": total_cache_creation_input_tokens,
             "cache_read_input_tokens": total_cache_read_input_tokens,
             "duration": duration,
             "user_id": user_id,
@@ -1106,7 +1111,9 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
     if response.ok:
         responses_body = response.json()
         result = _responses_to_chat_completion(responses_body, original_model)
-        usage = result.get("usage", {})
+        usage_counts = responses_usage_counts(
+            responses_body.get("usage") if isinstance(responses_body, dict) else None
+        )
         cache.add_request(request_id, {
             "request_headers": request_headers,
             "client_ip": client_ip,
@@ -1119,9 +1126,7 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
             "status_code": response.status_code,
             "request_size": request_size,
             "response_size": len(json.dumps(result)),
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-            "cache_read_input_tokens": usage.get("prompt_tokens_details", {}).get("cached_tokens", 0),
+            **usage_counts,
             "duration": duration,
             "user_id": user_id,
         })
@@ -1707,7 +1712,7 @@ def chat_completions():
                 "status_code": response.status_code,
                 "request_size": request_size,
                 "response_size": response_size,
-                "input_tokens": usage.get("prompt_tokens", 0),
+                "input_tokens": usage.get("prompt_tokens", 0) - cached_tokens,
                 "output_tokens": usage.get("completion_tokens", 0),
                 "cache_read_input_tokens": cached_tokens,
                 "duration": duration,
@@ -1817,8 +1822,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                         # Track tokens from streaming chunks
                         if chunk.get("usage"):
                             total_output_tokens = chunk["usage"].get("completion_tokens", 0)
-                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
                             total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
 
                         yield f"data: {json.dumps(chunk)}\n\n"
                     except json.JSONDecodeError:
@@ -2081,7 +2086,7 @@ def responses():
         if response.ok:
             result = response.json()
 
-            usage = result.get("usage", {})
+            usage_counts = responses_usage_counts(result.get("usage") if isinstance(result, dict) else None)
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "client_ip": client_ip,
@@ -2094,9 +2099,7 @@ def responses():
                 "status_code": response.status_code,
                 "request_size": request_size,
                 "response_size": response_size,
-                "input_tokens": usage.get("input_tokens", 0),
-                "output_tokens": usage.get("output_tokens", 0),
-                "cache_creation_input_tokens": usage.get("input_tokens_details", {}).get("cached_tokens", 0),
+                **usage_counts,
                 "duration": duration,
                 "user_id": user_id,
             })

@@ -62,7 +62,8 @@ def test_generate_passthrough_and_usage(api, path):
     assert post.call_args.kwargs["json"] == BODY
     assert post.call_args.kwargs["headers"]["X-Initiator"] == "user"
     record = cache.complete_request.call_args.args[1]
-    assert record["input_tokens"] == 30
+    # input_tokens is the uncached slice: 30 total - 5 cached reads.
+    assert record["input_tokens"] == 25
     assert record["output_tokens"] == 196
     assert record["cache_read_input_tokens"] == 5
     assert record["request_headers"]["Authorization"] == "***REDACTED***"

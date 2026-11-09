@@ -391,6 +391,34 @@ def is_encrypted_content_error(error: Any) -> bool:
     )
 
 
+def _usage_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return int(value)
+
+
+def responses_usage_counts(usage: Any) -> Dict[str, int]:
+    """Split OpenAI Responses usage into cache-record token counts.
+
+    Responses ``input_tokens`` includes cached reads (``cached_tokens``) and
+    cache writes (``cache_write_tokens``, reported by Copilot for some models).
+    Cache records use the semantics shared by every upstream: ``input_tokens``
+    is the uncached slice, with reads and writes counted separately (the same
+    split as the Anthropic compatibility translation).
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("input_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    cache_read = _usage_count(details.get("cached_tokens"))
+    cache_write = _usage_count(details.get("cache_write_tokens"))
+    return {
+        "input_tokens": max(0, _usage_count(usage.get("input_tokens")) - cache_read - cache_write),
+        "output_tokens": _usage_count(usage.get("output_tokens")),
+        "cache_creation_input_tokens": cache_write,
+        "cache_read_input_tokens": cache_read,
+    }
+
+
 def _contains_encrypted_content(value: Any, depth: int = 0) -> bool:
     if depth > _MAX_ENCRYPTED_SCAN_DEPTH:
         return False

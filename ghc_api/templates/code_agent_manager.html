@@ -261,9 +261,42 @@
                             <th>Data Send</th>
                             <th>Data Recieve</th>
                             <th>Total Data</th>
+                            <th>Cost (USD)</th>
                         </tr>
                     </thead>
                     <tbody id="token-usage-body"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>LLM Pricing</h2>
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap;">
+                <button onclick="refreshPriceCatalog()">Refresh Auto Prices</button>
+                <button onclick="loadBillingPrices()">Reload Overrides</button>
+                <span id="pricing-status" style="color:#888; font-size:12px;"></span>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px; align-items:flex-end;">
+                <div><label>Model<br><input id="price-override-model" type="text" size="22"></label></div>
+                <div><label>Input $/1M<br><input id="price-override-input" type="number" step="any" min="0" size="8"></label></div>
+                <div><label>Output $/1M<br><input id="price-override-output" type="number" step="any" min="0" size="8"></label></div>
+                <div><label>Cache Read $/1M<br><input id="price-override-cache-read" type="number" step="any" min="0" size="8"></label></div>
+                <div><label>Cache Write $/1M<br><input id="price-override-cache-write" type="number" step="any" min="0" size="8"></label></div>
+                <button onclick="addPriceOverride()">Save Override</button>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Model</th>
+                            <th>Input $/1M</th>
+                            <th>Output $/1M</th>
+                            <th>Cache Read $/1M</th>
+                            <th>Cache Write $/1M</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="price-overrides-body"></tbody>
                 </table>
             </div>
         </div>
@@ -336,6 +369,7 @@
 
     <script>
         let tokenUsageOverviewData = { machines: [], rows: [] };
+        let billingOverviewData = null;
         let tokenUsageSelectedMachines = new Set();
 
         function formatNumber(value) {
@@ -422,6 +456,8 @@
             const tbody = document.getElementById("token-usage-body");
             tbody.innerHTML = "";
 
+            const costsByModel = billingCostsByModel();
+
             const selectedRows = (tokenUsageOverviewData.rows || []).filter((row) =>
                 tokenUsageSelectedMachines.has(row.machine)
             );
@@ -491,19 +527,30 @@
                     <td>${formatNumber(row.data_sent || 0)}</td>
                     <td>${formatNumber(row.data_received || 0)}</td>
                     <td>${formatNumber(row.total_data || 0)}</td>
+                    <td>${formatModelCost(costsByModel, row.model_id)}</td>
                 `;
                 tbody.appendChild(tr);
             }
 
             if (modelRows.length === 0) {
                 const tr = document.createElement("tr");
-                tr.innerHTML = "<td colspan=\"10\">No token usage in selected range/machines.</td>";
+                tr.innerHTML = "<td colspan=\"11\">No token usage in selected range/machines.</td>";
                 tbody.appendChild(tr);
                 return;
             }
 
             const sumRow = document.createElement("tr");
             sumRow.className = "sum-row";
+            let totalCostCell = "—";
+            if (costsByModel) {
+                let totalCostMicros = 0;
+                let partial = false;
+                for (const entry of costsByModel.values()) {
+                    totalCostMicros += entry.micros;
+                    partial = partial || entry.unpriced;
+                }
+                totalCostCell = formatCostMicros(totalCostMicros) + (partial ? " (partial)" : "");
+            }
             sumRow.innerHTML = `
                 <td>Sum</td>
                 <td>${formatNumber(sum.request_count)}</td>
@@ -515,8 +562,35 @@
                 <td>${formatNumber(sum.data_sent)}</td>
                 <td>${formatNumber(sum.data_received)}</td>
                 <td>${formatNumber(sum.total_data)}</td>
+                <td>${totalCostCell}</td>
             `;
             tbody.appendChild(sumRow);
+        }
+
+        // model_id -> { micros, unpriced } over the selected machines, or null
+        // when billing data is unavailable (so costs never silently show 0).
+        function billingCostsByModel() {
+            if (!billingOverviewData || !Array.isArray(billingOverviewData.rows)) return null;
+            const costs = new Map();
+            for (const row of billingOverviewData.rows) {
+                if (!tokenUsageSelectedMachines.has(row.machine)) continue;
+                const entry = costs.get(row.model_id) || { micros: 0, unpriced: false };
+                entry.micros += row.cost_micro_usd || 0;
+                entry.unpriced = entry.unpriced || !!row.unpriced;
+                costs.set(row.model_id, entry);
+            }
+            return costs;
+        }
+
+        // "—" = billing unavailable, or not billed (e.g. non-Copilot provider).
+        function formatModelCost(costs, modelId) {
+            const entry = costs ? costs.get(modelId) : null;
+            if (!entry) return "—";
+            return entry.unpriced ? "Unpriced" : formatCostMicros(entry.micros);
+        }
+
+        function formatCostMicros(micros) {
+            return (micros / 1e6).toFixed(4);
         }
 
         function formatCompact(n) {
@@ -644,13 +718,38 @@
         async function refreshTokenUsageOverview(resetSelection = false) {
             const rangeValue = document.getElementById("token-usage-range").value;
             try {
-                const data = await fetchTokenUsageOverview(rangeValue);
+                const [data, billing] = await Promise.all([
+                    fetchTokenUsageOverview(rangeValue),
+                    fetchBillingOverview(rangeValue),
+                ]);
                 tokenUsageOverviewData = data;
+                billingOverviewData = billing;
                 renderMachineFilters(data.machines || [], resetSelection);
                 renderTokenUsageTable();
                 renderUsageChart();
             } catch (error) {
                 setStatus("Failed to load token usage: " + (error.message || error), "error");
+            }
+        }
+
+        async function fetchBillingOverview(rangeKey) {
+            const userSel = document.getElementById('token-usage-user');
+            const userFilter = userSel ? userSel.value : '';
+            const params = new URLSearchParams({ range: rangeKey });
+            if (userFilter) {
+                params.set('user', userFilter);
+            }
+            try {
+                const response = await fetch("/api/config-manager/billing?" + params.toString());
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || ("Failed to load billing (" + response.status + ")"));
+                }
+                return data;
+            } catch (error) {
+                // Billing is additive; keep the token table working without it.
+                console.warn("Billing overview unavailable:", error);
+                return null;
             }
         }
 
@@ -795,7 +894,116 @@
         async function refreshAll() {
             await refreshTokenStatus();
             await refreshTokenUsageOverview(false);
+            await loadBillingPrices();
             await loadUsersAdmin();
+        }
+
+        async function loadBillingPrices() {
+            const statusEl = document.getElementById("pricing-status");
+            const tbody = document.getElementById("price-overrides-body");
+            if (!statusEl || !tbody) return;
+            try {
+                const response = await fetch("/api/config-manager/billing/prices");
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || ("Failed to load prices (" + response.status + ")"));
+                }
+                const catalog = data.catalog || {};
+                const fetchedAt = catalog.fetched_at ? formatTimestamp(catalog.fetched_at) : "never";
+                const overrideCount = Object.keys(data.overrides || {}).length;
+                statusEl.textContent = `Auto catalog: ${catalog.model_count || 0} models, fetched ${fetchedAt}; manual overrides: ${overrideCount}`;
+                tbody.innerHTML = "";
+                const models = Object.keys(data.overrides || {}).sort();
+                if (models.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="color:#888;">No manual overrides. Prices resolve from the auto catalog or builtin defaults.</td></tr>';
+                    return;
+                }
+                for (const model of models) {
+                    const p = data.overrides[model];
+                    const tr = document.createElement("tr");
+                    tr.innerHTML = `
+                        <td>${escapeHtml(model)}</td>
+                        <td>${p.input_per_1m ?? ""}</td>
+                        <td>${p.output_per_1m ?? ""}</td>
+                        <td>${p.cache_read_per_1m ?? ""}</td>
+                        <td>${p.cache_write_per_1m ?? ""}</td>
+                        <td><button>Delete</button></td>
+                    `;
+                    // Bind as data, never interpolate the model name into JS.
+                    tr.querySelector("button").addEventListener("click", () => deletePriceOverride(model));
+                    tbody.appendChild(tr);
+                }
+            } catch (error) {
+                statusEl.textContent = "Failed to load pricing: " + (error.message || error);
+            }
+        }
+
+        async function refreshPriceCatalog() {
+            const statusEl = document.getElementById("pricing-status");
+            statusEl.textContent = "Refreshing price catalog...";
+            try {
+                const response = await fetch("/api/config-manager/billing/prices/refresh", { method: "POST" });
+                const data = await response.json();
+                if (!response.ok || !data.ok) {
+                    throw new Error(data.error || ("Refresh failed (" + response.status + ")"));
+                }
+                setStatus("Price catalog refreshed: " + (data.count || 0) + " models.", "success");
+            } catch (error) {
+                setStatus("Price catalog refresh failed: " + (error.message || error), "error");
+            }
+            await loadBillingPrices();
+            await refreshTokenUsageOverview(false);
+        }
+
+        async function addPriceOverride() {
+            const model = document.getElementById("price-override-model").value.trim();
+            if (!model) {
+                setStatus("Model is required to save a price override.", "error");
+                return;
+            }
+            // Empty means "not set"; 0 is a valid price (free model).
+            const optionalPrice = (id) => {
+                const raw = document.getElementById(id).value.trim();
+                return raw === "" ? null : Number(raw);
+            };
+            const body = {
+                model,
+                input_per_1m: optionalPrice("price-override-input"),
+                output_per_1m: optionalPrice("price-override-output"),
+                cache_read_per_1m: optionalPrice("price-override-cache-read"),
+                cache_write_per_1m: optionalPrice("price-override-cache-write"),
+            };
+            try {
+                const response = await fetch("/api/config-manager/billing/prices", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body),
+                });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || ("Failed to save override (" + response.status + ")"));
+                }
+                setStatus("Price override saved for " + model + ".", "success");
+                await loadBillingPrices();
+                await refreshTokenUsageOverview(false);
+            } catch (error) {
+                setStatus("Failed to save price override: " + (error.message || error), "error");
+            }
+        }
+
+        async function deletePriceOverride(model) {
+            try {
+                const response = await fetch("/api/config-manager/billing/prices/" + encodeURIComponent(model), { method: "DELETE" });
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || ("Failed to delete override (" + response.status + ")"));
+                }
+                setStatus("Price override removed for " + model + ".", "success");
+                await loadBillingPrices();
+                await refreshTokenUsageOverview(false);
+            } catch (error) {
+                setStatus("Failed to delete price override: " + (error.message || error), "error");
+            }
         }
 
         async function loadUsersAdmin() {

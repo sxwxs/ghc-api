@@ -107,6 +107,11 @@ class GeminiResponsesTest(unittest.TestCase):
         self.assertEqual(self.post.call_args.kwargs["headers"]["X-Initiator"], "user")
         entry = next(iter(self.cache.cache.values()))
         self.assertEqual(entry["endpoint"], "/v1/responses")
+        # Non-streaming /v1/responses stores the uncached slice and counts
+        # cached tokens as reads (not cache writes): 10 total - 2 cached.
+        self.assertEqual(entry["input_tokens"], 8)
+        self.assertEqual(entry["cache_read_input_tokens"], 2)
+        self.assertEqual(entry["cache_creation_input_tokens"], 0)
         self.assertEqual(entry["output_tokens"], 3)
 
     def test_model_alias_and_responses_alias(self):
