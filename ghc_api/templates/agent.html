@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code Agent</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-dark.svg') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='nav.css') }}">
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: #f5f5f5; color: #333; height: 100vh; overflow: hidden; }
+        button, select, input, textarea { font: inherit; }
+        button { padding: 0.35rem 0.8rem; border: 1px solid #ccc; border-radius: 6px; background: #fff; cursor: pointer; }
+        button:hover { background: #f0f0f0; }
+        button.primary { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #fff; border: none; }
+        button.danger { color: #b00020; border-color: #e0a0a8; }
+        .main { display: flex; height: calc(100vh - var(--nav-height, 70px)); }
+        .muted { color: #888; font-size: 0.85em; }
+
+        /* Sidebar */
+        .sidebar { width: 300px; flex-shrink: 0; background: #fff; border-right: 1px solid #e0e0e0;
+                   display: flex; flex-direction: column; }
+        #new-form { padding: 0.8rem; border-bottom: 1px solid #eee; display: flex; flex-direction: column; gap: 0.5rem; }
+        #new-form input { width: 100%; padding: 0.4rem; border: 1px solid #ccc; border-radius: 6px; }
+        .sidebar-title { display: flex; justify-content: space-between; align-items: center;
+                         padding: 0.5rem 0.8rem; font-weight: 600; font-size: 0.9rem; }
+        #session-list { overflow-y: auto; flex: 1; }
+        .session-item { padding: 0.5rem 0.8rem; border-bottom: 1px solid #f2f2f2; cursor: pointer; }
+        .session-item:hover { background: #f7f7fb; }
+        .session-item.active { background: #eef0ff; }
+        .session-item .name { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Session pane */
+        .pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+        .session-bar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem;
+                       padding: 0.5rem 1rem; background: #fff; border-bottom: 1px solid #e0e0e0; }
+        .session-bar .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+        .session-bar select { padding: 0.3rem; border: 1px solid #ccc; border-radius: 6px; max-width: 260px; }
+        .status.running { color: #2e7d32; font-weight: 600; }
+        #transcript { flex: 1; overflow-y: auto; padding: 1rem 1.5rem; }
+        .empty { color: #999; text-align: center; margin-top: 4rem; }
+        .msg { margin: 0 0 1rem; max-width: 1100px; }
+        .msg.user { background: #eef0ff; border-radius: 8px; padding: 0.6rem 0.8rem; white-space: pre-wrap; }
+        .msg.user img { max-width: 320px; display: block; margin-top: 0.4rem; }
+        .text { white-space: pre-wrap; line-height: 1.55; margin: 0.3rem 0; }
+        .text pre, .tool pre { white-space: pre-wrap; word-break: break-word; background: #f6f8fa; border-radius: 6px;
+                               padding: 0.5rem 0.7rem; margin: 0.3rem 0; font-size: 0.85rem; }
+        .text code { background: #f0f0f0; border-radius: 4px; padding: 0 0.25rem; font-size: 0.9em; }
+        .text pre code { background: none; padding: 0; }
+        details.thinking { color: #666; margin: 0.3rem 0; }
+        details.thinking pre { white-space: pre-wrap; font-family: inherit; font-size: 0.9rem; margin: 0.3rem 0 0 1rem; }
+        details.tool { border: 1px solid #e3e3e3; border-left: 3px solid #667eea; border-radius: 6px; background: #fff;
+                       margin: 0.4rem 0; padding: 0.3rem 0.6rem; }
+        details.tool.error { border-left-color: #c62828; }
+        details.tool summary { cursor: pointer; font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .tool-name { font-weight: 600; font-family: Consolas, monospace; }
+        .tool-status { float: right; font-size: 0.8rem; color: #888; }
+        .tool-output { max-height: 400px; overflow-y: auto; }
+        .tool-output .add { color: #1b5e20; background: #e8f5e9; }
+        .tool-output .del { color: #b71c1c; background: #ffebee; }
+        .tool-output .hunk { color: #5c6bc0; }
+        .note { font-size: 0.85rem; padding: 0.3rem 0.6rem; border-radius: 6px; margin: 0.3rem 0; }
+        .note.error { background: #ffebee; color: #b71c1c; }
+        .note.aborted, .note.length { background: #fff8e1; color: #8d6e00; }
+        #queue { padding: 0.3rem 1.5rem; font-size: 0.85rem; color: #555; background: #fffde7; }
+        #error { padding: 0.4rem 1.5rem; font-size: 0.85rem; color: #b71c1c; background: #ffebee; white-space: pre-wrap; }
+        #composer { display: flex; gap: 0.5rem; padding: 0.8rem 1rem; background: #fff; border-top: 1px solid #e0e0e0; }
+        #input { flex: 1; resize: vertical; min-height: 3rem; padding: 0.5rem; border: 1px solid #ccc; border-radius: 6px; }
+        .composer-actions { display: flex; flex-direction: column; gap: 0.4rem; }
+    </style>
+</head>
+<body>
+<nav class="navbar" id="app-nav" data-title="Code Agent" data-active="/agent"></nav>
+<script src="{{ url_for('static', filename='nav.js') }}"></script>
+<div class="main">
+    <aside class="sidebar">
+        <form id="new-form">
+            <input id="new-cwd" list="cwd-list" placeholder="Working directory on this server" required>
+            <datalist id="cwd-list"></datalist>
+            <button type="submit" class="primary">New session</button>
+        </form>
+        <div class="sidebar-title">Sessions <button id="refresh" type="button" title="Refresh">↻</button></div>
+        <div id="session-list"></div>
+    </aside>
+    <section class="pane">
+        <header class="session-bar" id="session-bar" hidden>
+            <div><strong id="s-name"></strong> <span id="s-cwd" class="muted"></span></div>
+            <div class="controls">
+                <select id="s-model" title="Model (from the next run on)"></select>
+                <select id="s-thinking" title="Thinking level">
+                    <option>off</option><option>low</option><option>medium</option><option>high</option><option>max</option>
+                </select>
+                <span id="s-usage" class="muted"></span>
+                <span id="s-status" class="status"></span>
+                <button id="s-rename" type="button">Rename</button>
+                <button id="s-close" type="button" title="Abort any run and release the session; it stays saved">Close</button>
+            </div>
+        </header>
+        <div id="transcript"><div class="empty">Pick a session, or start one in a working directory on this server.</div></div>
+        <div id="queue" hidden></div>
+        <div id="error" hidden></div>
+        <form id="composer" hidden>
+            <textarea id="input" rows="3" placeholder="Ask the agent… (Enter sends, Shift+Enter adds a line; while it works, messages are queued)"></textarea>
+            <div class="composer-actions">
+                <button type="submit" class="primary" id="send">Send</button>
+                <button type="button" class="danger" id="abort" hidden>Abort</button>
+            </div>
+        </form>
+    </section>
+</div>
+<script>
+    // Speaks pyagent's protocol (docs/pyagent/protocol.md) through /api/agent/rpc, and follows the
+    // open session's events over SSE.
+    const MODEL_KEY = 'ghc_agent_model';
+    const THINKING_KEY = 'ghc_agent_thinking';
+    const $ = id => document.getElementById(id);
+
+    let current = null;           // SessionState of the open session
+    let lastSeq = 0;
+    let source = null;            // EventSource
+    let lastResync = 0;
+    let models = [];
+    const messageEls = new Map(); // message id -> element
+    const streaming = new Map();  // assistant message id -> blocks being streamed
+    const toolCards = new Map();  // tool call id -> card element
+    const toolResults = new Map(); // tool call id -> ToolResult
+
+    async function rpc(method, params = {}) {
+        const res = await fetch('/api/agent/rpc', {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({method, params}),
+        });
+        let body;
+        try { body = await res.json(); } catch { throw new Error(`${method} failed: HTTP ${res.status}`); }
+        if (body.error) throw new Error(body.error.message || `${method} failed: HTTP ${res.status}`);
+        return body.result;
+    }
+
+    function showError(err) {
+        $('error').textContent = err ? String(err.message || err) : '';
+        $('error').hidden = !err;
+    }
+
+    function esc(s) {
+        return String(s).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+    }
+
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text != null) node.textContent = text;
+        return node;
+    }
+
+    // Enough Markdown for agent replies: fenced code, inline code, bold, headings. Everything is escaped first.
+    function markdown(text) {
+        return String(text).split(/```[^\n]*\n?([\s\S]*?)```/g).map((part, i) => i % 2
+            ? `<pre><code>${esc(part.replace(/\n$/, ''))}</code></pre>`
+            : esc(part).replace(/`([^`\n]+)`/g, '<code>$1</code>')
+                .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+                .replace(/^#{1,6} (.+)$/gm, '<strong>$1</strong>')).join('');
+    }
+
+    function fmt(n) {
+        return n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(n || 0);
+    }
+
+    function nearBottom() {
+        const t = $('transcript');
+        return t.scrollHeight - t.scrollTop - t.clientHeight < 80;
+    }
+
+    function scrollDown(force) {
+        if (force || nearBottom()) $('transcript').scrollTop = $('transcript').scrollHeight;
+    }
+
+    // ---- Sessions ----
+
+    async function loadSessions() {
+        const {sessions} = await rpc('session/list', {all: true});
+        const list = $('session-list');
+        list.innerHTML = '';
+        for (const s of sessions) {
+            const item = el('div', 'session-item');
+            item.dataset.id = s.sessionId;
+            item.title = s.cwd;
+            item.appendChild(el('div', 'name', s.name || s.firstMessage || '(no messages)'));
+            const dir = s.cwd.split(/[\\/]/).filter(Boolean).pop() || s.cwd;
+            item.appendChild(el('div', 'muted', `${dir} · ${new Date(s.updatedAt).toLocaleString()} · ${s.messageCount} msgs`));
+            item.onclick = () => openSession(s.sessionId).catch(showError);
+            list.appendChild(item);
+        }
+        const cwds = [...new Set(sessions.map(s => s.cwd))].slice(0, 30);
+        $('cwd-list').innerHTML = cwds.map(c => `<option value="${esc(c)}">`).join('');
+        if (!$('new-cwd').value && cwds.length) $('new-cwd').value = cwds[0];
+        markActive();
+    }
+
+    function markActive() {
+        for (const item of $('session-list').children) {
+            item.classList.toggle('active', !!current && item.dataset.id === current.sessionId);
+        }
+    }
+
+    async function loadModels() {
+        models = (await rpc('config/models')).models.filter(m => m.available);
+        $('s-model').innerHTML = models.map(m => {
+            const label = m.provider === 'ghc-api' ? m.id : `${m.id} (${m.provider})`;
+            return `<option value="${esc(JSON.stringify([m.provider, m.id]))}">${esc(label)}</option>`;
+        }).join('');
+    }
+
+    async function newSession(event) {
+        event.preventDefault();
+        const params = {cwd: $('new-cwd').value.trim()};
+        const saved = JSON.parse(localStorage.getItem(MODEL_KEY) || 'null');
+        if (saved && models.some(m => m.provider === saved[0] && m.id === saved[1])) {
+            params.provider = saved[0];
+            params.model = saved[1];
+        }
+        const thinking = localStorage.getItem(THINKING_KEY);
+        if (thinking) params.thinking = thinking;
+        showSession(await rpc('session/new', params), []);
+        $('input').focus();
+    }
+
+    async function openSession(sessionId) {
+        const state = await rpc('session/load', {sessionId});
+        const {messages} = await rpc('session/messages', {sessionId});
+        showSession(state, messages);
+    }
+
+    function showSession(state, messages) {
+        if (source) source.close();
+        showError(null);
+        current = state;
+        lastSeq = state.lastSeq;
+        messageEls.clear(); streaming.clear(); toolCards.clear(); toolResults.clear();
+        $('transcript').innerHTML = '';
+        for (const message of messages) addMessage(message);
+        if (!messages.length) $('transcript').appendChild(el('div', 'empty', 'New session in ' + state.cwd));
+        $('session-bar').hidden = false;
+        $('composer').hidden = false;
+        renderState(state);
+        scrollDown(true);
+        markActive();
+        history.replaceState(null, '', '#' + state.sessionId);
+        subscribe();
+    }
+
+    function subscribe() {
+        const sessionId = current.sessionId;
+        source = new EventSource(`/api/agent/sessions/${encodeURIComponent(sessionId)}/events?since=${lastSeq}`);
+        source.onmessage = e => {
+            const envelope = JSON.parse(e.data);
+            if (!current || envelope.sessionId !== current.sessionId) return;
+            lastSeq = envelope.seq;
+            handle(envelope.event);
+        };
+        // The session is not open on the server any more, or we missed events: reload it.
+        source.addEventListener('resync', () => {
+            source.close();
+            source = null;
+            if (!current || current.sessionId !== sessionId) return;
+            if (Date.now() - lastResync < 3000) {
+                showError('Lost the event stream; reopen the session to continue.');
+                return;
+            }
+            lastResync = Date.now();
+            openSession(sessionId).catch(showError);
+        });
+    }
+
+    function renderState(state) {
+        current = state;
+        $('s-name').textContent = state.name || 'Session ' + state.sessionId;
+        $('s-cwd').textContent = state.cwd;
+        const value = JSON.stringify([state.model.provider, state.model.id]);
+        if (![...$('s-model').options].some(o => o.value === value)) {
+            $('s-model').add(new Option(`${state.model.id} (unavailable)`, value));
+        }
+        $('s-model').value = value;
+        $('s-thinking').value = state.thinking;
+        const u = state.usage || {};
+        const ctx = state.contextWindow ? Math.round(100 * state.contextTokens / state.contextWindow) : 0;
+        $('s-usage').textContent = `context ${fmt(state.contextTokens)}/${fmt(state.contextWindow)} (${ctx}%) · `
+            + `in ${fmt(u.input)} out ${fmt(u.output)} cached ${fmt(u.cacheRead)}`;
+        setRunning(state.running);
+        renderQueue(state.queue.steering, state.queue.followUp);
+    }
+
+    function setRunning(running) {
+        $('s-status').textContent = running ? 'running…' : 'idle';
+        $('s-status').classList.toggle('running', running);
+        $('abort').hidden = !running;
+        $('send').textContent = running ? 'Queue' : 'Send';
+    }
+
+    function renderQueue(steering, followUp) {
+        const queued = [...(steering || []), ...(followUp || [])];
+        $('queue').hidden = !queued.length;
+        $('queue').textContent = queued.length ? 'Queued: ' + queued.map(t => '“' + t + '”').join('  ') : '';
+    }
+
+    // ---- Messages ----
+
+    function addMessage(message) {
+        if (message.role === 'tool_result') {
+            setToolResult(message.toolCallId, message);
+            return;
+        }
+        const node = renderMessage(message);
+        const old = messageEls.get(message.id);
+        if (old) old.replaceWith(node); else $('transcript').appendChild(node);
+        messageEls.set(message.id, node);
+    }
+
+    function renderMessage(message) {
+        const node = el('div', 'msg ' + message.role);
+        for (const block of message.content) {
+            if (block.type === 'text') {
+                if (message.role === 'user') node.appendChild(document.createTextNode(block.text));
+                else { const text = el('div', 'text'); text.innerHTML = markdown(block.text); node.appendChild(text); }
+            } else if (block.type === 'image') {
+                const img = el('img');
+                img.src = `data:${block.mimeType};base64,${block.data}`;
+                node.appendChild(img);
+            } else if (block.type === 'thinking') {
+                node.appendChild(thinkingBlock(block.redacted ? '(redacted)' : block.thinking, false));
+            } else if (block.type === 'tool_call') {
+                node.appendChild(toolCard(block.id, block.name, block.arguments));
+            }
+        }
+        const notes = {error: message.errorMessage || 'The model call failed.', aborted: 'Aborted.',
+                       length: 'Stopped at the output token limit.'};
+        if (notes[message.stopReason]) node.appendChild(el('div', 'note ' + message.stopReason, notes[message.stopReason]));
+        return node;
+    }
+
+    function thinkingBlock(text, open) {
+        const node = el('details', 'thinking');
+        node.open = open;
+        node.appendChild(el('summary', null, 'Thinking'));
+        node.appendChild(el('pre', null, text));
+        return node;
+    }
+
+    function toolTitle(name, args) {
+        if (!args) return '';
+        return args.command || args.path || JSON.stringify(args).slice(0, 120);
+    }
+
+    function toolCard(id, name, args) {
+        let card = toolCards.get(id);
+        if (!card) {
+            card = el('details', 'tool');
+            const summary = el('summary');
+            summary.append(el('span', 'tool-name', name), ' ', el('span', 'tool-title'), el('span', 'tool-status'));
+            card.append(summary, el('pre', 'tool-args'), el('pre', 'tool-output'));
+            card.querySelector('.tool-output').hidden = true;
+            toolCards.set(id, card);
+        }
+        if (args) {
+            card.querySelector('.tool-args').textContent = JSON.stringify(args, null, 2);
+            const title = card.querySelector('.tool-title');
+            if (!title.textContent) title.textContent = toolTitle(name, args);
+        }
+        const result = toolResults.get(id);
+        if (result) showToolResult(card, result, false);
+        return card;
+    }
+
+    function setToolResult(id, result) {
+        toolResults.set(id, result);
+        const card = toolCards.get(id);
+        if (card) showToolResult(card, result, false);
+    }
+
+    function showToolResult(card, result, partial) {
+        const out = card.querySelector('.tool-output');
+        const text = (result.content || []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+        const diff = result.details && result.details.diff;
+        out.innerHTML = esc(text) + (diff ? '\n\n' + diff.split('\n').map(line => {
+            const cls = line.startsWith('@@') ? 'hunk' : line.startsWith('+') ? 'add' : line.startsWith('-') ? 'del' : '';
+            return `<span class="${cls}">${esc(line)}</span>`;
+        }).join('\n') : '');
+        out.hidden = false;
+        card.classList.toggle('error', !!result.isError);
+        if (!partial) card.querySelector('.tool-status').textContent = result.isError ? 'failed' : 'done';
+        if (partial) out.scrollTop = out.scrollHeight;
+    }
+
+    // ---- Events ----
+
+    function handle(event) {
+        const follow = nearBottom();
+        switch (event.type) {
+        case 'message_start':
+            if (event.message.role === 'assistant') {
+                const empty = $('transcript').querySelector('.empty');
+                if (empty) empty.remove();
+                addMessage(event.message);
+                streaming.set(event.message.id, []);
+            }
+            break;
+        case 'block_start': {
+            const blocks = streaming.get(event.messageId);
+            const node = messageEls.get(event.messageId);
+            if (!blocks || !node) break;
+            let block;
+            if (event.kind === 'text') block = el('div', 'text');
+            else if (event.kind === 'thinking') block = thinkingBlock('', true);
+            else block = toolCard(event.toolCallId, event.toolName, null);
+            node.appendChild(block);
+            const target = event.kind === 'text' ? block : block.querySelector('pre');
+            blocks[event.index] = {target, text: ''};
+            break;
+        }
+        case 'block_delta': {
+            const block = (streaming.get(event.messageId) || [])[event.index];
+            if (!block) break;
+            block.text += event.delta;
+            block.target.textContent = block.text; // Markdown once the message is complete
+            break;
+        }
+        case 'message_end':
+            streaming.delete(event.message.id);
+            addMessage(event.message);
+            break;
+        case 'tool_start': {
+            const card = toolCards.get(event.toolCallId);
+            if (card) {
+                card.querySelector('.tool-title').textContent = event.title;
+                card.querySelector('.tool-status').textContent = 'running…';
+            }
+            break;
+        }
+        case 'tool_update': {
+            const card = toolCards.get(event.toolCallId);
+            if (card) showToolResult(card, event.partial, true);
+            break;
+        }
+        case 'tool_end':
+            setToolResult(event.toolCallId, event.result);
+            break;
+        case 'run_start':
+            setRunning(true);
+            break;
+        case 'run_end':
+            setRunning(false);
+            if (event.reason === 'error' && event.errorMessage) showError(event.errorMessage);
+            loadSessions().catch(() => {});
+            break;
+        case 'state_changed':
+            renderState(event.state);
+            break;
+        case 'queue_changed':
+            renderQueue(event.steering, event.followUp);
+            break;
+        }
+        scrollDown(follow);
+    }
+
+    // ---- Composer and session controls ----
+
+    async function send(event) {
+        event.preventDefault();
+        const text = $('input').value;
+        if (!text.trim() || !current) return;
+        $('input').value = '';
+        showError(null);
+        try {
+            await rpc('run/prompt', {sessionId: current.sessionId, content: [{type: 'text', text}]});
+        } catch (err) {
+            $('input').value = text;
+            showError(err);
+        }
+    }
+
+    $('input').addEventListener('keydown', e => {
+        if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) send(e);
+    });
+    $('composer').addEventListener('submit', send);
+    $('new-form').addEventListener('submit', e => newSession(e).catch(showError));
+    $('refresh').addEventListener('click', () => loadSessions().catch(showError));
+
+    $('abort').addEventListener('click', async () => {
+        try {
+            const {texts} = await rpc('run/abort', {sessionId: current.sessionId});
+            if (texts.length) $('input').value = [...texts, $('input').value].filter(Boolean).join('\n\n');
+        } catch (err) { showError(err); }
+    });
+
+    $('s-model').addEventListener('change', async () => {
+        const [provider, model] = JSON.parse($('s-model').value);
+        try {
+            renderState(await rpc('config/set_model', {sessionId: current.sessionId, provider, model}));
+            localStorage.setItem(MODEL_KEY, JSON.stringify([provider, model]));
+        } catch (err) { showError(err); }
+    });
+
+    $('s-thinking').addEventListener('change', async () => {
+        const level = $('s-thinking').value;
+        try {
+            renderState(await rpc('config/set_thinking', {sessionId: current.sessionId, level}));
+            localStorage.setItem(THINKING_KEY, level);
+        } catch (err) { showError(err); }
+    });
+
+    $('s-rename').addEventListener('click', async () => {
+        const name = prompt('Session name', current.name || '');
+        if (!name) return;
+        try { renderState(await rpc('session/set_name', {sessionId: current.sessionId, name})); loadSessions(); }
+        catch (err) { showError(err); }
+    });
+
+    $('s-close').addEventListener('click', async () => {
+        const sessionId = current.sessionId;
+        if (source) source.close();
+        source = null;
+        current = null;
+        $('session-bar').hidden = true;
+        $('composer').hidden = true;
+        $('queue').hidden = true;
+        $('transcript').innerHTML = '<div class="empty">Session closed. It stays in the list.</div>';
+        history.replaceState(null, '', location.pathname);
+        try { await rpc('session/close', {sessionId}); } catch (err) { showError(err); }
+        loadSessions().catch(showError);
+    });
+
+    (async () => {
+        try {
+            await Promise.all([loadModels(), loadSessions()]);
+            const id = location.hash.slice(1);
+            if (id) await openSession(id);
+        } catch (err) { showError(err); }
+    })();
+</script>
+</body>
+</html>

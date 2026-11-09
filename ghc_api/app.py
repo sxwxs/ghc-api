@@ -6,6 +6,7 @@ from flask import Flask, Request, g, jsonify, request
 
 from .auth import ANONYMOUS_USER_ID, require_auth
 from .json_guard import MAX_JSON_NESTING_DEPTH, exceeds_max_nesting
+from .routes.agent import agent_bp
 from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
 from .routes.dashboard import dashboard_bp
@@ -149,6 +150,7 @@ def create_app() -> Flask:
     app.register_blueprint(images_bp)
     app.register_blueprint(proxy_bp)
     app.register_blueprint(anthropic_bp)
+    app.register_blueprint(agent_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(webiq_bp)
     app.register_blueprint(anysearch_bp)

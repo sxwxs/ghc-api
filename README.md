@@ -21,6 +21,7 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Request File Statistics**: Build reusable line-level indexes, inspect size/latency/token distributions, and drill into exact historical requests
 - **Content Filtering**: Remove or add content from system prompts and tool results
 - **Code Agent Manager UI**: Install Codex/Claude/Copilot CLI and manage config sync from dashboard
+- **Code Agent**: A built-in coding agent ([pyagent](docs/pyagent/README.md)) at `/agent` that reads, edits and runs commands in a directory on the server, using Copilot models through ghc-api
 - **Config Sync**: Sync Claude Code, Codex, and ghc-api config files with OneDrive
 - **Safe Backups**: Auto backup overwritten config files as `*.YYYYMMDD_HHMMSS.bak`
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
@@ -464,6 +465,17 @@ The page is served by ghc-api and needs no external chart library or network ser
 ```
 
 Omitting `kind` preserves the existing `statistics` behavior. Completed performance jobs return `result.perf` and quality/file metadata, not a `dataset_id`.
+
+### Code Agent
+
+The Code Agent page (`/agent`) runs [pyagent](docs/pyagent/README.md), a lightweight coding agent that lives in `ghc_api/pyagent`. Pick a working directory on the server, start a session, and the agent reads and edits files and runs shell commands there. Replies, thinking, and tool output stream live; messages sent while it works are queued and delivered after its current tool calls; Abort stops a run.
+
+- **Models**: the Copilot catalog's chat models, called through ghc-api itself, so requests appear in the dashboard as user `internal`. Each model uses the endpoint it supports best: Anthropic Messages, then Responses, then Chat Completions. The model and thinking level can change between runs.
+- **Sessions**: saved as JSON Lines under `<config dir>/pyagent/sessions/<working directory>/`; every session is listed and can be reopened. Close releases a session from memory without deleting it.
+- **Process**: the agent runs inside the ghc-api process, on its own event loop. Restarting ghc-api aborts running sessions; their history stays.
+- **Security**: the agent runs arbitrary commands as the ghc-api user without asking. Keep `/agent` and `/api/agent/*` behind the reverse-proxy auth (see [Production Deployment](#production-deployment)).
+
+The page speaks pyagent's JSON-RPC protocol ([docs/pyagent/protocol.md](docs/pyagent/protocol.md)), so other clients can do the same through the endpoints below.
 
 ### User-Token Authentication (Optional)
 
@@ -926,6 +938,14 @@ Active only when `enable_auth: true`. See [User-Token Authentication](#user-toke
 
 Per-user filtering is also available on existing endpoints via the `?user=<user_id>` query parameter: `/api/stats`, `/api/requests`, `/api/requests/search`, `/api/config-manager/token-usage`.
 
+### Code Agent
+
+Admin-only: the agent runs commands on the server.
+
+- `GET /agent` - Code agent page
+- `POST /api/agent/rpc` - One pyagent protocol request, `{"method": "session/new", "params": {"cwd": "..."}}`; returns `{"result": ...}` or `{"error": {"code", "message"}}`. Every method of [the protocol](docs/pyagent/protocol.md) except `initialize`, which ghc-api performs itself
+- `GET /api/agent/sessions/<id>/events?since=<seq>` - SSE stream of an open session's event envelopes (`id:` is the `seq`, so `Last-Event-ID` resumes). A `resync` event means the session is not open or the missed events are gone: reload it with `session/load` and `session/messages`, then subscribe from its `lastSeq`
+
 ## Example Usage
 
 ### With OpenAI Python SDK
@@ -990,6 +1010,7 @@ Access the web dashboard at `http://localhost:8313/` to:
 - Use Live Throughput (`/live`) to see what is running right now and why it feels slow (see [Live Throughput](#live-throughput))
 - Use Request Stats (`/request-stats`) to multi-select persisted daily files, compare overall/model/response-code distributions, click histogram buckets for matching requests, and open hash-verified historical details
 - Use Historical Performance (`/request-perf`) for cross-day speed, timing, context, upstream and slowdown comparisons without loading per-request datasets
+- Use Code Agent (`/agent`) to run the built-in coding agent in a directory on the server (see [Code Agent](#code-agent))
 - Use Code Agent Manager to:
   - Install code-agent CLIs
   - Sync config files to/from OneDrive
@@ -999,7 +1020,7 @@ Access the web dashboard at `http://localhost:8313/` to:
 
 ### Shared navigation
 
-Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Request Stats, Historical Performance, and the raw JSON stats endpoints) live behind the **Other** menu.
+Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Request Stats, Historical Performance, and the raw JSON stats endpoints) live behind the **Other** menu.
 
 A template only declares its title and any page-specific buttons:
 
@@ -1026,7 +1047,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
-| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*` | basic-auth — request data and usage aggregates may expose other users' activity |
+| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
 
 ### Sample nginx config
 
@@ -1130,7 +1151,9 @@ sudo htpasswd -B /etc/nginx/ghc-api.htpasswd alice
   - `translator.py` - OpenAI/Anthropic format translation
   - `streaming.py` - Streaming response handling
   - `token_manager.py` - GitHub token management
-  - `routes/` - API endpoint handlers (openai, anthropic, dashboard)
+  - `routes/` - API endpoint handlers (openai, anthropic, dashboard, agent)
+  - `pyagent/` - Self-contained coding agent with its own protocol ([docs](docs/pyagent/README.md)); it never imports the rest of `ghc_api`
+  - `agent_bridge.py` - Runs pyagent for the `/agent` page and points it at ghc-api's own endpoints
 - **Thread-Safe Caching**: Uses threading locks for concurrent access
 - **Memory-Based Storage**: No external database dependencies
 - **RESTful API Design**: Follows REST conventions

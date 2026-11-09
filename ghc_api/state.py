@@ -160,6 +160,9 @@ class State:
         # WSGI server thread pool. Every streaming request holds a thread for
         # its whole lifetime, so this bounds concurrent chat streams.
         self.server_threads: int = 16
+        # Where this server listens; the /agent coding agent calls models through it.
+        self.server_host: str = "localhost"
+        self.server_port: int = 8313
 
     @property
     def editor_plugin_version(self) -> str:

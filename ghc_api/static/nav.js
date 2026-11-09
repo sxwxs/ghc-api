@@ -28,6 +28,7 @@
         { href: '/live', label: 'Live Throughput' },
         { href: '/requests', label: 'Request Browser' },
         { href: '/chat', label: 'Chat' },
+        { href: '/agent', label: 'Code Agent' },
         { href: '/code-agent-manager', label: 'Code Agent Manager', badge: 'config-manager-alert' }
     ];
 

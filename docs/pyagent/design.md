@@ -5,7 +5,7 @@ pyagent 是一个轻量的 Python 编程 agent。架构参考 pi（`earendil-wor
 代码在 `ghc_api/pyagent/`，最初来自独立仓库 pyagent（提交 3dd6e04，现仅作存档），之后只在 ghc-api 里维护。它在 ghc-api 内保持独立：
 
 - `ghc_api/pyagent/` 不 import ghc_api 的其他部分（`tests/pyagent/test_independence.py` 检查）。
-- ghc-api 只通过第 9 节的协议驱动它（`ghc_api/agent_bridge.py`），不碰 agent、会话的内部对象。
+- ghc-api 只通过第 9 节的协议驱动它（`ghc_api/agent_bridge.py`）：启动时构造 `SessionSetup`、`Server` 和模型配置，之后只收发协议消息，不碰 agent、会话的内部对象。
 - 有自己的 lint 与严格类型检查：`ghc_api/pyagent/ruff.toml`、根目录 `pyrightconfig.json`。
 - 下文的 `pyagent` 命令即 `python -m ghc_api.pyagent`。
 

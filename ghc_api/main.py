@@ -470,6 +470,7 @@ def main():
         for path in anysearch.API_PATHS:
             print(f"AnySearch API: http://{host}:{port}{path}")
 
+    state.server_host, state.server_port = host, int(port)
     serve_app(app, host=host, port=port, debug=debug)
 
 
