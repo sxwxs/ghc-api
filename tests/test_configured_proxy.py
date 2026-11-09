@@ -1039,15 +1039,19 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
     def test_non_stream_usage_records_uncached_input_and_cache_reads(self):
         # OpenAI-style input counts include cached reads; the cache must store
         # the uncached slice so billing does not charge cached tokens twice.
+        # (path, request, upstream usage, expected (input, cache_write, cache_read))
         cases = [
             ("/proxy/demo-profile/v1/chat/completions",
              {"model": "demo-model", "messages": [{"role": "user", "content": "hi"}]},
-             {"prompt_tokens": 10, "completion_tokens": 3, "prompt_tokens_details": {"cached_tokens": 4}}),
+             {"prompt_tokens": 10, "completion_tokens": 3, "prompt_tokens_details": {"cached_tokens": 4}},
+             (6, 0, 4)),
             ("/proxy/demo-profile/v1/responses",
              {"model": "demo-model", "input": "hi"},
-             {"input_tokens": 10, "output_tokens": 3, "input_tokens_details": {"cached_tokens": 4}}),
+             {"input_tokens": 10, "output_tokens": 3,
+              "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 2}},
+             (4, 2, 4)),
         ]
-        for path, request_body, usage in cases:
+        for path, request_body, usage, (uncached, cache_write, cache_read) in cases:
             with self.subTest(path=path):
                 self._reset_request_cache()
                 upstream = FakeResponse(payload={"id": "x", "model": "private-deployment", "usage": usage})
@@ -1057,10 +1061,10 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 cached = next(iter(cache.cache.values()))
-                self.assertEqual(cached["input_tokens"], 6)
+                self.assertEqual(cached["input_tokens"], uncached)
                 self.assertEqual(cached["output_tokens"], 3)
-                self.assertEqual(cached["cache_read_input_tokens"], 4)
-                self.assertEqual(cached["cache_creation_input_tokens"], 0)
+                self.assertEqual(cached["cache_read_input_tokens"], cache_read)
+                self.assertEqual(cached["cache_creation_input_tokens"], cache_write)
 
     def test_error_responses_do_not_add_usage_to_token_stats(self):
         upstream = FakeResponse(

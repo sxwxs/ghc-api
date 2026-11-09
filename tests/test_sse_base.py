@@ -270,7 +270,7 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
                 "usage": {
                     "input_tokens": 7,
                     "output_tokens": 3,
-                    "input_tokens_details": {"cached_tokens": 1},
+                    "input_tokens_details": {"cached_tokens": 1, "cache_write_tokens": 2},
                 }
             },
         })
@@ -290,10 +290,11 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
         _collect(handler._generate())
 
         entry = self.cache.get_request("req-incomplete")
-        self.assertEqual(entry["input_tokens"], 6)
+        # Uncached slice: 7 total - 1 cached read - 2 cache writes.
+        self.assertEqual(entry["input_tokens"], 4)
         self.assertEqual(entry["output_tokens"], 3)
         self.assertEqual(entry["cache_read_input_tokens"], 1)
-        self.assertEqual(entry["cache_creation_input_tokens"], 0)
+        self.assertEqual(entry["cache_creation_input_tokens"], 2)
 
     def test_terminal_response_failed_is_recorded_as_error(self):
         failed = json.dumps({

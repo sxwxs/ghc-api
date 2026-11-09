@@ -41,6 +41,20 @@ class TestPriceResolution:
         assert entry.input_per_1m == 2.5
         assert entry.output_per_1m == 10.0
 
+    def test_builtin_keys_are_normalized(self):
+        # Lookups use normalized ids, so a non-normalized key can never match.
+        assert [k for k in billing.BUILTIN_PRICES if billing.normalize_model_id(k) != k] == []
+
+    def test_dotted_model_resolves_builtin(self, catalog):
+        entry = catalog.resolve("gemini-2.5-pro")
+        assert entry is not None
+        assert (entry.source, entry.matched_key, entry.input_per_1m) == ("builtin", "gemini-2-5-pro", 1.25)
+        assert entry.approximate is False
+
+    def test_builtin_family_fallback_is_approximate(self, catalog):
+        entry = catalog.resolve("claude-opus-4-7")
+        assert (entry.source, entry.matched_key, entry.approximate) == ("builtin", "claude-opus-4", True)
+
     def test_unpriced_returns_none(self, catalog):
         assert catalog.resolve("totally-unknown-model") is None
 
@@ -56,6 +70,13 @@ class TestPriceResolution:
         assert entry is not None
         assert entry.source == "manual"
         assert entry.input_per_1m == 1.0
+
+    def test_dotted_wildcard_override(self, catalog):
+        # Model ids are normalized (dots -> dashes), so patterns must be too.
+        catalog.set_override("Claude-3.7-*", {"input_per_1m": 9.0, "output_per_1m": 9.0})
+        entry = catalog.resolve("claude-3.7-sonnet")
+        assert entry is not None
+        assert (entry.source, entry.matched_key, entry.input_per_1m) == ("manual", "Claude-3.7-*", 9.0)
 
     def test_auto_catalog_exact_match(self, catalog):
         catalog._auto_models["gpt-5-mega"] = {

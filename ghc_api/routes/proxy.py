@@ -28,7 +28,7 @@ from ..sse import (
     ProxyResponsesStreamHandler,
 )
 from ..state import state
-from ..utils import get_client_ip
+from ..utils import get_client_ip, responses_usage_counts
 
 
 proxy_bp = Blueprint("configured_proxy", __name__)
@@ -144,15 +144,15 @@ def _usage_for_api(api_name: str, result) -> Tuple[int, int, int, int]:
     usage = result.get("usage")
     if not isinstance(usage, dict):
         return 0, 0, 0, 0
-    # OpenAI-style input/prompt token counts include cached reads; return the
+    # OpenAI-style input/prompt token counts include cached tokens; return the
     # uncached slice so all upstreams share the Anthropic-style semantics.
     if api_name == "responses":
-        cached = (usage.get("input_tokens_details", {}) or {}).get("cached_tokens", 0)
+        counts = responses_usage_counts(usage)
         return (
-            usage.get("input_tokens", 0) - cached,
-            usage.get("output_tokens", 0),
-            0,
-            cached,
+            counts["input_tokens"],
+            counts["output_tokens"],
+            counts["cache_creation_input_tokens"],
+            counts["cache_read_input_tokens"],
         )
     if api_name == "messages":
         return (

@@ -3,6 +3,7 @@
 import json
 from typing import Dict, Iterator
 
+from ..utils import responses_usage_counts
 from .base import SSEStreamHandler
 
 
@@ -28,13 +29,11 @@ class ProxyResponsesStreamHandler(SSEStreamHandler):
     def on_event(self, event_type: str, event: Dict) -> None:
         if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response", {}) or {}
-            usage = response.get("usage", {}) or {}
-            # input_tokens includes cached reads; record the uncached slice
-            # and count cached tokens as reads, like the Copilot handler.
-            details = usage.get("input_tokens_details", {}) or {}
-            self.cache_read_input_tokens = details.get("cached_tokens", 0)
-            self.input_tokens = usage.get("input_tokens", 0) - self.cache_read_input_tokens
-            self.output_tokens = usage.get("output_tokens", 0)
+            counts = responses_usage_counts(response.get("usage"))
+            self.input_tokens = counts["input_tokens"]
+            self.output_tokens = counts["output_tokens"]
+            self.cache_creation_input_tokens = counts["cache_creation_input_tokens"]
+            self.cache_read_input_tokens = counts["cache_read_input_tokens"]
         elif event_type == "response.failed":
             self.error_occurred = True
             self.status_code = 502

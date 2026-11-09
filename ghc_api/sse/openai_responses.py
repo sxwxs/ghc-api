@@ -12,6 +12,7 @@ from typing import Callable, Dict, Iterator, Optional
 
 import requests
 
+from ..utils import responses_usage_counts
 from .base import SSEStreamHandler
 
 
@@ -370,14 +371,11 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
     def on_event(self, event_type: str, event: Dict) -> None:
         if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
-            usage = resp.get("usage", {}) or {}
-            details = usage.get("input_tokens_details", {}) or {}
-            # OpenAI-style input_tokens includes cached tokens; keep the same
-            # uncached-slice semantics as the Anthropic-style upstreams, and
-            # count cached reads as cache reads (not cache writes).
-            self.cache_read_input_tokens = details.get("cached_tokens", 0)
-            self.input_tokens = usage.get("input_tokens", 0) - self.cache_read_input_tokens
-            self.output_tokens = usage.get("output_tokens", 0)
+            counts = responses_usage_counts(resp.get("usage"))
+            self.input_tokens = counts["input_tokens"]
+            self.output_tokens = counts["output_tokens"]
+            self.cache_creation_input_tokens = counts["cache_creation_input_tokens"]
+            self.cache_read_input_tokens = counts["cache_read_input_tokens"]
         elif event_type == "response.failed":
             # The HTTP status is already committed as 200, but request history
             # should still identify the terminal SSE failure.

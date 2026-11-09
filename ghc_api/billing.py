@@ -60,6 +60,7 @@ _DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 # Well-known public list prices (USD per 1M tokens) used when neither the
 # overrides nor the auto catalog can resolve a model. Deliberately small:
 # the auto catalog is the real workhorse, these only soften first-run gaps.
+# Keys must be in normalize_model_id() form (dots become dashes).
 BUILTIN_PRICES: Dict[str, Dict[str, Optional[float]]] = {
     "gpt-4o": {"input_per_1m": 2.5, "output_per_1m": 10.0, "cache_read_per_1m": 1.25},
     "gpt-4o-mini": {"input_per_1m": 0.15, "output_per_1m": 0.6, "cache_read_per_1m": 0.075},
@@ -74,8 +75,8 @@ BUILTIN_PRICES: Dict[str, Dict[str, Optional[float]]] = {
     "claude-haiku-4": {"input_per_1m": 0.8, "output_per_1m": 4.0, "cache_write_per_1m": 1.0, "cache_read_per_1m": 0.08},
     "claude-sonnet-4": {"input_per_1m": 3.0, "output_per_1m": 15.0, "cache_write_per_1m": 3.75, "cache_read_per_1m": 0.3},
     "claude-opus-4": {"input_per_1m": 15.0, "output_per_1m": 75.0, "cache_write_per_1m": 18.75, "cache_read_per_1m": 1.5},
-    "gemini-2.5-pro": {"input_per_1m": 1.25, "output_per_1m": 10.0},
-    "gemini-2.5-flash": {"input_per_1m": 0.3, "output_per_1m": 2.5},
+    "gemini-2-5-pro": {"input_per_1m": 1.25, "output_per_1m": 10.0},
+    "gemini-2-5-flash": {"input_per_1m": 0.3, "output_per_1m": 2.5},
 }
 
 _PRICE_FIELDS = ("input_per_1m", "output_per_1m", "cache_read_per_1m", "cache_write_per_1m")
@@ -108,6 +109,12 @@ class PriceEntry:
         }
 
 
+def _normalize_separators(text: str) -> str:
+    """Lowercase, dots to dashes, collapse repeated dashes."""
+    text = (text or "").strip().lower().replace(".", "-")
+    return re.sub(r"-+", "-", text).strip("-")
+
+
 def normalize_model_id(model: str) -> str:
     """Normalize a model id for catalog lookups.
 
@@ -115,9 +122,7 @@ def normalize_model_id(model: str) -> str:
     "claude-3-7-sonnet"), collapse repeated dashes, and strip reasoning-effort
     and date suffixes.
     """
-    text = (model or "").strip().lower()
-    text = text.replace(".", "-")
-    text = re.sub(r"-+", "-", text).strip("-")
+    text = _normalize_separators(model)
     while True:
         if _DATE_SUFFIX_RE.search(text):
             text = _DATE_SUFFIX_RE.sub("", text)
@@ -461,28 +466,31 @@ class PriceCatalog:
         exact = index.get(normalized) or index.get(_bare_model_name(normalized))
         if exact is not None:
             return exact, normalized
-        # Wildcard patterns (raw keys), longest pattern wins for determinism.
+        # Wildcard patterns, longest pattern wins for determinism. Patterns get
+        # the same separator normalization as model ids (so "claude-3.7-*"
+        # matches), but no suffix stripping, which could widen a pattern.
         pattern_hits = [p for p in overrides if any(c in p for c in "*?[")]
         for pattern in sorted(pattern_hits, key=len, reverse=True):
             try:
-                if fnmatch.fnmatchcase(normalized, pattern.lower()):
+                if fnmatch.fnmatchcase(normalized, _normalize_separators(pattern)):
                     return overrides[pattern], pattern
             except Exception:
                 continue
         return None
 
-    def _match_builtin(self, normalized: str) -> Optional[Tuple[Dict[str, Optional[float]], str]]:
+    def _match_builtin(self, normalized: str) -> Optional[Tuple[Dict[str, Optional[float]], str, bool]]:
         if normalized in BUILTIN_PRICES:
-            return dict(BUILTIN_PRICES[normalized]), normalized
+            return dict(BUILTIN_PRICES[normalized]), normalized, False
         bare = _bare_model_name(normalized)
         if bare in BUILTIN_PRICES:
-            return dict(BUILTIN_PRICES[bare]), bare
+            return dict(BUILTIN_PRICES[bare]), bare, False
+        # Family fallback borrows a related model's price: approximate.
         parts = normalized.split("-")
         while len(parts) > 1:
             parts.pop()
             family = "-".join(parts)
             if family in BUILTIN_PRICES:
-                return dict(BUILTIN_PRICES[family]), family
+                return dict(BUILTIN_PRICES[family]), family, True
         return None
 
     def resolve(self, model: str) -> Optional[PriceEntry]:
@@ -520,7 +528,7 @@ class PriceCatalog:
 
         builtin = self._match_builtin(normalized)
         if builtin is not None:
-            prices, key = builtin
+            prices, key, approximate = builtin
             return PriceEntry(
                 input_per_1m=prices.get("input_per_1m"),
                 output_per_1m=prices.get("output_per_1m"),
@@ -529,6 +537,7 @@ class PriceCatalog:
                 currency=DEFAULT_CURRENCY,
                 source="builtin",
                 matched_key=key,
+                approximate=approximate,
             )
         return None
 
