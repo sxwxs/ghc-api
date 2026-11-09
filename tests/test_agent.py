@@ -95,15 +95,18 @@ def run_to_end(bridge, session_id, since):
     return events
 
 
-def test_bridge_runs_a_session_and_keeps_the_current_runs_events(bridge, tmp_path):
+def test_bridge_runs_a_session_and_keeps_recent_events(bridge, tmp_path):
     bridge.provider.replies += [tool_reply(("c1", "read", {"path": "missing.txt"})), text_reply("done"),
                                 text_reply("again")]
     state_ = bridge.call("session/new", {"cwd": str(tmp_path)})["result"]
     session_id = state_["sessionId"]
+    assert not bridge.is_running(session_id)
     assert bridge.call("run/prompt", {"sessionId": session_id, "content": [{"type": "text", "text": "hi"}]})[
         "result"]["disposition"] == "started"
+    assert bridge.is_running(session_id)  # known from the response, before run_start arrives
 
     events = run_to_end(bridge, session_id, state_["lastSeq"])
+    assert not bridge.is_running(session_id)
     assert [e["seq"] for e in events] == list(range(1, len(events) + 1))
     assert events[0]["event"]["type"] == "run_start"
     assert any(e["event"]["type"] == "tool_end" for e in events)
@@ -111,10 +114,15 @@ def test_bridge_runs_a_session_and_keeps_the_current_runs_events(bridge, tmp_pat
     messages = bridge.call("session/messages", {"sessionId": session_id})["result"]["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant", "tool_result", "assistant"]
 
-    # A second run drops the first run's events: a client that missed them must reload.
+    # A setting changed between runs survives the next run start: a page that followed the first run (up to
+    # its run_end) catches up without a reload. A page that missed the first run must reload.
+    run_end_seq = next(e["seq"] for e in events if e["event"]["type"] == "run_end")
+    bridge.call("config/set_thinking", {"sessionId": session_id, "level": "high"})
     bridge.call("run/prompt", {"sessionId": session_id, "content": [{"type": "text", "text": "more"}]})
-    second = run_to_end(bridge, session_id, events[-1]["seq"])
-    assert second[0]["event"]["type"] == "run_start"
+    second = run_to_end(bridge, session_id, run_end_seq)
+    assert second[0]["seq"] == run_end_seq + 1
+    # state after the first run, then the thinking change, then the new run
+    assert [e["event"]["type"] for e in second[:3]] == ["state_changed", "state_changed", "run_start"]
     assert bridge.wait_events(session_id, 0, 0) is None
     assert bridge.wait_events(session_id, second[-1]["seq"], 0) in ([], [(second[-1]["seq"] + 1, mock.ANY)])
 
@@ -146,7 +154,7 @@ def test_rpc_route_validates_requests(client, tmp_path):
     assert created.status_code == 200 and created.get_json()["result"]["cwd"] == str(tmp_path)
 
 
-def test_events_route_streams_and_asks_unknown_sessions_to_resync(client, bridge, tmp_path):
+def test_events_route_streams_resyncs_and_ends_when_idle(client, bridge, tmp_path):
     response = client.get("/api/agent/sessions/nope/events")
     assert response.mimetype == "text/event-stream"
     assert response.get_data(as_text=True) == "event: resync\ndata: {}\n\n"
@@ -156,11 +164,11 @@ def test_events_route_streams_and_asks_unknown_sessions_to_resync(client, bridge
     bridge.call("run/prompt", {"sessionId": session_id, "content": [{"type": "text", "text": "hi"}]})
     run_to_end(bridge, session_id, 0)
 
+    # The session is idle: the stream delivers what the page missed, then ends instead of holding a thread.
     response = client.get(f"/api/agent/sessions/{session_id}/events", headers={"Last-Event-ID": "1"})
-    chunks = iter(response.response)
-    first = next(chunks)
-    assert first.startswith(b"id: 2\ndata: ")
-    response.close()
+    body = response.get_data(as_text=True)
+    assert body.startswith("id: 2\ndata: ")
+    assert body.endswith("event: idle\ndata: {}\n\n")
 
 
 def test_agent_page_script_is_valid_javascript(client):

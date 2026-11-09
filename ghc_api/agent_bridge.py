@@ -1,10 +1,10 @@
 """Runs pyagent (ghc_api/pyagent) inside ghc-api for the /agent page.
 
 pyagent's protocol server runs on a background asyncio loop. Flask threads send it
-the same JSON-RPC lines a stdio client would (docs/pyagent/protocol.md), and the
-events of each session are kept for the current run so a browser can follow them
-over SSE and catch up after a reconnect. Apart from the protocol, this module
-only touches pyagent's setup objects.
+the same JSON-RPC lines a stdio client would (docs/pyagent/protocol.md). Each
+open session's recent events are kept, so a browser can follow them over SSE
+while a run is active and catch up when it subscribes again. Apart from the
+protocol, this module only touches pyagent's setup objects.
 
 The agent calls models through ghc-api itself: one provider, "ghc-api", points at
 this server with the internal token, and lists the Copilot catalog's chat models.
@@ -33,8 +33,8 @@ from .utils import get_config_dir
 
 PROVIDER = "ghc-api"
 CALL_TIMEOUT = 120.0
-# A run's events are dropped when the next run starts; this caps one very long run.
-MAX_RUN_EVENTS = 50_000
+# Events are kept from the end of the previous run; this caps one very long run.
+MAX_EVENTS = 50_000
 
 
 # ---------------------------------------------------------------------------
@@ -115,18 +115,31 @@ def ghc_setup() -> SessionSetup:
 # Bridge
 # ---------------------------------------------------------------------------
 
-class _RunEvents:
-    """The current run's event envelopes of one session, as JSON text, with consecutive seqs."""
+class _SessionEvents:
+    """One open session's recent event envelopes, as JSON text with consecutive seqs, and whether it is running.
 
-    def __init__(self, last_seq: int) -> None:
+    A new run drops what came before the previous run ended. A page that followed that run, as it does while
+    subscribed, still has every event it needs, including settings changed while it was not subscribed.
+    """
+
+    def __init__(self, last_seq: int, running: bool) -> None:
         self.events: List[Tuple[int, str]] = []
         self.last_seq = last_seq
+        self.running = running
+        self._after_last_run = 0  # index of the first event after the latest run_end
 
     def add(self, seq: int, envelope: Dict[str, Any]) -> None:
-        if envelope["event"].get("type") == "run_start" or len(self.events) >= MAX_RUN_EVENTS:
+        kind = envelope["event"].get("type")
+        if kind == "run_start":
+            self.events = self.events[self._after_last_run:]
+            self.running = True
+        if len(self.events) >= MAX_EVENTS:
             self.events = []
         self.events.append((seq, json.dumps(envelope, ensure_ascii=False)))
         self.last_seq = seq
+        if kind == "run_end":
+            self.running = False
+            self._after_last_run = len(self.events)
 
     def since(self, seq: int) -> Optional[List[Tuple[int, str]]]:
         """Events after `seq`, or None when some of them are gone and the client must reload."""
@@ -147,7 +160,7 @@ class AgentBridge:
         self._lock = threading.Condition()
         self._ids = itertools.count(1)
         self._pending: Dict[int, Tuple[str, Dict[str, Any], concurrent.futures.Future]] = {}
-        self._runs: Dict[str, _RunEvents] = {}
+        self._sessions: Dict[str, _SessionEvents] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Optional[Server] = None
         self._setup: Optional[SessionSetup] = None
@@ -165,12 +178,18 @@ class AgentBridge:
         deadline = time.monotonic() + timeout
         with self._lock:
             while True:
-                run = self._runs.get(session_id)
-                events = run.since(since) if run is not None else None
+                session = self._sessions.get(session_id)
+                events = session.since(since) if session is not None else None
                 remaining = deadline - time.monotonic()
                 if events is None or events or remaining <= 0:
                     return events
                 self._lock.wait(remaining)
+
+    def is_running(self, session_id: str) -> bool:
+        """Whether the session has a run, as far as its events and the prompts sent through here tell."""
+        with self._lock:
+            session = self._sessions.get(session_id)
+            return session is not None and session.running
 
     def close(self) -> None:
         """Abort runs, close the sessions and stop the loop. The process-wide bridge lives as long as ghc-api."""
@@ -226,17 +245,23 @@ class AgentBridge:
         with self._lock:
             if message.get("method") == "session/event":
                 envelope = message["params"]
-                run = self._runs.get(envelope["sessionId"])
-                if run is not None:
-                    run.add(envelope["seq"], envelope)
+                session = self._sessions.get(envelope["sessionId"])
+                if session is not None:
+                    session.add(envelope["seq"], envelope)
                     self._lock.notify_all()
                 return
             method, params, future = self._pending.pop(message.get("id"), (None, None, None))
             result = message.get("result")
             if isinstance(result, dict) and "sessionId" in result and "lastSeq" in result:
-                self._runs.setdefault(result["sessionId"], _RunEvents(result["lastSeq"]))
+                if result["sessionId"] not in self._sessions:
+                    self._sessions[result["sessionId"]] = _SessionEvents(result["lastSeq"], result["running"])
+            elif method == "run/prompt" and isinstance(result, dict) and result.get("disposition") == "started":
+                # The response precedes run_start; a page subscribing right after it must not be told "idle".
+                session = self._sessions.get(params.get("sessionId"))
+                if session is not None:
+                    session.running = True
             elif method == "session/close" and "error" not in message:
-                self._runs.pop(params.get("sessionId"), None)
+                self._sessions.pop(params.get("sessionId"), None)
                 self._lock.notify_all()
         if future is not None:
             future.set_result(message)

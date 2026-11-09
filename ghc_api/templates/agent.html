@@ -111,7 +111,8 @@
 </div>
 <script>
     // Speaks pyagent's protocol (docs/pyagent/protocol.md) through /api/agent/rpc, and follows the
-    // open session's events over SSE.
+    // open session's events over SSE. Each stream holds a server thread, so the server ends it with
+    // `idle` when the session goes quiet; the page subscribes again when it sends a prompt or is shown.
     const MODEL_KEY = 'ghc_agent_model';
     const THINKING_KEY = 'ghc_agent_thinking';
     const $ = id => document.getElementById(id);
@@ -257,6 +258,10 @@
             lastSeq = envelope.seq;
             handle(envelope.event);
         };
+        source.addEventListener('idle', () => {
+            source.close();
+            source = null;
+        });
         // The session is not open on the server any more, or we missed events: reload it.
         source.addEventListener('resync', () => {
             source.close();
@@ -471,11 +476,17 @@
         showError(null);
         try {
             await rpc('run/prompt', {sessionId: current.sessionId, content: [{type: 'text', text}]});
+            if (!source) subscribe();
         } catch (err) {
             $('input').value = text;
             showError(err);
         }
     }
+
+    // Catch up on anything that happened while the stream was closed, e.g. a run started from another tab.
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible' && current && !source) subscribe();
+    });
 
     $('input').addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) send(e);

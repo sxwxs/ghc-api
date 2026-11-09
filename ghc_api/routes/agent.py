@@ -15,6 +15,7 @@ from ..agent_bridge import get_bridge
 
 agent_bp = Blueprint("agent", __name__)
 
+# Keepalive interval while a run is active; an idle session's stream closes after this long without events.
 KEEPALIVE_SECONDS = 15.0
 
 
@@ -48,8 +49,12 @@ def agent_rpc():
 
 @agent_bp.route("/api/agent/sessions/<session_id>/events", methods=["GET"])
 def agent_events(session_id: str):
-    """SSE: the session's events after `since` (or Last-Event-ID). A `resync` event tells the page to reload the
-    session, because it is not open or the events it missed are gone."""
+    """SSE: the session's events after `since` (or Last-Event-ID).
+
+    Every open stream holds a server worker thread, so a stream lasts only while the session runs: once it is
+    idle and quiet, `idle` ends it and the page subscribes again when it starts a run or comes back into view.
+    `resync` tells the page to reload the session, because it is not open or the events it missed are gone.
+    """
     last_id = request.headers.get("Last-Event-ID") or request.args.get("since") or "0"
     try:
         since = int(last_id)
@@ -64,12 +69,15 @@ def agent_events(session_id: str):
             if events is None:
                 yield "event: resync\ndata: {}\n\n"
                 return
-            if not events:
+            if events:
+                for seq, text in events:
+                    yield f"id: {seq}\ndata: {text}\n\n"
+                position = events[-1][0]
+            elif bridge.is_running(session_id):
                 yield ": keepalive\n\n"
-                continue
-            for seq, text in events:
-                yield f"id: {seq}\ndata: {text}\n\n"
-            position = events[-1][0]
+            else:
+                yield "event: idle\ndata: {}\n\n"
+                return
 
     return Response(
         stream_with_context(generate()),

@@ -944,7 +944,7 @@ Admin-only: the agent runs commands on the server.
 
 - `GET /agent` - Code agent page
 - `POST /api/agent/rpc` - One pyagent protocol request, `{"method": "session/new", "params": {"cwd": "..."}}`; returns `{"result": ...}` or `{"error": {"code", "message"}}`. Every method of [the protocol](docs/pyagent/protocol.md) except `initialize`, which ghc-api performs itself
-- `GET /api/agent/sessions/<id>/events?since=<seq>` - SSE stream of an open session's event envelopes (`id:` is the `seq`, so `Last-Event-ID` resumes). A `resync` event means the session is not open or the missed events are gone: reload it with `session/load` and `session/messages`, then subscribe from its `lastSeq`
+- `GET /api/agent/sessions/<id>/events?since=<seq>` - SSE stream of an open session's event envelopes (`id:` is the `seq`, so `Last-Event-ID` resumes). Each stream holds a server worker thread, so it ends with an `idle` event once the session has no run and nothing new for 15 seconds; subscribe again when starting a run. A `resync` event means the session is not open or the missed events are gone: reload it with `session/load` and `session/messages`, then subscribe from its `lastSeq`
 
 ## Example Usage
 
