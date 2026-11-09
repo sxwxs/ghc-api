@@ -1,0 +1,11 @@
+# Lint and format rules for pyagent only; the rest of ghc_api is not held to them.
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+# msgspec copies empty mutable defaults ({} / []) per instance, so RUF012 does not apply to Struct fields.
+ignore = ["RUF012"]
+
+[lint.isort]
+known-first-party = ["ghc_api"]

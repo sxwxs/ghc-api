@@ -19,20 +19,22 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.8",
-        "Programming Language :: Python :: 3.9",
-        "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+        "Programming Language :: Python :: 3.14",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.11",
     install_requires=[
         "Flask>=2.0.0",
         "Werkzeug>=2.3.2",
         "requests>=2.25.0",
         "PyYAML>=5.4.0",
         "tiktoken>=0.3.0",
-        "waitress>=2.1.0"
+        "waitress>=2.1.0",
+        # pyagent (ghc_api/pyagent), the coding agent behind /agent
+        "httpx>=0.28",
+        "msgspec>=0.19",
     ],
     entry_points={
         "console_scripts": [
