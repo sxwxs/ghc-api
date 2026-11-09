@@ -180,14 +180,16 @@ def _forward_image_request(operation):
                 result = response.text
             usage = result.get("usage", {}) if isinstance(result, dict) else {}
             usage = usage if isinstance(usage, dict) else {}
+            # input_tokens includes cached reads; record the uncached slice.
+            cached_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0) or 0
             cache.complete_request(request_id, {
                 **record,
                 "response_body": _image_log_body(result),
                 "status_code": response.status_code,
                 "response_size": len(response.content),
-                "input_tokens": usage.get("input_tokens", 0) or 0,
+                "input_tokens": (usage.get("input_tokens", 0) or 0) - cached_tokens,
                 "output_tokens": usage.get("output_tokens", 0) or 0,
-                "cache_read_input_tokens": (usage.get("input_tokens_details") or {}).get("cached_tokens", 0),
+                "cache_read_input_tokens": cached_tokens,
                 "duration": round(time.time() - start, 2),
             })
             return Response(response.content, status=response.status_code,

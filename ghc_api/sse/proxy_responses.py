@@ -29,10 +29,12 @@ class ProxyResponsesStreamHandler(SSEStreamHandler):
         if event_type in ("response.completed", "response.incomplete"):
             response = event.get("response", {}) or {}
             usage = response.get("usage", {}) or {}
-            self.input_tokens = usage.get("input_tokens", 0)
-            self.output_tokens = usage.get("output_tokens", 0)
+            # input_tokens includes cached reads; record the uncached slice
+            # and count cached tokens as reads, like the Copilot handler.
             details = usage.get("input_tokens_details", {}) or {}
-            self.cache_creation_input_tokens = details.get("cached_tokens", 0)
+            self.cache_read_input_tokens = details.get("cached_tokens", 0)
+            self.input_tokens = usage.get("input_tokens", 0) - self.cache_read_input_tokens
+            self.output_tokens = usage.get("output_tokens", 0)
         elif event_type == "response.failed":
             self.error_occurred = True
             self.status_code = 502

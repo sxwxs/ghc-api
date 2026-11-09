@@ -2413,7 +2413,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
                 "status_code": response.status_code,
                 "request_size": openai_request_size,
                 "response_size": len(json.dumps(anthropic_response)),
-                "input_tokens": usage.get("prompt_tokens", 0),
+                "input_tokens": usage.get("prompt_tokens", 0) - cached_tokens,
                 "output_tokens": usage.get("completion_tokens", 0),
                 "cache_read_input_tokens": cached_tokens,
                 "duration": duration,
@@ -2563,8 +2563,8 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
 
                         if chunk.get("usage"):
                             total_output_tokens = chunk["usage"].get("completion_tokens", 0)
-                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
                             total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
 
                         # Translate to Anthropic events
                         events = translate_chunk_to_anthropic_events(chunk, stream_state)

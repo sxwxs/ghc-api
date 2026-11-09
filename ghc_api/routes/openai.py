@@ -932,9 +932,12 @@ def stream_chat_completions_via_responses(response: requests.Response, request_i
                         response_data = event.get("response", {}) or {}
                         usage = response_data.get("usage", {})
                         chat_usage = _responses_usage_to_chat_usage(usage)
-                        total_input_tokens = chat_usage.get("prompt_tokens", 0)
-                        total_output_tokens = chat_usage.get("completion_tokens", 0)
                         total_cache_read_input_tokens = chat_usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                        # prompt_tokens includes cached tokens; store the uncached
+                        # slice so token stats and billing are consistent with
+                        # the Anthropic-style upstreams.
+                        total_input_tokens = chat_usage.get("prompt_tokens", 0) - total_cache_read_input_tokens
+                        total_output_tokens = chat_usage.get("completion_tokens", 0)
                         if not role_sent:
                             role_chunk = _chat_completion_chunk(
                                 chunk_id,
@@ -1107,6 +1110,7 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
         responses_body = response.json()
         result = _responses_to_chat_completion(responses_body, original_model)
         usage = result.get("usage", {})
+        cache_read_tokens = usage.get("prompt_tokens_details", {}).get("cached_tokens", 0)
         cache.add_request(request_id, {
             "request_headers": request_headers,
             "client_ip": client_ip,
@@ -1119,9 +1123,9 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
             "status_code": response.status_code,
             "request_size": request_size,
             "response_size": len(json.dumps(result)),
-            "input_tokens": usage.get("prompt_tokens", 0),
+            "input_tokens": usage.get("prompt_tokens", 0) - cache_read_tokens,
             "output_tokens": usage.get("completion_tokens", 0),
-            "cache_read_input_tokens": usage.get("prompt_tokens_details", {}).get("cached_tokens", 0),
+            "cache_read_input_tokens": cache_read_tokens,
             "duration": duration,
             "user_id": user_id,
         })
@@ -1707,7 +1711,7 @@ def chat_completions():
                 "status_code": response.status_code,
                 "request_size": request_size,
                 "response_size": response_size,
-                "input_tokens": usage.get("prompt_tokens", 0),
+                "input_tokens": usage.get("prompt_tokens", 0) - cached_tokens,
                 "output_tokens": usage.get("completion_tokens", 0),
                 "cache_read_input_tokens": cached_tokens,
                 "duration": duration,
@@ -1817,8 +1821,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                         # Track tokens from streaming chunks
                         if chunk.get("usage"):
                             total_output_tokens = chunk["usage"].get("completion_tokens", 0)
-                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0)
                             total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
 
                         yield f"data: {json.dumps(chunk)}\n\n"
                     except json.JSONDecodeError:
@@ -2082,6 +2086,9 @@ def responses():
             result = response.json()
 
             usage = result.get("usage", {})
+            # input_tokens includes cached reads; record the uncached slice,
+            # matching the streaming Responses handler.
+            cache_read_tokens = (usage.get("input_tokens_details") or {}).get("cached_tokens", 0)
             cache.add_request(request_id, {
                 "request_headers": request_headers,
                 "client_ip": client_ip,
@@ -2094,9 +2101,9 @@ def responses():
                 "status_code": response.status_code,
                 "request_size": request_size,
                 "response_size": response_size,
-                "input_tokens": usage.get("input_tokens", 0),
+                "input_tokens": usage.get("input_tokens", 0) - cache_read_tokens,
                 "output_tokens": usage.get("output_tokens", 0),
-                "cache_creation_input_tokens": usage.get("input_tokens_details", {}).get("cached_tokens", 0),
+                "cache_read_input_tokens": cache_read_tokens,
                 "duration": duration,
                 "user_id": user_id,
             })

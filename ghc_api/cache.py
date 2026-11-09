@@ -57,6 +57,11 @@ class RequestCache:
         self.user_model_stats: Dict[str, Dict[str, Dict]] = {}
         self.user_endpoint_stats: Dict[str, Dict[str, Dict]] = {}
         self.user_totals: Dict[str, Dict[str, int]] = {}
+        # Billing dimension: (user_id, provider, model) -> token counters, kept
+        # in parallel to user_model_stats so existing consumers are unaffected.
+        # provider comes from the request's upstream_provider sidecar field and
+        # defaults to "copilot" (this proxy's primary upstream).
+        self.user_provider_model_stats: Dict[Tuple[str, str, str], Dict[str, int]] = {}
 
     @staticmethod
     def _current_timestamp() -> int:
@@ -295,6 +300,29 @@ class RequestCache:
                 bytes_sent=data.get("request_size", 0),
                 bytes_received=data.get("response_size", 0),
             )
+
+            provider = str(
+                data.get("upstream_provider")
+                or self.cache[request_id].get("upstream_provider")
+                or "copilot"
+            )
+            billing_key = (user_id, provider, model)
+            billing = self.user_provider_model_stats.setdefault(billing_key, {
+                "request_count": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "bytes_sent": 0,
+                "bytes_received": 0,
+            })
+            billing["request_count"] += 1
+            billing["input_tokens"] += data.get("input_tokens", 0)
+            billing["output_tokens"] += data.get("output_tokens", 0)
+            billing["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
+            billing["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
+            billing["bytes_sent"] += data.get("request_size", 0)
+            billing["bytes_received"] += data.get("response_size", 0)
 
             entry_snapshot = dict(self.cache[request_id])
 
@@ -557,6 +585,26 @@ class RequestCache:
                         "bytes_received": int(stats.get("bytes_received", 0)),
                     }
             return snapshot
+
+    def get_user_provider_model_token_snapshot(self) -> Dict[Tuple[str, str, str], Dict[str, int]]:
+        """Get a thread-safe snapshot of token counters keyed by (user_id, provider, model).
+
+        Used by the token-usage reporter so usage deltas carry the upstream
+        provider dimension needed for per-provider billing.
+        """
+        with self.lock:
+            return {
+                key: {
+                    "request_count": int(stats.get("request_count", 0)),
+                    "input_tokens": int(stats.get("input_tokens", 0)),
+                    "output_tokens": int(stats.get("output_tokens", 0)),
+                    "cache_creation_input_tokens": int(stats.get("cache_creation_input_tokens", 0)),
+                    "cache_read_input_tokens": int(stats.get("cache_read_input_tokens", 0)),
+                    "bytes_sent": int(stats.get("bytes_sent", 0)),
+                    "bytes_received": int(stats.get("bytes_received", 0)),
+                }
+                for key, stats in self.user_provider_model_stats.items()
+            }
 
     def list_user_ids(self) -> List[str]:
         """List all user_ids that have any data in the cache or stats."""

@@ -371,10 +371,13 @@ class OpenAIResponsesStreamHandler(SSEStreamHandler):
         if event_type in ("response.completed", "response.incomplete"):
             resp = event.get("response", {}) or {}
             usage = resp.get("usage", {}) or {}
-            self.input_tokens = usage.get("input_tokens", 0)
-            self.output_tokens = usage.get("output_tokens", 0)
             details = usage.get("input_tokens_details", {}) or {}
-            self.cache_creation_input_tokens = details.get("cached_tokens", 0)
+            # OpenAI-style input_tokens includes cached tokens; keep the same
+            # uncached-slice semantics as the Anthropic-style upstreams, and
+            # count cached reads as cache reads (not cache writes).
+            self.cache_read_input_tokens = details.get("cached_tokens", 0)
+            self.input_tokens = usage.get("input_tokens", 0) - self.cache_read_input_tokens
+            self.output_tokens = usage.get("output_tokens", 0)
         elif event_type == "response.failed":
             # The HTTP status is already committed as 200, but request history
             # should still identify the terminal SSE failure.

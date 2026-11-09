@@ -144,13 +144,15 @@ def _usage_for_api(api_name: str, result) -> Tuple[int, int, int, int]:
     usage = result.get("usage")
     if not isinstance(usage, dict):
         return 0, 0, 0, 0
+    # OpenAI-style input/prompt token counts include cached reads; return the
+    # uncached slice so all upstreams share the Anthropic-style semantics.
     if api_name == "responses":
-        details = usage.get("input_tokens_details", {}) or {}
+        cached = (usage.get("input_tokens_details", {}) or {}).get("cached_tokens", 0)
         return (
-            usage.get("input_tokens", 0),
+            usage.get("input_tokens", 0) - cached,
             usage.get("output_tokens", 0),
-            details.get("cached_tokens", 0),
             0,
+            cached,
         )
     if api_name == "messages":
         return (
@@ -168,12 +170,12 @@ def _usage_for_api(api_name: str, result) -> Tuple[int, int, int, int]:
             0,
             0,
         )
-    details = usage.get("prompt_tokens_details", {}) or {}
+    cached = (usage.get("prompt_tokens_details", {}) or {}).get("cached_tokens", 0)
     return (
-        usage.get("prompt_tokens", 0),
+        usage.get("prompt_tokens", 0) - cached,
         usage.get("completion_tokens", 0),
         0,
-        details.get("cached_tokens", 0),
+        cached,
     )
 
 

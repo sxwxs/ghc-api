@@ -32,6 +32,7 @@ from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
 from ..anysearch import is_configured as anysearch_is_configured, tool_definitions as anysearch_tool_definitions
 from ..token_usage_reporter import get_token_usage_overview
+from .. import billing
 from ..token_manager import (
     get_token_file_path,
     github_device_flow_manager,
@@ -450,6 +451,64 @@ def api_config_manager_token_usage():
         return jsonify({"error": "Invalid range. Use: all, hour, day, week, month"}), 400
     user_filter = _user_filter_from_request()
     return jsonify(get_token_usage_overview(range_key, user_filter=user_filter))
+
+
+@dashboard_bp.route("/api/config-manager/billing", methods=["GET"])
+def api_config_manager_billing():
+    """Get the Copilot API billing overview for the selected range/user."""
+    range_key = request.args.get("range", "week")
+    if range_key not in {"all", "hour", "day", "week", "month"}:
+        return jsonify({"error": "Invalid range. Use: all, hour, day, week, month"}), 400
+    user_filter = _user_filter_from_request()
+    provider = request.args.get("provider", "copilot")
+    try:
+        overview = billing.get_billing_overview(range_key, user_filter=user_filter, provider=provider)
+    except Exception as e:
+        return jsonify({"error": f"Failed to compute billing overview: {e}"}), 500
+    return jsonify(overview)
+
+
+@dashboard_bp.route("/api/config-manager/billing/prices", methods=["GET"])
+def api_config_manager_billing_prices():
+    """Get the price catalog status and current manual overrides."""
+    catalog = billing.get_price_catalog()
+    return jsonify({
+        "catalog": catalog.catalog_status(),
+        "overrides": catalog.list_overrides(),
+    })
+
+
+@dashboard_bp.route("/api/config-manager/billing/prices", methods=["POST"])
+def api_config_manager_billing_prices_upsert():
+    """Create or update a manual price override for one model."""
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Request body must be a JSON object."}), 400
+    model = payload.get("model")
+    if not isinstance(model, str) or not model.strip():
+        return jsonify({"error": "model is required."}), 400
+    try:
+        saved = billing.get_price_catalog().set_override(model, payload)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "model": model.strip(), "prices": saved})
+
+
+@dashboard_bp.route("/api/config-manager/billing/prices/<path:model>", methods=["DELETE"])
+def api_config_manager_billing_prices_delete(model: str):
+    """Remove a manual price override."""
+    removed = billing.get_price_catalog().delete_override(model)
+    if not removed:
+        return jsonify({"error": f"No override found for model '{model}'."}), 404
+    return jsonify({"ok": True})
+
+
+@dashboard_bp.route("/api/config-manager/billing/prices/refresh", methods=["POST"])
+def api_config_manager_billing_prices_refresh():
+    """Force-refresh the auto price catalog from the upstream source."""
+    result = billing.get_price_catalog().refresh(force=True)
+    status = 200 if result.get("ok") else 502
+    return jsonify(result), status
 
 
 @dashboard_bp.route("/api/config-manager/config-hashes", methods=["GET"])
