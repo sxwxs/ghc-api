@@ -1,7 +1,10 @@
 """The agent loop: stream a reply, run its tool calls, repeat until the model stops; aborts keep transcripts valid."""
 
 import asyncio
+import contextlib
+import sys
 import time
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -100,6 +103,16 @@ async def run(state: RunState, prompts: list[Message]) -> AgentEnd:
         # Every await sits inside a turn, so an abort always interrupts an open turn.
         state.emit(TurnEnd(turn=turn))
         end = AgentEnd(reason="aborted")
+    except Exception as error:
+        # A bug or a failing listener, such as a session store on a full disk. End the run rather than leave it
+        # running forever. The cleanup may fail the same way; replay answers any tool call it leaves open.
+        traceback.print_exc(file=sys.stderr)
+        if state.reply is not None and state.reply.stop_reason not in ("error", "aborted"):
+            state.reply.stop_reason = "error"
+        with contextlib.suppress(Exception):
+            _finish_aborted(state, "Not run: the run failed")
+            state.emit(TurnEnd(turn=turn))
+        end = AgentEnd(reason="error", error_message=f"{type(error).__name__}: {error}")
     state.emit(end)
     return end
 
@@ -199,9 +212,9 @@ def _commit(state: RunState, batch: ToolBatch) -> None:
         )
 
 
-def _finish_aborted(state: RunState) -> None:
+def _finish_aborted(state: RunState, note: str = "Aborted") -> None:
     if state.reply is not None:
-        # stream_assistant already marked it aborted and emitted message_end.
+        # stream_assistant already marked it aborted (or failed) and emitted message_end.
         state.messages.append(state.reply)
         state.reply = None
     batch = state.batch
@@ -213,5 +226,5 @@ def _finish_aborted(state: RunState) -> None:
         if call.id not in batch.started:
             tool = state.tools.get(call.name)
             _start(state, batch, call, tool.kind if tool else "other", call.name)
-        _finish(state, batch, call.id, text_result("Aborted", is_error=True), None)
+        _finish(state, batch, call.id, text_result(note, is_error=True), None)
     _commit(state, batch)

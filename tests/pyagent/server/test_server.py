@@ -183,12 +183,34 @@ async def test_fork_starts_a_new_session_from_a_message(harness: Harness) -> Non
     await harness.run(state.session_id, "q1")
     await harness.run(state.session_id, "q2")
     messages = await harness.client.messages(state.session_id)
+    await harness.client.set_model(state.session_id, "test", "m2")
+    await harness.client.set_thinking(state.session_id, "high")
     fork = await harness.client.fork(state.session_id, messages[1].id)
     assert fork.session_id != state.session_id
     assert [m.id for m in await harness.client.messages(fork.session_id)] == [m.id for m in messages[:2]]
+    # The fork runs with the source's current settings, and keeps them when reopened.
+    await harness.client.close_session(fork.session_id)
+    reloaded = await harness.client.load_session(fork.session_id)
+    assert (reloaded.model.id, reloaded.thinking) == ("m2", "high")
     with pytest.raises(RemoteError) as error:
         await harness.client.fork(state.session_id, "nope")
     assert error.value.code == jsonrpc.ENTRY_NOT_FOUND
+
+
+async def test_a_run_that_cannot_start_leaves_the_session_idle(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    harness.provider.replies.append(text_reply("ok"))
+    await harness.client.initialize()
+    state = await harness.client.new_session()
+    await harness.client.set_model(state.session_id, "deepseek")
+    with pytest.raises(RemoteError) as error:
+        await harness.client.prompt(state.session_id, "hi")
+    assert error.value.code == jsonrpc.MODEL_ERROR
+    assert not (await harness.client.state(state.session_id)).running
+    await harness.client.set_model(state.session_id, "test", "m1")
+    assert (await harness.run(state.session_id, "hi")).reason == "completed"
 
 
 async def test_settings_and_unknown_sessions(harness: Harness) -> None:

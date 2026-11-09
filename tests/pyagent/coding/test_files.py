@@ -77,6 +77,14 @@ async def test_edit_keeps_bom_and_crlf(tmp_path: Path) -> None:
     assert (tmp_path / "w.txt").read_bytes() == "\ufeffuno\r\ndos\r\n".encode()
 
 
+async def test_edit_leaves_files_that_are_not_utf8_untouched(tmp_path: Path) -> None:
+    latin1 = "caf\u00e9 = 1\nx = 2\n".encode("latin-1")
+    (tmp_path / "l.py").write_bytes(latin1)
+    with pytest.raises(ToolError, match="not UTF-8"):
+        await call(EditTool(), tmp_path, path="l.py", edits=[{"oldText": "x = 2", "newText": "x = 3"}])
+    assert (tmp_path / "l.py").read_bytes() == latin1
+
+
 @pytest.mark.parametrize(
     ("edits", "message"),
     [

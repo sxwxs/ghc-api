@@ -112,6 +112,21 @@ async def test_tool_calls_run_and_their_results_reach_the_next_request(model: Mo
     assert agent.messages[-1].content == text_reply("done").blocks
 
 
+async def test_a_failing_listener_ends_the_run_with_an_error(model: Model) -> None:
+    agent, _, events = make_agent(model, [tool_reply(("c1", "echo", {"text": "A"})), text_reply("later")])
+
+    def fail_on_tool_end(event: AgentEvent) -> None:  # like a session store that cannot write
+        if isinstance(event, ToolEnd):
+            raise OSError("disk full")
+
+    unsubscribe = agent.subscribe(fail_on_tool_end)
+    end = await agent.prompt("go")
+    assert (end.reason, end.error_message) == ("error", "OSError: disk full")
+    assert types(events)[-1] == "agent_end" and not agent.running
+    unsubscribe()
+    assert (await agent.prompt("again")).reason == "completed"
+
+
 async def test_unknown_tools_and_invalid_arguments_become_error_results(model: Model) -> None:
     agent, provider, _ = make_agent(
         model, [tool_reply(("c1", "nope", {}), ("c2", "echo", {"text": 5})), text_reply("ok")]

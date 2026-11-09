@@ -82,7 +82,13 @@ class EditTool(Tool[EditParams]):
         path = resolve_path(params.path, ctx.cwd)
         if not path.is_file():
             raise ToolError(f"File not found: {params.path}")
-        raw = (await asyncio.to_thread(path.read_bytes)).decode("utf-8", "replace")
+        try:
+            # Strict: the whole file is written back, so replacement characters would destroy bytes outside the edits.
+            raw = (await asyncio.to_thread(path.read_bytes)).decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ToolError(
+                f"{params.path} is not UTF-8 text ({error.reason}); edit cannot change it safely"
+            ) from error
         bom = "\ufeff" if raw.startswith("\ufeff") else ""
         crlf = "\r\n" in raw
         # Match on LF text: the model will not reproduce an invisible BOM or CR characters.

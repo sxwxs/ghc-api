@@ -74,7 +74,11 @@ class AgentSession:
                 self.agent.steer(message)
             return self.run_id, "queued"
         self.run_id = new_id()
-        self.agent.start([message])
+        try:
+            self.agent.start([message])
+        except BaseException:
+            self.run_id = None  # e.g. no API key: nothing started, so the session must not look busy
+            raise
         return self.run_id, "started"
 
     def abort(self) -> list[str]:
@@ -177,7 +181,14 @@ def open_session(setup: SessionSetup, path: Path) -> AgentSession:
 def fork_session(setup: SessionSetup, source: AgentSession, entry_id: str) -> AgentSession:
     """A new session with the source's active branch from the root through `entry_id`."""
     store = source.store.fork(entry_id, _directory(setup, source.store.cwd))
-    return _build(setup, store, source.agent.model, source.agent.thinking, store.context().messages)
+    model, thinking = source.agent.model, source.agent.thinking
+    # The copied branch holds the settings in force at entry_id; record the ones the fork runs with.
+    context = store.context()
+    if (context.provider, context.model_id) != (model.provider, model.id):
+        store.append_model_change(model.provider, model.id)
+    if context.thinking != thinking:
+        store.append_thinking_change(thinking)
+    return _build(setup, store, model, thinking, context.messages)
 
 
 def _build(
