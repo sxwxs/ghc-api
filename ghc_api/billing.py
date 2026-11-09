@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import re
 import threading
 import time
@@ -78,6 +79,7 @@ BUILTIN_PRICES: Dict[str, Dict[str, Optional[float]]] = {
 }
 
 _PRICE_FIELDS = ("input_per_1m", "output_per_1m", "cache_read_per_1m", "cache_write_per_1m")
+_REQUIRED_PRICE_FIELDS = ("input_per_1m", "output_per_1m")
 
 
 @dataclass(frozen=True)
@@ -133,19 +135,27 @@ def _bare_model_name(normalized: str) -> str:
 
 
 def _valid_price_map(raw: Any) -> Optional[Dict[str, Optional[float]]]:
+    """Validate a price map; None if invalid.
+
+    Input and output prices are required (0 is a valid, intentionally free
+    price) so an incomplete entry can never silently make a model free.
+    Cache prices are optional and fall back to the input price.
+    """
     if not isinstance(raw, dict):
         return None
     cleaned: Dict[str, Optional[float]] = {}
     for field in _PRICE_FIELDS:
         value = raw.get(field)
         if value is None:
+            if field in _REQUIRED_PRICE_FIELDS:
+                return None
             cleaned[field] = None
             continue
         try:
             number = float(value)
         except (TypeError, ValueError):
             return None
-        if number < 0:
+        if not math.isfinite(number) or number < 0:
             return None
         cleaned[field] = number
     currency = raw.get("currency") or DEFAULT_CURRENCY
@@ -223,8 +233,9 @@ class PriceCatalog:
         cleaned = _valid_price_map(prices)
         if cleaned is None:
             raise ValueError(
-                "prices must be non-negative numbers with fields "
-                f"{list(_PRICE_FIELDS)} and currency {DEFAULT_CURRENCY}"
+                "input_per_1m and output_per_1m are required; all prices must be "
+                f"finite non-negative numbers (fields {list(_PRICE_FIELDS)}, "
+                f"currency {DEFAULT_CURRENCY})"
             )
         key = (model or "").strip()
         if not key:
@@ -310,7 +321,7 @@ class PriceCatalog:
             output_per_token = float(entry.get("output_cost_per_token"))
         except (TypeError, ValueError):
             return None
-        if input_per_token < 0 or output_per_token < 0:
+        if not all(math.isfinite(v) and v >= 0 for v in (input_per_token, output_per_token)):
             return None
 
         def per_1m(value: Any) -> Optional[float]:
@@ -318,7 +329,7 @@ class PriceCatalog:
                 number = float(value)
             except (TypeError, ValueError):
                 return None
-            return number * MICROS_PER_USD if number >= 0 else None
+            return number * MICROS_PER_USD if math.isfinite(number) and number >= 0 else None
 
         return {
             "input_per_1m": input_per_token * MICROS_PER_USD,
@@ -343,6 +354,13 @@ class PriceCatalog:
         if not acquired:
             return {"ok": True, "skipped": True, "reason": "refresh already in progress"}
         try:
+            return self._fetch_and_store()
+        finally:
+            self._fetch_lock.release()
+
+    def _fetch_and_store(self) -> Dict[str, Any]:
+        """Fetch, convert and persist the auto catalog. Caller holds _fetch_lock."""
+        try:
             response = requests.get(PRICE_SOURCE_URL, timeout=PRICE_FETCH_TIMEOUT_SECONDS)
             response.raise_for_status()
             payload = response.json()
@@ -358,6 +376,12 @@ class PriceCatalog:
                 converted = self._convert_litellm_entry(entry)
                 if converted is not None:
                     self._store_auto_entry(models, key, converted)
+
+        if not models:
+            # Keep the previous (possibly stale) catalog and retry on the
+            # failure interval rather than waiting a full TTL.
+            self._last_fetch_failure_ts = time.time()
+            return {"ok": False, "error": "price source returned no usable entries"}
 
         with self._lock:
             self._auto_models = models
@@ -376,7 +400,7 @@ class PriceCatalog:
                 )
             except Exception as e:
                 meta["persist_error"] = str(e)
-        return {"ok": bool(models), "count": len(models), **meta}
+        return {"ok": True, "count": len(models), **meta}
 
     def ensure_fresh(self) -> Dict[str, Any]:
         """Best-effort TTL refresh; safe to call on every billing read."""
@@ -610,30 +634,6 @@ def _usage_fields() -> Dict[str, int]:
     }
 
 
-def _normalize_counts(model: str, counts: Dict[str, int], semantics_fixed: bool) -> Dict[str, int]:
-    """Normalize pre-fix cache token semantics for OpenAI-style upstreams.
-
-    Rows written before the billing-semantics fix recorded ``input_tokens``
-    including cached reads for OpenAI-style paths, with the cached reads also
-    stored in create/read fields -- billing them as-is counts the cached
-    portion twice. Rows that carry the ``provider`` field were written by the
-    fixed reporter and already report the uncached slice; Claude models always
-    used the uncached-slice semantics.
-    """
-    if semantics_fixed or model.lower().startswith("claude"):
-        return counts
-    cached = counts["cache_creation_input_tokens"] + counts["cache_read_input_tokens"]
-    uncached = max(0, counts["input_tokens"] - cached)
-    return {
-        "request_count": counts["request_count"],
-        "input_tokens": uncached,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": cached,
-        "output_tokens": counts["output_tokens"],
-        "total_tokens": uncached + cached + counts["output_tokens"],
-    }
-
-
 def get_billing_overview(
     range_key: str = "all",
     user_filter: Optional[str] = None,
@@ -646,6 +646,10 @@ def get_billing_overview(
     ``provider`` matches are billed (older lines without a provider field are
     treated as ``copilot`` for back-compat). Costs are computed at read time
     against the layered price catalog.
+
+    Counts are billed as recorded. Lines written before the cached-token
+    semantics fix mixed inclusive and uncached input counts per model and
+    cannot be told apart, so their costs are approximate.
     """
     from .token_usage_reporter import _range_cutoff_ts, _resolve_usage_files
 
@@ -693,20 +697,17 @@ def get_billing_overview(
                     for model_usage in models:
                         if not isinstance(model_usage, dict):
                             continue
-                        # Rows without a provider field predate the fixed
-                        # token semantics and need read-side normalization.
-                        semantics_fixed = "provider" in model_usage
                         entry_provider = str(model_usage.get("provider") or "copilot").lower()
                         if entry_provider != provider_lower:
                             continue
                         model_id = str(model_usage.get("model") or model_usage.get("model_id") or "unknown")
-                        counts = _normalize_counts(model_id, {
+                        counts = {
                             "request_count": int(model_usage.get("request_count", 0) or 0),
                             "input_tokens": int(model_usage.get("input_tokens", 0) or 0),
                             "cache_creation_input_tokens": int(model_usage.get("cache_creation_input_tokens", 0) or 0),
                             "cache_read_input_tokens": int(model_usage.get("cache_read_input_tokens", 0) or 0),
                             "output_tokens": int(model_usage.get("output_tokens", 0) or 0),
-                        }, semantics_fixed)
+                        }
                         counts["total_tokens"] = (
                             counts["input_tokens"]
                             + counts["cache_creation_input_tokens"]
@@ -744,10 +745,14 @@ def get_billing_overview(
         )
 
     rows: List[Dict[str, Any]] = []
+    # Model and grand totals are sums of the already-rounded row costs, so
+    # every total equals the sum of the rows a client would add up.
+    model_cost_micros: Dict[str, int] = {}
     for (machine, user_id, model_id), usage in sorted(
         user_rows.items(), key=lambda item: (item[0][0].lower(), item[0][1].lower(), item[0][2].lower())
     ):
         cost = _cost_for(model_id, usage)
+        model_cost_micros[model_id] = model_cost_micros.get(model_id, 0) + cost["cost_micro_usd"]
         rows.append({
             "machine": machine,
             "user_id": user_id,
@@ -763,11 +768,12 @@ def get_billing_overview(
     for model_id, usage in sorted(model_rows.items(), key=lambda item: item[0].lower()):
         cost = _cost_for(model_id, usage)
         price = cost.get("price")
+        micros = model_cost_micros.get(model_id, 0)
         model_row_list.append({
             "model_id": model_id,
             **usage,
-            "cost_micro_usd": cost["cost_micro_usd"],
-            "cost_usd": cost["cost_micro_usd"] / MICROS_PER_USD,
+            "cost_micro_usd": micros,
+            "cost_usd": micros / MICROS_PER_USD,
             "currency": cost["currency"],
             "unpriced": cost["unpriced"],
             "price_source": price.get("source") if price else None,

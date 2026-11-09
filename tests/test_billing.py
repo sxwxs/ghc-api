@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -112,6 +113,29 @@ class TestPriceResolution:
         with pytest.raises(ValueError):
             catalog.set_override("bad", {"input_per_1m": 1.0, "output_per_1m": 1.0, "currency": "EUR"})
 
+    @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", float("nan"), float("inf")])
+    def test_non_finite_price_rejected(self, catalog, value):
+        with pytest.raises(ValueError):
+            catalog.set_override("bad", {"input_per_1m": value, "output_per_1m": 1.0})
+        assert catalog.list_overrides() == {}
+
+    @pytest.mark.parametrize("prices", [
+        {},
+        {"input_per_1m": 1.0},
+        {"output_per_1m": 1.0},
+        {"input_per_1m": None, "output_per_1m": 1.0, "cache_read_per_1m": 0.1},
+    ])
+    def test_input_and_output_prices_required(self, catalog, prices):
+        # A partial override must not silently make a model (or a token class) free.
+        with pytest.raises(ValueError):
+            catalog.set_override("partial", prices)
+
+    def test_zero_prices_allowed_for_free_models(self, catalog):
+        catalog.set_override("free-model", {"input_per_1m": 0, "output_per_1m": 0})
+        result = billing.compute_cost("free-model", input_tokens=1000, output_tokens=1000, catalog=catalog)
+        assert result["unpriced"] is False
+        assert result["cost_micro_usd"] == 0
+
 
 class TestConvertLitellmEntry:
     def test_converts_per_token_to_per_1m(self, catalog):
@@ -136,6 +160,52 @@ class TestConvertLitellmEntry:
 
     def test_skips_missing_costs(self, catalog):
         assert catalog._convert_litellm_entry({"mode": "chat"}) is None
+
+    def test_skips_non_finite_costs(self, catalog):
+        assert catalog._convert_litellm_entry({
+            "mode": "chat", "input_cost_per_token": float("nan"), "output_cost_per_token": 1e-6,
+        }) is None
+        converted = catalog._convert_litellm_entry({
+            "mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6,
+            "cache_read_input_token_cost": float("inf"),
+        })
+        assert converted["cache_read_per_1m"] is None
+
+
+def _litellm_response(payload):
+    response = mock.Mock()
+    response.raise_for_status.return_value = None
+    response.json.return_value = payload
+    return response
+
+
+VALID_LITELLM = {"auto-model": {"mode": "chat", "input_cost_per_token": 1e-6, "output_cost_per_token": 2e-6}}
+
+
+class TestCatalogRefresh:
+    def test_fetch_lock_released_after_success_and_failure(self, catalog):
+        responses = [_litellm_response(VALID_LITELLM), OSError("offline"), _litellm_response(VALID_LITELLM)]
+        with mock.patch("ghc_api.billing.requests.get", side_effect=responses) as get:
+            assert catalog.refresh(force=True)["ok"] is True
+            assert catalog.refresh(force=True)["ok"] is False
+            assert catalog.refresh(force=True)["ok"] is True
+        # Every forced refresh really fetched; none was skipped as "in progress".
+        assert get.call_count == 3
+
+    def test_empty_catalog_keeps_previous_prices(self, catalog):
+        with mock.patch("ghc_api.billing.requests.get", return_value=_litellm_response(VALID_LITELLM)):
+            assert catalog.refresh(force=True)["ok"] is True
+        fetched_at = catalog.catalog_status()["fetched_at"]
+
+        with mock.patch("ghc_api.billing.requests.get", return_value=_litellm_response({"x": {"mode": "image"}})):
+            result = catalog.refresh(force=True)
+
+        assert result["ok"] is False
+        assert catalog.resolve("auto-model").source == "auto"
+        # fetched_at is not advanced, so the TTL does not suppress the next retry.
+        assert catalog.catalog_status()["fetched_at"] == fetched_at
+        # The persisted cache still holds the previous catalog.
+        assert billing.PriceCatalog(config_dir=catalog.cache_path.parent).resolve("auto-model") is not None
 
 
 class TestComputeCost:
@@ -293,78 +363,47 @@ class TestBillingOverview:
         assert row["cost_micro_usd"] == 10_000_000
         assert overview["totals"]["cost_micro_usd"] == 10_000_000
 
-
-class TestReadSideNormalization:
-    """Pre-fix usage rows (no provider field) must not double-count cached
-    tokens that are already included in input_tokens."""
-
-    @pytest.fixture()
-    def patched_usage_files(self, tmp_path, monkeypatch):
+    def test_model_total_equals_sum_of_rounded_rows(self, tmp_path, catalog, monkeypatch):
+        # One gpt-4o input token is 2.5 micros, rounded to 3 per row. The model
+        # total must be 3 + 3 = 6 (what a client summing rows gets), not a
+        # re-rounded round(5.0) = 5.
         usage_file = _write_usage_file(tmp_path, [
-            {
-                # Pre-fix OpenAI-style row: input INCLUDES the cached reads.
-                "timestamp": 1_700_000_000,
-                "user_id": "alice",
-                "models": [
-                    {"model": "gpt-x", "request_count": 1,
-                     "input_tokens": 2_000_000, "output_tokens": 100_000,
-                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1_500_000},
-                ],
-            },
-            {
-                # Post-fix row (has provider field): input is already uncached.
-                "timestamp": 1_700_000_001,
-                "user_id": "alice",
-                "models": [
-                    {"provider": "copilot", "model": "gpt-x", "request_count": 1,
-                     "input_tokens": 500_000, "output_tokens": 100_000,
-                     "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1_500_000},
-                ],
-            },
-            {
-                # Pre-fix Claude row: anthropic semantics, input already uncached.
-                "timestamp": 1_700_000_002,
-                "user_id": "alice",
-                "models": [
-                    {"model": "claude-x", "request_count": 1,
-                     "input_tokens": 300_000, "output_tokens": 10_000,
-                     "cache_creation_input_tokens": 50_000, "cache_read_input_tokens": 200_000},
-                ],
-            },
+            {"timestamp": 1_700_000_000, "user_id": user, "models": [
+                {"provider": "copilot", "model": "gpt-4o", "request_count": 1,
+                 "input_tokens": 1, "output_tokens": 0,
+                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+            ]}
+            for user in ("alice", "bob")
         ])
         monkeypatch.setattr(
             "ghc_api.token_usage_reporter._resolve_usage_files",
             lambda: [("m", usage_file)],
         )
-
-    def test_prefix_rows_not_double_counted(self, patched_usage_files, catalog):
-        catalog.set_override("gpt-x", {
-            "input_per_1m": 1.0, "output_per_1m": 10.0, "cache_read_per_1m": 0.1,
-        })
-        catalog.set_override("claude-x", {
-            "input_per_1m": 1.0, "output_per_1m": 10.0,
-            "cache_read_per_1m": 0.1, "cache_write_per_1m": 1.0,
-        })
         overview = billing.get_billing_overview("all", refresh_catalog=False)
-        rows = {r["model_id"]: r for r in overview["model_rows"]}
+        assert [r["cost_micro_usd"] for r in overview["rows"]] == [3, 3]
+        assert overview["model_rows"][0]["cost_micro_usd"] == 6
+        assert overview["totals"]["cost_micro_usd"] == 6
 
-        # Pre-fix gpt-x normalized to uncached = 2M - 1.5M = 0.5M; the post-fix
-        # row (already uncached) adds another 0.5M -> 1.0M aggregated.
-        # Per-row cost = 0.5*1 + 1.5*0.1 + 0.1*10 = 1.65 USD, two rows = 3.3 USD.
-        assert rows["gpt-x"]["input_tokens"] == 1_000_000
-        assert rows["gpt-x"]["cache_read_input_tokens"] == 3_000_000
-        assert rows["gpt-x"]["cost_micro_usd"] == 3_300_000
-
-        # Post-fix row keeps its own semantics; totals aggregate both rows.
-        assert rows["gpt-x"]["output_tokens"] == 200_000
-
-        # Claude pre-fix row: input already uncached, create stays a write.
-        cl = rows["claude-x"]
-        assert cl["input_tokens"] == 300_000
-        assert cl["cache_creation_input_tokens"] == 50_000
-        assert cl["cache_read_input_tokens"] == 200_000
-        # 0.3*1 + 0.05*1 + 0.2*0.1 + 0.01*10 = 0.47 USD
-        assert cl["cost_micro_usd"] == 470_000
+    def test_legacy_rows_billed_as_recorded(self, tmp_path, catalog, monkeypatch):
+        # Lines without a provider field are billed as copilot with their
+        # counts unchanged (no read-side re-interpretation of cached tokens).
+        usage_file = _write_usage_file(tmp_path, [
+            {"timestamp": 1_700_000_000, "user_id": "alice", "models": [
+                {"model": "gpt-x", "request_count": 1,
+                 "input_tokens": 2_000_000, "output_tokens": 100_000,
+                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1_500_000},
+            ]},
+        ])
+        monkeypatch.setattr(
+            "ghc_api.token_usage_reporter._resolve_usage_files",
+            lambda: [("m", usage_file)],
+        )
+        catalog.set_override("gpt-x", {"input_per_1m": 1.0, "output_per_1m": 10.0, "cache_read_per_1m": 0.1})
+        row = billing.get_billing_overview("all", refresh_catalog=False)["model_rows"][0]
+        assert row["input_tokens"] == 2_000_000
+        assert row["cache_read_input_tokens"] == 1_500_000
+        # 2.0*1 + 1.5*0.1 + 0.1*10 = 3.15 USD
+        assert row["cost_micro_usd"] == 3_150_000
 
 
 class TestCacheProviderStats:

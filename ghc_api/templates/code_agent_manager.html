@@ -527,7 +527,7 @@
                     <td>${formatNumber(row.data_sent || 0)}</td>
                     <td>${formatNumber(row.data_received || 0)}</td>
                     <td>${formatNumber(row.total_data || 0)}</td>
-                    <td>${formatCostMicros(costsByModel.get(row.model_id) || 0)}</td>
+                    <td>${formatModelCost(costsByModel, row.model_id)}</td>
                 `;
                 tbody.appendChild(tr);
             }
@@ -541,8 +541,16 @@
 
             const sumRow = document.createElement("tr");
             sumRow.className = "sum-row";
-            let totalCostMicros = 0;
-            for (const value of costsByModel.values()) totalCostMicros += value;
+            let totalCostCell = "—";
+            if (costsByModel) {
+                let totalCostMicros = 0;
+                let partial = false;
+                for (const entry of costsByModel.values()) {
+                    totalCostMicros += entry.micros;
+                    partial = partial || entry.unpriced;
+                }
+                totalCostCell = formatCostMicros(totalCostMicros) + (partial ? " (partial)" : "");
+            }
             sumRow.innerHTML = `
                 <td>Sum</td>
                 <td>${formatNumber(sum.request_count)}</td>
@@ -554,19 +562,31 @@
                 <td>${formatNumber(sum.data_sent)}</td>
                 <td>${formatNumber(sum.data_received)}</td>
                 <td>${formatNumber(sum.total_data)}</td>
-                <td>${formatCostMicros(totalCostMicros)}</td>
+                <td>${totalCostCell}</td>
             `;
             tbody.appendChild(sumRow);
         }
 
+        // model_id -> { micros, unpriced } over the selected machines, or null
+        // when billing data is unavailable (so costs never silently show 0).
         function billingCostsByModel() {
+            if (!billingOverviewData || !Array.isArray(billingOverviewData.rows)) return null;
             const costs = new Map();
-            if (!billingOverviewData || !Array.isArray(billingOverviewData.rows)) return costs;
             for (const row of billingOverviewData.rows) {
                 if (!tokenUsageSelectedMachines.has(row.machine)) continue;
-                costs.set(row.model_id, (costs.get(row.model_id) || 0) + (row.cost_micro_usd || 0));
+                const entry = costs.get(row.model_id) || { micros: 0, unpriced: false };
+                entry.micros += row.cost_micro_usd || 0;
+                entry.unpriced = entry.unpriced || !!row.unpriced;
+                costs.set(row.model_id, entry);
             }
             return costs;
+        }
+
+        // "—" = billing unavailable, or not billed (e.g. non-Copilot provider).
+        function formatModelCost(costs, modelId) {
+            const entry = costs ? costs.get(modelId) : null;
+            if (!entry) return "—";
+            return entry.unpriced ? "Unpriced" : formatCostMicros(entry.micros);
         }
 
         function formatCostMicros(micros) {
@@ -907,8 +927,10 @@
                         <td>${p.output_per_1m ?? ""}</td>
                         <td>${p.cache_read_per_1m ?? ""}</td>
                         <td>${p.cache_write_per_1m ?? ""}</td>
-                        <td><button onclick="deletePriceOverride('${encodeURIComponent(model)}')">Delete</button></td>
+                        <td><button>Delete</button></td>
                     `;
+                    // Bind as data, never interpolate the model name into JS.
+                    tr.querySelector("button").addEventListener("click", () => deletePriceOverride(model));
                     tbody.appendChild(tr);
                 }
             } catch (error) {
@@ -969,10 +991,9 @@
             }
         }
 
-        async function deletePriceOverride(encodedModel) {
-            const model = decodeURIComponent(encodedModel);
+        async function deletePriceOverride(model) {
             try {
-                const response = await fetch("/api/config-manager/billing/prices/" + encodedModel, { method: "DELETE" });
+                const response = await fetch("/api/config-manager/billing/prices/" + encodeURIComponent(model), { method: "DELETE" });
                 const data = await response.json();
                 if (!response.ok) {
                     throw new Error(data.error || ("Failed to delete override (" + response.status + ")"));
