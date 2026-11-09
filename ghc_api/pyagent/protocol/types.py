@@ -56,6 +56,7 @@ class SessionParams(Wire):
 
 class ListSessionsParams(Wire):
     cwd: str | None = None  # default: the server's working directory
+    all: bool = False  # every working directory's sessions; `cwd` is ignored
 
 
 class ListSessionsResult(Wire):

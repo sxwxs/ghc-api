@@ -10,6 +10,7 @@ from ghc_api.pyagent.coding.session_store import (
     SessionError,
     SessionStore,
     find_session,
+    list_all_sessions,
     list_sessions,
     sessions_dir,
 )
@@ -108,3 +109,11 @@ def test_find_and_list_sessions(tmp_path: Path) -> None:
     assert isinstance(store.branch()[0], MessageEntry)
     with pytest.raises(SessionError):
         find_session(tmp_path, "../../etc")
+
+
+def test_list_all_sessions_spans_working_directories(tmp_path: Path) -> None:
+    for cwd in ("/a", "/b"):
+        store = SessionStore.create(cwd, sessions_dir(tmp_path, cwd))
+        store.append_message(user_message(f"in {cwd}"))
+        store.close()
+    assert sorted(s.cwd for s in list_all_sessions(tmp_path)) == ["/a", "/b"]

@@ -43,7 +43,7 @@
 | `initialize` | `{protocolVersion: 1, clientInfo?: {name, version?}}` | `{protocolVersion, agentInfo: {name, version}, capabilities: {multiSession, fork, images}}` | 版本不符返回 `UNSUPPORTED_VERSION` |
 | `session/new` | `{cwd?, provider?, model?, thinking?}` | `SessionState` | 未填的用服务端工作目录和配置默认值 |
 | `session/load` | `{sessionId}` | `SessionState` | 打开已保存的会话；已打开则直接返回状态 |
-| `session/list` | `{cwd?}` | `{sessions: SessionSummary[]}` | 该目录的会话，最近更新的在前 |
+| `session/list` | `{cwd?, all?}` | `{sessions: SessionSummary[]}` | 该目录的会话，最近更新的在前；`all: true` 列出所有目录的会话（忽略 `cwd`） |
 | `session/close` | `{sessionId}` | `{}` | 中止运行并释放 |
 | `session/state` | `{sessionId}` | `SessionState` | |
 | `session/messages` | `{sessionId}` | `{messages: Message[]}` | 当前分支的全部消息 |

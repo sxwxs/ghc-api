@@ -13,7 +13,7 @@ from ..ai.models import ModelError, has_credentials, resolve_model
 from ..coding.agent_session import AgentSession, SessionSetup, fork_session, new_session, open_session
 from ..coding.config import select_model
 from ..coding.session_events import EventEnvelope, SessionState
-from ..coding.session_store import SessionError, find_session, list_sessions, sessions_dir
+from ..coding.session_store import SessionError, find_session, list_all_sessions, list_sessions, sessions_dir
 from ..protocol.jsonrpc import (
     ENTRY_NOT_FOUND,
     INCOMING,
@@ -176,6 +176,8 @@ class Server:
         return self._add(open_session(self.setup, path))
 
     async def _list_sessions(self, params: ListSessionsParams) -> ListSessionsResult:
+        if params.all:
+            return ListSessionsResult(sessions=list_all_sessions(self.setup.home))
         return ListSessionsResult(sessions=list_sessions(sessions_dir(self.setup.home, params.cwd or self.cwd)))
 
     async def _close_session(self, params: SessionParams) -> Empty:

@@ -116,9 +116,10 @@ class Client:
         """Open a stored session."""
         return await self.call("session/load", SessionParams(session_id=session_id), SessionState)
 
-    async def list_sessions(self, cwd: str | None = None) -> list[SessionSummary]:
-        """Stored sessions of a working directory, most recent first."""
-        return (await self.call("session/list", ListSessionsParams(cwd=cwd), ListSessionsResult)).sessions
+    async def list_sessions(self, cwd: str | None = None, all: bool = False) -> list[SessionSummary]:
+        """Stored sessions of a working directory, or of all of them, most recent first."""
+        params = ListSessionsParams(cwd=cwd, all=all)
+        return (await self.call("session/list", params, ListSessionsResult)).sessions
 
     async def close_session(self, session_id: str) -> None:
         """Abort its run and release it on the server."""

@@ -3,6 +3,7 @@
 import os
 import re
 import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -236,8 +237,17 @@ def find_session(home: Path, session_id: str) -> Path:
 
 def list_sessions(directory: Path) -> list[SessionSummary]:
     """Sessions in `directory`, most recently updated first."""
+    return _summaries(directory.glob("*.jsonl"))
+
+
+def list_all_sessions(home: Path) -> list[SessionSummary]:
+    """Sessions of every working directory, most recently updated first."""
+    return _summaries((home / "sessions").glob("*/*.jsonl"))
+
+
+def _summaries(paths: Iterable[Path]) -> list[SessionSummary]:
     summaries: list[SessionSummary] = []
-    for path in directory.glob("*.jsonl"):
+    for path in paths:
         try:
             header, entries = _read(path)
         except SessionError:
