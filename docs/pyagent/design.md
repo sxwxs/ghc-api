@@ -194,7 +194,7 @@ JSON-RPC 标准码，加应用码：`NOT_INITIALIZED`、`UNSUPPORTED_VERSION`、
 
 ## 10. 模型与配置
 
-- 三类接口：`openai_chat`（OpenAI Chat Completions 兼容）、`openai_responses`（Responses API）、`anthropic`（Messages API）。httpx 直连，自己解析 SSE，不依赖官方 SDK。流式数据用宽松的 msgspec Struct 解码：字段都可选，未知字段忽略。
+- 三类接口：`openai_chat`（OpenAI Chat Completions 兼容）、`openai_responses`（Responses API）、`anthropic`（Messages API）。httpx 直连，自己解析 SSE，不依赖官方 SDK。接口按厂商设置，单个模型可用 `models.<id>.api` 覆盖（同一网关按模型走不同接口，如 ghc-api）。流式数据用宽松的 msgspec Struct 解码：字段都可选，未知字段忽略。
 - `openai_responses` 无状态：`store=false`，请求 `reasoning.encrypted_content`，推理项原样存进 `thinking.signature`，下一轮回放给同一模型；消息的 `phase`（`commentary`/`final_answer`）存进 `text.signature` 一并回放。
 - 思考级别：`openai_responses` 映射为 `reasoning.effort`（`off` 不发 effort，不能关闭推理的模型用默认值）；`openai_chat` 和 `anthropic` 按厂商格式：`reasoning_effort`、`deepseek`、`openrouter`、`anthropic_adaptive`、`anthropic_budget`、`none`。
 - 内置厂商预设：anthropic、openai（Responses）、deepseek、moonshot、openrouter、ollama。未知模型用默认参数（200k 上下文、32k 输出）。

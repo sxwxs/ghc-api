@@ -30,6 +30,8 @@ class ModelSpec(Wire):
     images: bool = False
     cost: ModelCost = msgspec.field(default_factory=ModelCost)
     thinking_format: ThinkingFormat | None = None  # overrides the provider's format
+    # Overrides the provider's api, for gateways that serve each model on its own endpoint from one base URL.
+    api: ApiName | None = None
 
 
 class ProviderConfig(Wire):
@@ -177,7 +179,7 @@ def resolve_model(providers: dict[str, ProviderConfig], provider: str, model_id:
     return Model(
         id=model_id,
         provider=provider,
-        api=config.api,
+        api=spec.api or config.api,
         base_url=config.base_url,
         headers=config.headers,
         api_key_env=config.api_key_env,

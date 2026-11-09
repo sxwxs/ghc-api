@@ -43,6 +43,20 @@ def test_resolve_uses_the_default_model_and_spec_defaults() -> None:
         resolve_model(providers, "ollama", None)
 
 
+def test_a_model_can_use_another_api_than_its_provider() -> None:
+    providers = merge_providers(
+        {
+            "gateway": ProviderOverride(
+                api="openai_responses",
+                base_url="http://localhost:1",
+                models={"claude": ModelSpec(api="anthropic"), "gpt": ModelSpec()},
+            )
+        }
+    )
+    assert resolve_model(providers, "gateway", "claude").api == "anthropic"
+    assert resolve_model(providers, "gateway", "gpt").api == "openai_responses"
+
+
 def test_api_key_comes_from_config_then_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     model = Model(id="m", provider="p", api="openai_chat", base_url="x", api_key_env="TEST_KEY")
     monkeypatch.delenv("TEST_KEY", raising=False)
