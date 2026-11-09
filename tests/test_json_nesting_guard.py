@@ -157,10 +157,10 @@ class DeepJsonRequestRejectionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertNotIn("input_tokens", response.get_json())
 
-    def test_dashboard_and_agent_endpoints_are_covered_too(self):
+    def test_dashboard_and_search_endpoints_are_covered_too(self):
         """The hook is global because get_json() raises RecursionError before
         any route code runs, including on non-LLM endpoints."""
-        for path in ("/api/runtime-config", "/api/agent/sessions", "/v3/search/web"):
+        for path in ("/api/runtime-config", "/v3/search/web"):
             with self.subTest(path=path):
                 response = self._post(path, 100000, '{"query":"q","nested":%s}')
                 self.assertEqual(response.status_code, 400)

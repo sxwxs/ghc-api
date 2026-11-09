@@ -144,9 +144,6 @@ class State:
         # and no auth check is performed.
         self.enable_auth: bool = False
 
-        # Session persistence settings
-        self.session_flush_interval: int = 5  # seconds between buffered writes
-
         # Live throughput metrics (/live). Number of finished-request samples
         # kept in memory for tokens-per-second aggregation. Each sample is one
         # small tuple, so the default stays well under 1 MB; windows wider than

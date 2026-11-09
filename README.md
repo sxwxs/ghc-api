@@ -21,7 +21,6 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Request File Statistics**: Build reusable line-level indexes, inspect size/latency/token distributions, and drill into exact historical requests
 - **Content Filtering**: Remove or add content from system prompts and tool results
 - **Code Agent Manager UI**: Install Codex/Claude/Copilot CLI and manage config sync from dashboard
-- **Code Agent Interaction**: Web UI to create and interact with Claude Code, Codex, and Copilot CLI agents via the Agent Client Protocol (ACP)
 - **Config Sync**: Sync Claude Code, Codex, and ghc-api config files with OneDrive
 - **Safe Backups**: Auto backup overwritten config files as `*.YYYYMMDD_HHMMSS.bak`
 - **Machine Token Usage Logs**: Periodic token usage JSONL per machine with cross-machine overview in dashboard
@@ -465,25 +464,6 @@ The page is served by ghc-api and needs no external chart library or network ser
 ```
 
 Omitting `kind` preserves the existing `statistics` behavior. Completed performance jobs return `result.perf` and quality/file metadata, not a `dataset_id`.
-
-### Code Agent Interaction
-
-The Code Agent page (`/agent`) provides a web interface for interacting with AI coding agents via the [Agent Client Protocol (ACP)](https://agentclientprotocol.com/). Supported agents:
-
-| Agent | Package | Install |
-|-------|---------|---------|
-| Claude Code | `@agentclientprotocol/claude-agent-acp` | `npm install -g @agentclientprotocol/claude-agent-acp` |
-| Codex | `codex-acp` | Download from [GitHub releases](https://github.com/zed-industries/codex-acp/releases) |
-| Copilot CLI | `@github/copilot` | `npm install -g @github/copilot` |
-
-Agent binaries are resolved in order: environment variable override (`CLAUDE_ACP_BINARY`, `CODEX_ACP_BINARY`, `COPILOT_CLI_BINARY`), then PATH lookup, then npm global packages.
-
-Session data is stored in:
-
-- OneDrive mode: `.ghc-api/agents/{hostname}_{os}/sessions/`
-- Fallback: `~/.ghc-api/sessions/` (or `%APPDATA%/ghc-api/sessions/` on Windows)
-
-Recent working directories are persisted to `workdirs.json` in the same location. Sessions from other machines are browsable via the machine selector dropdown when OneDrive is enabled.
 
 ### User-Token Authentication (Optional)
 
@@ -944,18 +924,6 @@ Active only when `enable_auth: true`. See [User-Token Authentication](#user-toke
 
 Per-user filtering is also available on existing endpoints via the `?user=<user_id>` query parameter: `/api/stats`, `/api/requests`, `/api/requests/search`, `/api/config-manager/token-usage`.
 
-### Code Agent (ACP)
-
-- `GET /agent` - Code agent interaction page
-- `POST /api/agent/sessions` - Create a new agent session
-- `GET /api/agent/sessions` - List sessions (paginated, filterable by machine)
-- `GET /api/agent/sessions/<id>` - Get session detail with message history
-- `POST /api/agent/sessions/<id>/prompt` - Send a prompt (returns SSE stream)
-- `POST /api/agent/sessions/<id>/cancel` - Cancel the current prompt
-- `DELETE /api/agent/sessions/<id>` - Terminate a session
-- `GET /api/agent/machines` - List available machine names
-- `GET /api/agent/workdirs` - List recent working directories
-
 ## Example Usage
 
 ### With OpenAI Python SDK
@@ -1026,16 +994,10 @@ Access the web dashboard at `http://localhost:8313/` to:
   - See config mismatch alerts
   - View token usage overview by machine/model with time-range and machine filters
   - View config hash overview by machine and shared OneDrive hash with create times
-- Use Code Agent page (`/agent`) to:
-  - Create interactive sessions with Claude Code, Codex, or Copilot CLI
-  - Send prompts and receive real-time streaming responses (text, tool calls, thinking)
-  - Toggle verbose mode for detailed tool inputs/outputs, stdout/stderr, and token usage
-  - Browse sessions across machines via OneDrive
-  - Resume viewing past session history
 
 ### Shared navigation
 
-Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Code Agent, Request Stats, Historical Performance, and the raw JSON stats endpoints) live behind the **Other** menu.
+Every page renders the same top bar from `ghc_api/static/nav.js` and `nav.css`, so a new page appears in the nav everywhere at once instead of only where someone remembered to add a link. Frequent destinations (Dashboard, Live Throughput, Request Browser, Chat, Code Agent Manager) sit inline; occasional ones (Runtime Config Override, Request Stats, Historical Performance, and the raw JSON stats endpoints) live behind the **Other** menu.
 
 A template only declares its title and any page-specific buttons:
 
@@ -1062,7 +1024,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
 | **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
-| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
+| **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*` | basic-auth — request data and usage aggregates may expose other users' activity |
 
 ### Sample nginx config
 
@@ -1166,8 +1128,7 @@ sudo htpasswd -B /etc/nginx/ghc-api.htpasswd alice
   - `translator.py` - OpenAI/Anthropic format translation
   - `streaming.py` - Streaming response handling
   - `token_manager.py` - GitHub token management
-  - `routes/` - API endpoint handlers (openai, anthropic, dashboard, agent)
-  - `acp/` - Agent Client Protocol implementation (JSON-RPC 2.0 over subprocess stdio)
+  - `routes/` - API endpoint handlers (openai, anthropic, dashboard)
 - **Thread-Safe Caching**: Uses threading locks for concurrent access
 - **Memory-Based Storage**: No external database dependencies
 - **RESTful API Design**: Follows REST conventions

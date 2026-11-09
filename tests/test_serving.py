@@ -34,7 +34,6 @@ SSE_MODULES = [
     "ghc_api/sse/base.py",
     "ghc_api/routes/openai.py",
     "ghc_api/routes/anthropic.py",
-    "ghc_api/routes/agent.py",
 ]
 
 

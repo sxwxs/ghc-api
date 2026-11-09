@@ -6,7 +6,6 @@ from flask import Flask, Request, g, jsonify, request
 
 from .auth import ANONYMOUS_USER_ID, require_auth
 from .json_guard import MAX_JSON_NESTING_DEPTH, exceeds_max_nesting
-from .routes.agent import agent_bp
 from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
 from .routes.dashboard import dashboard_bp
@@ -21,7 +20,7 @@ from .state import state
 # Paths that require an approved user token when state.enable_auth is True.
 # Dynamic model detail routes and raw catalog slash variants are also protected
 # by endpoint in _auth_gate. Other paths bypass auth at the Flask layer
-# (dashboard, /signup, /api/users/*, /agent, static files). Production deployments
+# (dashboard, /signup, /api/users/*, static files). Production deployments
 # are expected to put nginx (or equivalent) in front to gate admin paths.
 PROTECTED_PATHS = frozenset({
     "/v1/chat/completions",
@@ -150,7 +149,6 @@ def create_app() -> Flask:
     app.register_blueprint(images_bp)
     app.register_blueprint(proxy_bp)
     app.register_blueprint(anthropic_bp)
-    app.register_blueprint(agent_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(webiq_bp)
     app.register_blueprint(anysearch_bp)

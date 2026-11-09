@@ -36,7 +36,6 @@
         // Available everywhere: on pages that define the modal it opens it,
         // elsewhere the link lands on the dashboard which opens it from the hash.
         { href: '/#runtime-config', label: 'Runtime Config Override', action: 'openRuntimeConfigModal' },
-        { href: '/agent', label: 'Code Agent' },
         { href: '/request-stats', label: 'Request Stats' },
         { href: '/request-perf', label: 'Historical Performance' },
         { separator: true },
