@@ -1,4 +1,4 @@
-"""Browser-free checks for the Chat page Decision mode (System One models).
+"""Browser-free checks for the Chat page Decision mode (System One and OpenAI Decisions models).
 
 The fake fetch never contacts a model service. Skip when Node.js is unavailable.
 """
@@ -75,6 +75,8 @@ async function fetch(url, options) {
             {id: 'microsoft-decision-1', display_name: 'Microsoft-Decision-1',
              model_type: 'decisions', supported_endpoints: ['/v1/systemone']},
             {id: 'decision-typed', model_type: 'decisions', supported_endpoints: []},
+            {id: 'gpt-6-luna-decisions', display_name: 'GPT-6 Luna Decisions',
+             model_type: 'decisions', supported_endpoints: ['/v1/decisions']},
             {id: 'gpt-image', model_type: 'image', supported_endpoints: ['/v1/images/generations']},
         ] }) };
     }
@@ -105,15 +107,18 @@ const lastMessage = () => container.children.at(-1);
     // Decision models are listed and labelled; proxy systemone models too.
     const proxyKey = run("configuredModelKey('dec', 'proxy-decision')");
     const keys = run('Object.keys(modelTargets)');
-    for (const key of ['gpt-chat', 'microsoft-decision-1', 'decision-typed', proxyKey]) {
+    for (const key of ['gpt-chat', 'microsoft-decision-1', 'decision-typed', 'gpt-6-luna-decisions', proxyKey]) {
         assert.ok(keys.includes(key), key + ' missing from the model list');
     }
     const labels = elements['model-select'].children.flatMap(group => group.children)
         .map(option => option.textContent);
     assert.ok(labels.some(l => l.startsWith('Microsoft-Decision-1') && l.includes('[decision]')));
+    assert.ok(labels.some(l => l.startsWith('GPT-6 Luna Decisions') && l.includes('[decision]')));
     assert.ok(labels.some(l => l.startsWith('gpt-chat') && !l.includes('[decision]')));
     assert.equal(run("isDecisionOnly('microsoft-decision-1')"), true);
     assert.equal(run("isDecisionOnly('decision-typed')"), true);
+    assert.equal(run("isDecisionOnly('gpt-6-luna-decisions')"), true);
+    assert.equal(run("endpointForModel('gpt-6-luna-decisions', 'decisions')"), '/v1/decisions');
     assert.equal(run("isDecisionOnly('gpt-chat')"), false);
     assert.equal(run("endpointForModel('microsoft-decision-1', 'systemone')"), '/v1/systemone');
     assert.equal(run(`endpointForModel(${JSON.stringify(proxyKey)}, 'systemone')`), '/proxy/dec/v1/systemone');
@@ -125,7 +130,7 @@ const lastMessage = () => container.children.at(-1);
     assert.equal(run('chatMode'), 'decision');
     assert.ok(elements['mode-decision'].classList.contains('active'));
     assert.ok(!elements['mode-chat'].classList.contains('active'));
-    assert.equal(elements['chat-input'].value, run('DECISION_TEMPLATE'));
+    assert.equal(elements['chat-input'].value, run('SYSTEMONE_DECISION_TEMPLATE'));
     assert.equal(elements['search-provider'].disabled, true);
 
     // Raw mode routes a decision-only model to System One automatically.
@@ -212,6 +217,76 @@ const lastMessage = () => container.children.at(-1);
     await run('sendMessage()');
     assert.equal(calls.length, before);
     assert.match(lastMessage().children[0].textContent, /does not support the decision API/);
+
+    // OpenAI Decisions models (GPT-6 Luna Decisions) use /v1/decisions and its
+    // array-based schema; an untouched template follows the selected model.
+    elements['model-select'].value = 'microsoft-decision-1';
+    elements['chat-input'].value = '';
+    run("setMode('decision')");
+    assert.equal(elements['chat-input'].value, run('SYSTEMONE_DECISION_TEMPLATE'));
+    elements['model-select'].value = 'gpt-6-luna-decisions';
+    run('onModelChange()');
+    assert.equal(run('chatMode'), 'decision');
+    assert.equal(elements['chat-input'].value, run('OPENAI_DECISION_TEMPLATE'));
+    assert.equal(run('resolveEndpoint({})'), '/v1/decisions');
+    const lunaEndpoints = elements['endpoint-select'].children.map(o => o.value);
+    assert.ok(lunaEndpoints.includes('/v1/decisions'));
+    assert.ok(!lunaEndpoints.includes('/v1/systemone'));
+
+    nextResponse = {status: 200, body: JSON.stringify({
+        model: 'gpt-6-luna',
+        answers: [
+            {type: 'choice', name: 'team', choice: 'billing', confidence: 0.93, probabilities: [
+                {value: 'support', probability: 0.05}, {value: 'billing', probability: 0.93},
+                {value: 'sales', probability: 0.02}]},
+            {type: 'predicate', name: 'urgent', probability: 0.3},
+            {type: 'score', name: 'severity', score: 1.1, confidence: 0.8, probabilities: [
+                {value: 0, label: 'Cosmetic', probability: 0.1},
+                {value: 1, label: 'Workaround', probability: 0.7},
+                {value: 2, label: 'Blocked', probability: 0.2}]},
+            {type: 'choice', name: 'refund', choice: true, confidence: 0.8, probabilities: [
+                {value: true, probability: 0.8}, {value: false, probability: 0.2}]},
+            {type: 'refusal', name: 'unsafe'},
+        ],
+        usage: {input_tokens: 298, input_tokens_details: {cached_tokens: 256, cache_write_tokens: 0},
+                output_tokens: 0},
+    })};
+    await run('sendMessage()');
+    assert.equal(calls.at(-1).url, '/v1/decisions');
+    const lunaSent = JSON.parse(calls.at(-1).options.body);
+    assert.equal(lunaSent.model, 'gpt-6-luna-decisions');
+    assert.match(lunaSent.input, /charged twice/);
+    assert.ok(Array.isArray(lunaSent.questions));
+
+    const lunaRequest = container.children.at(-2).innerHTML;
+    assert.match(lunaRequest, /decision-state">Customer: I was charged twice/);
+    assert.match(lunaRequest, /choice<\/span> <strong>team<\/strong>/);
+    assert.match(lunaRequest, /predicate<\/span> <strong>urgent<\/strong>/);
+
+    const lunaRendered = lastMessage().innerHTML;
+    assert.match(lunaRendered, /decision-option chosen"><span class="decision-option-label" title="billing">billing/);
+    assert.match(lunaRendered, /billing \u00b7 confidence 93\.0%/);
+    assert.match(lunaRendered, /yes 30\.0%/);
+    assert.match(lunaRendered, /score 1\.10/);
+    assert.match(lunaRendered, /decision-option chosen"><span class="decision-option-label" title="1 \u2014 Workaround">/);
+    assert.match(lunaRendered, /decision-option chosen"><span class="decision-option-label" title="true">true/);
+    assert.match(lunaRendered, /decision-id">unsafe<\/span><span class="decision-type">refusal<\/span><span class="decision-summary">refused/);
+    assert.match(lunaRendered, /tokens 298 in \(256 cached\) \/ 0 out/);
+
+    // Restoring a session for the other decision API swaps an untouched
+    // template too; an edited request is kept.
+    const lunaSessionId = run('activeSessionId');
+    assert.equal(run('getActiveSession().model'), 'gpt-6-luna-decisions');
+    run("sessions.push({id: 'systemone-session', model: 'microsoft-decision-1', messages: []})");
+    elements['chat-input'].value = run('OPENAI_DECISION_TEMPLATE');
+    run("setActiveSession('systemone-session')");
+    assert.equal(run('chatMode'), 'decision');
+    assert.equal(elements['chat-input'].value, run('SYSTEMONE_DECISION_TEMPLATE'));
+    run(`setActiveSession(${JSON.stringify(lunaSessionId)})`);
+    assert.equal(elements['chat-input'].value, run('OPENAI_DECISION_TEMPLATE'));
+    elements['chat-input'].value = '{"input": "edited"}';
+    run("setActiveSession('systemone-session')");
+    assert.equal(elements['chat-input'].value, '{"input": "edited"}');
 })().catch(err => { console.error(err); process.exitCode = 1; });
 """
 

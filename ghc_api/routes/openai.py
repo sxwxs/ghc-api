@@ -16,6 +16,7 @@ import requests
 from flask import Blueprint, Response, g, jsonify, request, stream_with_context
 
 from ..api_helpers import (
+    decisions_upstream_path,
     ensure_copilot_token,
     get_copilot_base_url,
     get_copilot_headers,
@@ -1470,16 +1471,37 @@ def _invalid_request(message: str, code: str, param: str = None, status: int = 4
     return jsonify({"error": error}), status
 
 
+# Copilot serves two decision APIs whose request schemas differ, so each local
+# route forwards only to models that advertise its own upstream API.
+_DECISION_APIS = {
+    "systemone": ("/v1/systemone", systemone_upstream_path, "System One decision API"),
+    "decisions": ("/v1/decisions", decisions_upstream_path, "OpenAI Decisions API"),
+}
+
+
 @openai_bp.route("/v1/systemone", methods=["POST"])
 @openai_bp.route("/systemone", methods=["POST"])
 def systemone():
-    """System One decision API passthrough to Copilot (Microsoft-Decision-1).
+    """System One decision API passthrough to Copilot (Microsoft-Decision-1)."""
+    return _decision_passthrough("systemone")
+
+
+@openai_bp.route("/v1/decisions", methods=["POST"])
+@openai_bp.route("/decisions", methods=["POST"])
+def decisions():
+    """OpenAI Decisions API passthrough to Copilot (GPT-6 Luna Decisions)."""
+    return _decision_passthrough("decisions")
+
+
+def _decision_passthrough(api: str):
+    """Forward a decision request to the Copilot API serving the model.
 
     Decision models score a closed set of options and return calibrated
     probabilities. The body is forwarded unchanged apart from model-name
     translation; question/answer shapes are not inspected so upstream
     validation errors reach the client as-is.
     """
+    endpoint_label, resolve_upstream_path, api_label = _DECISION_APIS[api]
     try:
         start_time = time.time()
         ensure_copilot_token()
@@ -1507,13 +1529,14 @@ def systemone():
         if not state.models:
             from ..api_helpers import fetch_models
             fetch_models()
-        upstream_path = systemone_upstream_path(translated_model)
+        upstream_path = resolve_upstream_path(translated_model)
         if upstream_path is None:
-            return _invalid_request(
-                f"Model '{original_model}' does not support the System One decision API.",
-                "unsupported_model",
-                "model",
-            )
+            message = f"Model '{original_model}' does not support the {api_label}."
+            for other_label, other_resolver, other_api_label in _DECISION_APIS.values():
+                if other_label != endpoint_label and other_resolver(translated_model):
+                    message = (f"Model '{original_model}' uses the {other_api_label}; "
+                               f"send the request to {other_label}.")
+            return _invalid_request(message, "unsupported_model", "model")
 
         upstream_payload = dict(payload)
         upstream_payload["model"] = translated_model
@@ -1535,7 +1558,7 @@ def systemone():
                 break
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
                 last_connection_error = exc
-                log_connection_retry(request_id, "/v1/systemone", conn_attempt, connection_retries, exc)
+                log_connection_retry(request_id, endpoint_label, conn_attempt, connection_retries, exc)
                 ensure_copilot_token()
                 if conn_attempt < connection_retries:
                     time.sleep(min(2 ** conn_attempt, 8))
@@ -1553,10 +1576,9 @@ def systemone():
         except ValueError:
             result = response.text
 
-        # Decision models report flat token counts and have no cache tiers.
-        usage = result.get("usage", {}) if isinstance(result, dict) else {}
-        if not isinstance(usage, dict):
-            usage = {}
+        # System One reports flat token counts; the Decisions API uses the
+        # Responses usage shape, including cached and cache-write tokens.
+        usage_counts = responses_usage_counts(result.get("usage") if isinstance(result, dict) else None)
         cache.add_request(request_id, {
             "request_headers": request_headers,
             "client_ip": client_ip,
@@ -1565,18 +1587,17 @@ def systemone():
             "response_body": result,
             "model": original_model,
             "translated_model": translated_model if translated_model != original_model else None,
-            "endpoint": "/v1/systemone",
+            "endpoint": endpoint_label,
             "status_code": response.status_code,
             "request_size": request_size,
             "response_size": response_size,
-            "input_tokens": usage.get("input_tokens", 0) or 0,
-            "output_tokens": usage.get("output_tokens", 0) or 0,
+            **usage_counts,
             "duration": duration,
             "user_id": user_id,
         })
 
         if not response.ok:
-            log_error_request("/v1/systemone", upstream_payload, response.text, response.status_code, client_ip)
+            log_error_request(endpoint_label, upstream_payload, response.text, response.status_code, client_ip)
         # Return the upstream body byte-for-byte so probabilities and
         # validation errors are not re-serialized.
         return Response(
