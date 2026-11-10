@@ -463,6 +463,7 @@ def main():
     print(f"Responses API: http://{host}:{port}/v1/responses")
     print(f"Embeddings API: http://{host}:{port}/v1/embeddings")
     print(f"System One decision API: http://{host}:{port}/v1/systemone")
+    print(f"OpenAI Decisions API: http://{host}:{port}/v1/decisions")
     print(f"Images API: http://{host}:{port}/v1/images/generations, /v1/images/edits")
     print(f"Anthropic API: http://{host}:{port}/v1/messages")
     if webiq.is_configured(state):

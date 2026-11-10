@@ -590,7 +590,7 @@
         .image-gallery a, .image-gallery button { display: inline-block; margin: 8px 10px 0 0; }
         .image-error { color: #b71c1c; white-space: pre-wrap; }
 
-        /* Decision mode (System One decision models) */
+        /* Decision mode (System One and OpenAI Decisions models) */
         .message.decision-request {
             align-self: flex-end;
             background: #eef1fd;
@@ -778,7 +778,7 @@
                     <button id="mode-raw" onclick="setMode('raw')">Raw</button>
                     <button id="mode-image" onclick="setMode('image')">Image</button>
                     <button id="mode-decision" onclick="setMode('decision')"
-                            title="Decision models (System One): score options and return probabilities">Decision</button>
+                            title="Decision models (System One, OpenAI Decisions): score options and return probabilities">Decision</button>
                 </div>
                 <label for="search-provider">Search</label>
                 <select class="search-provider-select" id="search-provider" onchange="onSearchProviderChange()"
@@ -1206,6 +1206,7 @@
             return baseUrl + (apiStyle === 'responses' ? '/responses' :
                 apiStyle === 'messages' ? '/messages' :
                 apiStyle === 'systemone' ? '/systemone' :
+                apiStyle === 'decisions' ? '/decisions' :
                 apiStyle === 'generations' ? '/images/generations' :
                 apiStyle === 'edits' ? '/images/edits' : '/chat/completions');
         }
@@ -1214,15 +1215,30 @@
             return endpoint === '/systemone' || endpoint === 'systemone' || endpoint === '/v1/systemone';
         }
 
+        function isOpenAIDecisionsEndpoint(endpoint) {
+            return endpoint === '/decisions' || endpoint === 'decisions' || endpoint === '/v1/decisions';
+        }
+
+        function isDecisionEndpoint(endpoint) {
+            return isSystemOneEndpoint(endpoint) || isOpenAIDecisionsEndpoint(endpoint);
+        }
+
         function targetSupportsDecision(target) {
             return !!target && (target.modelType === 'decisions' ||
-                (target.supportedEndpoints || []).some(isSystemOneEndpoint));
+                (target.supportedEndpoints || []).some(isDecisionEndpoint));
         }
 
         // Decision-only models return probabilities, never messages.
         function targetIsDecisionOnly(target) {
             return targetSupportsDecision(target) &&
-                !(target.supportedEndpoints || []).some(e => !isSystemOneEndpoint(e));
+                !(target.supportedEndpoints || []).some(e => !isDecisionEndpoint(e));
+        }
+
+        // System One and the OpenAI Decisions API take different request
+        // schemas. Like the server, a typed model without an endpoint list is
+        // treated as System One.
+        function decisionApiStyle(target) {
+            return (target?.supportedEndpoints || []).some(isOpenAIDecisionsEndpoint) ? 'decisions' : 'systemone';
         }
 
         function supportsDecision(selectionKey) {
@@ -1380,6 +1396,13 @@
                 setMode(isDecisionOnly(model) ? 'decision' : 'chat');
             } else if (chatMode === 'chat' && isDecisionOnly(model)) {
                 setMode('decision');
+            } else if (chatMode === 'decision') {
+                // Swap an untouched template for the new model's decision API.
+                const chatInput = document.getElementById('chat-input');
+                if (isDecisionTemplate(chatInput.value)) {
+                    chatInput.value = decisionTemplateFor(model);
+                    autoResize(chatInput);
+                }
             }
         }
 
@@ -1413,7 +1436,8 @@
                 endpoints.push({ value: '/v1/responses', label: '/v1/responses' });
                 endpoints.push({ value: '/v1/chat/completions', label: '/v1/chat/completions' });
                 if (targetSupportsDecision(target)) {
-                    endpoints.push({ value: '/v1/systemone', label: '/v1/systemone' });
+                    const path = endpointForModel(null, decisionApiStyle(target));
+                    endpoints.push({ value: path, label: path });
                 }
             }
 
@@ -2534,8 +2558,8 @@
 
         // ---- Modes ----
 
-        // Starting point for Decision mode; the selected model is filled in on send.
-        const DECISION_TEMPLATE = JSON.stringify({
+        // Starting points for Decision mode; the selected model is filled in on send.
+        const SYSTEMONE_DECISION_TEMPLATE = JSON.stringify({
             state: 'Customer: I was charged twice for my order. Please refund the duplicate payment.',
             questions: {
                 team: {
@@ -2554,6 +2578,36 @@
             },
         }, null, 2);
 
+        const OPENAI_DECISION_TEMPLATE = JSON.stringify({
+            input: 'Customer: I was charged twice for my order. Please refund the duplicate payment.',
+            questions: [
+                {
+                    type: 'choice',
+                    name: 'team',
+                    instructions: 'Which team should handle this message?',
+                    choices: [
+                        { value: 'billing', description: 'Payments, invoices, and refunds' },
+                        { value: 'support', description: 'Technical issues and bugs' },
+                        { value: 'sales', description: 'Pricing and new purchases' },
+                    ],
+                },
+                {
+                    type: 'predicate',
+                    name: 'urgent',
+                    instructions: 'Does this need a reply within one hour?',
+                },
+            ],
+        }, null, 2);
+
+        function decisionTemplateFor(selectionKey) {
+            return decisionApiStyle(selectedModelTarget(selectionKey)) === 'decisions'
+                ? OPENAI_DECISION_TEMPLATE : SYSTEMONE_DECISION_TEMPLATE;
+        }
+
+        function isDecisionTemplate(value) {
+            return value === SYSTEMONE_DECISION_TEMPLATE || value === OPENAI_DECISION_TEMPLATE;
+        }
+
         function setMode(mode) {
             chatMode = mode;
             const chatInput = document.getElementById('chat-input');
@@ -2570,15 +2624,15 @@
             } else if (mode === 'image') {
                 chatInput.placeholder = 'Describe an image or the changes to your reference images... (Enter to send)';
             } else if (mode === 'decision') {
-                chatInput.placeholder = 'Decision request JSON with "state" and "questions" (Ctrl+Enter to send).\nThe selected model is filled in automatically.';
+                chatInput.placeholder = 'Decision request JSON (Ctrl+Enter to send).\nThe selected model is filled in automatically.';
             } else {
                 chatInput.placeholder = 'Type a message... (Enter to send, Shift+Enter for newline)';
             }
             // Offer the template only on an empty input, and do not leave an
             // untouched template behind in the other modes.
-            if (mode === 'decision' && !chatInput.value.trim()) {
-                chatInput.value = DECISION_TEMPLATE;
-            } else if (mode !== 'decision' && chatInput.value === DECISION_TEMPLATE) {
+            if (mode === 'decision' && (!chatInput.value.trim() || isDecisionTemplate(chatInput.value))) {
+                chatInput.value = decisionTemplateFor();
+            } else if (mode !== 'decision' && isDecisionTemplate(chatInput.value)) {
                 chatInput.value = '';
             }
             autoResize(chatInput);
@@ -2597,7 +2651,7 @@
                 return endpointForModel(selectionKey, payload.image || payload.images ? 'edits' : 'generations');
             }
             if (isDecisionOnly(selectionKey)) {
-                return endpointForModel(selectionKey, 'systemone');
+                return endpointForModel(selectionKey, decisionApiStyle(selectedModelTarget(selectionKey)));
             }
             if (selectedModelTarget(selectionKey)) {
                 return endpointForModel(
@@ -2827,24 +2881,62 @@
             return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
         }
 
+        // System One keys questions and answers by name; the OpenAI Decisions
+        // API uses ordered arrays whose items carry a name.
+        function decisionEntries(collection) {
+            if (Array.isArray(collection)) {
+                return collection.map((item, index) =>
+                    [item && item.name != null ? String(item.name) : '#' + (index + 1), item]);
+            }
+            return collection && typeof collection === 'object' ? Object.entries(collection) : [];
+        }
+
+        // Shared evidence: System One "state", OpenAI Decisions "input".
+        function decisionEvidence(payload) {
+            return decisionText(payload.state != null ? payload.state : payload.input);
+        }
+
+        // System One maps option -> probability (with an optional legend); the
+        // OpenAI Decisions API lists {value, label?, probability} items whose
+        // values are typed (strings, booleans, or score level indices).
+        function decisionProbabilityEntries(answer) {
+            if (Array.isArray(answer.probabilities)) {
+                return answer.probabilities.filter(p => p && typeof p === 'object').map(p => ({
+                    value: p.value,
+                    label: String(p.value) + (typeof p.label === 'string' ? ' \u2014 ' + p.label : ''),
+                    probability: p.probability,
+                }));
+            }
+            const legend = answer.legend && typeof answer.legend === 'object' ? answer.legend : {};
+            return Object.entries(answer.probabilities).map(([option, p]) => ({
+                value: option,
+                label: option + (typeof legend[option] === 'string' ? ' \u2014 ' + legend[option] : ''),
+                probability: p,
+            }));
+        }
+
         function buildDecisionAnswerCard(id, answer) {
             const type = answer && typeof answer === 'object' ? String(answer.type || '') : '';
+            const yes = !answer ? null :
+                typeof answer.noul === 'number' ? answer.noul :
+                    type === 'predicate' && typeof answer.probability === 'number' ? answer.probability : null;
             let summary = '';
             let body = '';
-            if (answer && typeof answer.noul === 'number') {
-                summary = 'yes ' + decisionPercent(answer.noul).toFixed(1) + '%';
-                body = decisionOptionRow('yes', answer.noul, answer.noul >= 0.5) +
-                    decisionOptionRow('no', 1 - answer.noul, answer.noul < 0.5);
+            if (yes != null) {
+                summary = 'yes ' + decisionPercent(yes).toFixed(1) + '%';
+                body = decisionOptionRow('yes', yes, yes >= 0.5) +
+                    decisionOptionRow('no', 1 - yes, yes < 0.5);
+            } else if (type === 'refusal') {
+                summary = 'refused';
+                body = '<div class="decision-error">The model declined to answer this question.</div>';
             } else if (answer && answer.probabilities && typeof answer.probabilities === 'object') {
-                const legend = answer.legend && typeof answer.legend === 'object' ? answer.legend : {};
-                const entries = Object.entries(answer.probabilities)
-                    .sort((a, b) => Number(b[1]) - Number(a[1]));
-                const chosen = answer.choice != null ? String(answer.choice) :
-                    (entries.length ? entries[0][0] : null);
-                body = entries.map(([option, p]) => {
-                    const description = typeof legend[option] === 'string' ? ' \u2014 ' + legend[option] : '';
-                    return decisionOptionRow(option + description, p, option === chosen);
-                }).join('');
+                const entries = decisionProbabilityEntries(answer)
+                    .sort((a, b) => Number(b.probability) - Number(a.probability));
+                // Choice values are typed, so "true" and true are different options.
+                const chosen = answer.choice != null
+                    ? entries.find(entry => entry.value === answer.choice)
+                    : entries[0];
+                body = entries.map(entry => decisionOptionRow(entry.label, entry.probability, entry === chosen)).join('');
                 if (typeof answer.score === 'number') {
                     summary = 'score ' + answer.score.toFixed(2);
                 } else if (answer.choice != null) {
@@ -2883,11 +2975,14 @@
                     decisionRawBlock(content, 'Raw response');
                 return;
             }
-            const cards = Object.entries(answers).map(([id, answer]) => buildDecisionAnswerCard(id, answer)).join('');
+            const cards = decisionEntries(answers).map(([id, answer]) => buildDecisionAnswerCard(id, answer)).join('');
             const meta = [];
             if (parsed.model) meta.push('model ' + parsed.model);
             if (parsed.usage && typeof parsed.usage === 'object') {
-                meta.push(`tokens ${parsed.usage.input_tokens ?? '?'} in / ${parsed.usage.output_tokens ?? '?'} out`);
+                const cached = parsed.usage.input_tokens_details?.cached_tokens;
+                meta.push(`tokens ${parsed.usage.input_tokens ?? '?'} in` +
+                    (cached ? ` (${cached} cached)` : '') +
+                    ` / ${parsed.usage.output_tokens ?? '?'} out`);
             }
             div.innerHTML = label + cards +
                 (meta.length ? `<div class="decision-meta">${escapeHtml(meta.join(' \u00b7 '))}</div>` : '') +
@@ -2904,8 +2999,8 @@
             let html = `<div class="decision-label-row">${escapeHtml(endpoint || '')}</div>`;
             try {
                 const payload = JSON.parse(content);
-                html += `<div class="decision-state">${escapeHtml(decisionText(payload.state))}</div>`;
-                for (const [id, question] of Object.entries(payload.questions || {})) {
+                html += `<div class="decision-state">${escapeHtml(decisionEvidence(payload))}</div>`;
+                for (const [id, question] of decisionEntries(payload.questions)) {
                     html += `<div class="decision-question"><span class="decision-type">${escapeHtml(String(question?.type || '?'))}</span> ` +
                         `<strong>${escapeHtml(id)}</strong>: ${escapeHtml(decisionText(question?.instructions))}</div>`;
                 }
@@ -2951,8 +3046,10 @@
                 scrollToBottom();
                 return;
             }
+            const apiStyle = decisionApiStyle(target);
             if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-                appendMessageEl('error', 'A decision request must be a JSON object with "state" and "questions".');
+                appendMessageEl('error', 'A decision request must be a JSON object with ' +
+                    (apiStyle === 'decisions' ? '"input"' : '"state"') + ' and "questions".');
                 scrollToBottom();
                 return;
             }
@@ -2966,11 +3063,11 @@
             }
             session.model = selectionKey;
 
-            const endpoint = endpointForModel(selectionKey, 'systemone');
+            const endpoint = endpointForModel(selectionKey, apiStyle);
             const requestText = JSON.stringify(payload, null, 2);
             session.messages.push({ role: 'decision-request', content: requestText, endpoint });
             if (session.messages.length === 1) {
-                const preview = decisionText(payload.state).replace(/\s+/g, ' ').trim();
+                const preview = decisionEvidence(payload).replace(/\s+/g, ' ').trim();
                 session.title = '[Decision] ' + (preview.substring(0, 50) || endpoint);
                 renderSessionList();
             }

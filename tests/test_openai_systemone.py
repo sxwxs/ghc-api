@@ -49,6 +49,48 @@ DECISION_RESPONSE = {
     "usage": {"input_tokens": 57, "output_tokens": 1},
 }
 
+# OpenAI Decisions API shapes, as returned by Copilot for gpt-6-luna-decisions.
+DECISIONS_REQUEST = {
+    "model": "gpt-6-luna-decisions",
+    "input": "Customer: I was charged twice for my order.",
+    "questions": [
+        {
+            "type": "choice",
+            "name": "team",
+            "instructions": "Which team should handle this message?",
+            "choices": [
+                {"value": "billing", "description": "Payments, invoices, and refunds"},
+                {"value": "support", "description": "Technical issues and bugs"},
+            ],
+        },
+        {"type": "predicate", "name": "urgent", "instructions": "Is this urgent?"},
+    ],
+}
+
+DECISIONS_RESPONSE = {
+    "model": "gpt-6-luna",
+    "answers": [
+        {
+            "type": "choice",
+            "name": "team",
+            "choice": "billing",
+            "probabilities": [
+                {"value": "billing", "probability": 1.0},
+                {"value": "support", "probability": 0.0},
+            ],
+            "confidence": 1.0,
+        },
+        {"type": "predicate", "name": "urgent", "probability": 0.3},
+    ],
+    "usage": {
+        "input_tokens": 298,
+        "input_tokens_details": {"cached_tokens": 200, "cache_write_tokens": 8},
+        "output_tokens": 0,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 298,
+    },
+}
+
 
 @mock.patch("ghc_api.routes.openai.ensure_copilot_token")
 @mock.patch("ghc_api.routes.openai.get_copilot_headers", return_value={})
@@ -66,6 +108,11 @@ class CopilotSystemOneTests(unittest.TestCase):
                 },
                 {"id": "decision-bare-path", "supported_endpoints": ["/systemone"]},
                 {"id": "decision-type-only", "capabilities": {"type": "decisions"}},
+                {
+                    "id": "gpt-6-luna-decisions",
+                    "capabilities": {"type": "decisions", "family": "gpt-6-luna"},
+                    "supported_endpoints": ["/v1/decisions"],
+                },
                 {"id": "gpt-chat", "supported_endpoints": ["/chat/completions", "/responses"]},
             ]
         }
@@ -77,8 +124,8 @@ class CopilotSystemOneTests(unittest.TestCase):
         state.max_connection_retries = self.saved_retries
 
     def test_routes_are_protected(self, *_):
-        self.assertIn("/v1/systemone", PROTECTED_PATHS)
-        self.assertIn("/systemone", PROTECTED_PATHS)
+        for path in ("/v1/systemone", "/systemone", "/v1/decisions", "/decisions"):
+            self.assertIn(path, PROTECTED_PATHS)
 
     @mock.patch("ghc_api.routes.openai.cache.add_request")
     @mock.patch("ghc_api.routes.openai.requests.post")
@@ -120,6 +167,73 @@ class CopilotSystemOneTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(post.call_args.args[0].endswith("/v1/systemone"))
+
+    @mock.patch("ghc_api.routes.openai.requests.post")
+    def test_systemone_rejects_openai_decisions_model(self, post, *_):
+        # Copilot tags both decision APIs with type "decisions"; forwarding a
+        # /v1/decisions model to /v1/systemone fails upstream with
+        # no_available_model_endpoints.
+        response = self.client.post("/v1/systemone", json={**DECISION_REQUEST, "model": "gpt-6-luna-decisions"})
+
+        self.assertEqual(response.status_code, 400)
+        error = response.get_json()["error"]
+        self.assertEqual(error["code"], "unsupported_model")
+        self.assertIn("/v1/decisions", error["message"])
+        post.assert_not_called()
+
+    @mock.patch("ghc_api.routes.openai.cache.add_request")
+    @mock.patch("ghc_api.routes.openai.requests.post")
+    def test_decisions_forwards_body_unchanged_and_records_cache_usage(self, post, add_request, *_):
+        post.return_value = FakeResponse(DECISIONS_RESPONSE)
+
+        response = self.client.post("/v1/decisions", json=DECISIONS_REQUEST)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json(), DECISIONS_RESPONSE)
+        args, kwargs = post.call_args
+        self.assertTrue(args[0].endswith("/v1/decisions"))
+        self.assertEqual(kwargs["json"], DECISIONS_REQUEST)
+        self.assertEqual(kwargs["headers"]["X-Initiator"], "user")
+
+        cached = add_request.call_args.args[1]
+        self.assertEqual(cached["endpoint"], "/v1/decisions")
+        self.assertEqual(cached["input_tokens"], 90)
+        self.assertEqual(cached["cache_read_input_tokens"], 200)
+        self.assertEqual(cached["cache_creation_input_tokens"], 8)
+        self.assertEqual(cached["output_tokens"], 0)
+
+    @mock.patch("ghc_api.routes.openai.cache.add_request")
+    @mock.patch("ghc_api.routes.openai.requests.post")
+    def test_bare_decisions_route(self, post, _add_request, *_):
+        post.return_value = FakeResponse(DECISIONS_RESPONSE)
+
+        response = self.client.post("/decisions", json=DECISIONS_REQUEST)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(post.call_args.args[0].endswith("/v1/decisions"))
+
+    @mock.patch("ghc_api.routes.openai.requests.post")
+    def test_decisions_rejects_system_one_model(self, post, *_):
+        for model in ("microsoft-decision-1", "decision-type-only"):
+            response = self.client.post("/v1/decisions", json={**DECISIONS_REQUEST, "model": model})
+
+            self.assertEqual(response.status_code, 400)
+            error = response.get_json()["error"]
+            self.assertEqual(error["code"], "unsupported_model")
+            self.assertIn("/v1/systemone", error["message"])
+        post.assert_not_called()
+
+    @mock.patch("ghc_api.routes.openai.requests.post")
+    def test_decisions_rejects_non_decision_model_and_streaming(self, post, *_):
+        response = self.client.post("/v1/decisions", json={**DECISIONS_REQUEST, "model": "gpt-chat"})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"]["code"], "unsupported_model")
+        self.assertIn("does not support the OpenAI Decisions API", response.get_json()["error"]["message"])
+
+        response = self.client.post("/v1/decisions", json={**DECISIONS_REQUEST, "stream": True})
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"]["code"], "unsupported_stream")
+        post.assert_not_called()
 
     @mock.patch("ghc_api.routes.openai.requests.post")
     def test_rejects_streaming(self, post, *_):

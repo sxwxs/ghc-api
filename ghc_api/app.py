@@ -32,6 +32,8 @@ PROTECTED_PATHS = frozenset({
     "/embeddings",
     "/v1/systemone",
     "/systemone",
+    "/v1/decisions",
+    "/decisions",
     "/v1/images/generations",
     "/images/generations",
     "/v1/images/edits",

@@ -464,34 +464,56 @@ def supports_embeddings_api(model_id: str) -> bool:
     return model.get("capabilities", {}).get("type") == "embeddings"
 
 
-# Endpoint spellings Copilot may advertise for System One decision models.
-# Copilot lists Responses as "/responses" but Anthropic Messages as
-# "/v1/messages", so both forms are accepted.
+# Endpoint spellings Copilot may advertise for decision models. Copilot lists
+# Responses as "/responses" but Anthropic Messages as "/v1/messages", so both
+# forms are accepted. Copilot serves two decision APIs with different request
+# schemas: System One (Microsoft-Decision-1) and the OpenAI Decisions API
+# (GPT-6 Luna Decisions).
 SYSTEMONE_ENDPOINTS = ("/systemone", "/v1/systemone")
+DECISIONS_ENDPOINTS = ("/decisions", "/v1/decisions")
+
+
+def _copilot_model(model_id: str) -> Optional[Dict]:
+    if not state.models or not state.models.get("data"):
+        return None
+    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
+    return model if isinstance(model, dict) else None
+
+
+def _advertised_endpoint(model: Dict, candidates: tuple) -> Optional[str]:
+    supported_endpoints = model.get("supported_endpoints") or []
+    return next((e for e in candidates if e in supported_endpoints), None)
 
 
 def systemone_upstream_path(model_id: str) -> Optional[str]:
-    """Return the Copilot path serving a decision model, or None.
+    """Return the Copilot path serving a System One decision model, or None.
 
     Decision models (for example Microsoft-Decision-1) score a closed set of
     options instead of generating text. The advertised endpoint spelling is
     used verbatim so ghc-api follows whatever path Copilot publishes.
     """
-    if not state.models or not state.models.get("data"):
+    model = _copilot_model(model_id)
+    if model is None:
         return None
-    model = next((m for m in state.models["data"] if m.get("id") == model_id), None)
-    if not isinstance(model, dict):
-        return None
-    supported_endpoints = model.get("supported_endpoints") or []
-    for endpoint in SYSTEMONE_ENDPOINTS:
-        if endpoint in supported_endpoints:
-            return endpoint
-    # Copilot tags decision models with capabilities.type == "decisions";
-    # fall back to the path it currently advertises if the list is missing.
+    endpoint = _advertised_endpoint(model, SYSTEMONE_ENDPOINTS)
+    if endpoint:
+        return endpoint
+    # Every decision model has capabilities.type == "decisions", including
+    # OpenAI Decisions models, so the type implies System One only when no
+    # endpoint list is published.
     capabilities = model.get("capabilities") or {}
-    if isinstance(capabilities, dict) and capabilities.get("type") == "decisions":
+    if (not model.get("supported_endpoints") and isinstance(capabilities, dict)
+            and capabilities.get("type") == "decisions"):
         return "/v1/systemone"
     return None
+
+
+def decisions_upstream_path(model_id: str) -> Optional[str]:
+    """Return the Copilot path serving an OpenAI Decisions model, or None."""
+    model = _copilot_model(model_id)
+    if model is None:
+        return None
+    return _advertised_endpoint(model, DECISIONS_ENDPOINTS)
 
 
 def supports_systemone_api(model_id: str) -> bool:
