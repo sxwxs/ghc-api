@@ -272,6 +272,21 @@ const lastMessage = () => container.children.at(-1);
     assert.match(lunaRendered, /decision-option chosen"><span class="decision-option-label" title="true">true/);
     assert.match(lunaRendered, /decision-id">unsafe<\/span><span class="decision-type">refusal<\/span><span class="decision-summary">refused/);
     assert.match(lunaRendered, /tokens 298 in \(256 cached\) \/ 0 out/);
+
+    // Restoring a session for the other decision API swaps an untouched
+    // template too; an edited request is kept.
+    const lunaSessionId = run('activeSessionId');
+    assert.equal(run('getActiveSession().model'), 'gpt-6-luna-decisions');
+    run("sessions.push({id: 'systemone-session', model: 'microsoft-decision-1', messages: []})");
+    elements['chat-input'].value = run('OPENAI_DECISION_TEMPLATE');
+    run("setActiveSession('systemone-session')");
+    assert.equal(run('chatMode'), 'decision');
+    assert.equal(elements['chat-input'].value, run('SYSTEMONE_DECISION_TEMPLATE'));
+    run(`setActiveSession(${JSON.stringify(lunaSessionId)})`);
+    assert.equal(elements['chat-input'].value, run('OPENAI_DECISION_TEMPLATE'));
+    elements['chat-input'].value = '{"input": "edited"}';
+    run("setActiveSession('systemone-session')");
+    assert.equal(elements['chat-input'].value, '{"input": "edited"}');
 })().catch(err => { console.error(err); process.exitCode = 1; });
 """
 

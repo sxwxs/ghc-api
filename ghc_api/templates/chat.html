@@ -898,6 +898,8 @@
             updateWebSearchAvailability();
             if (chatMode !== 'raw' && targetSupportsImages(selectedModelTarget())) setMode('image');
             else if (chatMode === 'image') setMode(isDecisionOnly(session?.model) ? 'decision' : 'chat');
+            // Refresh an untouched template for the restored model's decision API.
+            else if (chatMode === 'decision') setMode('decision');
             renderSessionList();
             renderMessages();
             document.getElementById('chat-input').focus();
@@ -1397,12 +1399,8 @@
             } else if (chatMode === 'chat' && isDecisionOnly(model)) {
                 setMode('decision');
             } else if (chatMode === 'decision') {
-                // Swap an untouched template for the new model's decision API.
-                const chatInput = document.getElementById('chat-input');
-                if (isDecisionTemplate(chatInput.value)) {
-                    chatInput.value = decisionTemplateFor(model);
-                    autoResize(chatInput);
-                }
+                // Refresh an untouched template for the new model's decision API.
+                setMode('decision');
             }
         }
 
