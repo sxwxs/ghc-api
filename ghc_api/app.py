@@ -11,6 +11,7 @@ from .routes.anthropic import anthropic_bp
 from .routes.auth import auth_bp
 from .routes.dashboard import dashboard_bp
 from .routes.openai import openai_bp
+from .routes.gemini import gemini_bp
 from .routes.images import images_bp, MAX_IMAGE_REQUEST_BYTES, check_image_upload_limit
 from .routes.proxy import proxy_bp
 from .routes.webiq import webiq_bp
@@ -86,8 +87,9 @@ def create_app() -> Flask:
         if request.path not in PROTECTED_PATHS and request.endpoint not in {
             "openai.retrieve_model", "openai.list_models_full",
         }:
-            g.user_id = ANONYMOUS_USER_ID
-            return None
+            if request.blueprint != "gemini":
+                g.user_id = ANONYMOUS_USER_ID
+                return None
 
         result = require_auth(request)
         if result.user_id is None:
@@ -149,6 +151,7 @@ def create_app() -> Flask:
     # Register blueprints
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(openai_bp)
+    app.register_blueprint(gemini_bp)
     app.register_blueprint(images_bp)
     app.register_blueprint(proxy_bp)
     app.register_blueprint(anthropic_bp)
