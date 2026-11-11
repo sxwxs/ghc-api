@@ -49,6 +49,7 @@ from ..utils import (
     is_encrypted_content_parse_error,
     log_connection_retry,
     log_error_request,
+    log_upstream_error,
     remove_encrypted_content_items,
     responses_usage_counts,
 )
@@ -1613,10 +1614,15 @@ def _decision_passthrough(api: str):
 @openai_bp.route("/chat/completions", methods=["POST"])
 def chat_completions():
     """Handle chat completions (OpenAI format)"""
+    return handle_chat_completions(request.get_json())
+
+
+def handle_chat_completions(payload: Dict):
+    """Share Copilot transport, accounting and retries with compatibility routes."""
     try:
         start_time = time.time()
         ensure_copilot_token()
-        payload = request.get_json()
+        payload = copy.deepcopy(payload)
         original_request_body = copy.deepcopy(payload)
         payload.pop("service_tier", None)
         request_id = str(uuid.uuid4())
@@ -1801,6 +1807,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         status_code = 200
         output_started = False
         tool_index_map = {}
+        response = None
 
         try:
             # Update state to sending
@@ -1814,6 +1821,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                 timeout=state.upstream_read_timeout,
             )
             status_code = response.status_code
+            if status_code >= 400:
+                response.raise_for_status()
 
             for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
                 if line is KEEPALIVE:
@@ -1849,6 +1858,16 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                         yield f"data: {json.dumps(chunk)}\n\n"
                     except json.JSONDecodeError:
                         continue
+        except requests.exceptions.HTTPError:
+            error_occurred = True
+            log_upstream_error("chat_completions_stream", "/chat/completions",
+                               status_code=status_code, error="Upstream returned HTTP error")
+            try:
+                yield "data: " + json.dumps({
+                    "error": {"code": status_code, "message": f"Upstream returned HTTP {status_code}"},
+                }) + "\n\n"
+            except GeneratorExit:
+                print(f"[Stream] Client closed HTTP {status_code} error for request {request_id}")
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             # Timeout or connection error from upstream - log but don't try to yield after client disconnect
             error_occurred = True
@@ -1867,6 +1886,9 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
             except GeneratorExit:
                 status_code = 499
+        finally:
+            if response is not None:
+                response.close()
 
         duration = round(time.time() - start_time, 2)
 

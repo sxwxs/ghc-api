@@ -72,6 +72,70 @@ send it without triggering an upstream rejection. The original request remains
 available in request history. Configured `/proxy/<profile>/v1/...` routes
 continue forwarding `service_tier` unchanged.
 
+### Native Gemini generation (experimental)
+
+Native Gemini clients can use the existing Copilot Chat Completions transport
+through these additional routes, which honor the existing optional user-token
+authentication:
+
+- `GET /v1beta/models`
+- `POST /v1beta/models/{model}:generateContent` and `:streamGenerateContent`
+  (also available under `/v1/models/`).
+- `POST /v1internal:fetchAvailableModels`, `:generateContent` and
+  `:streamGenerateContent`; generation accepts `{ "model": "...", "request": { ... } }`.
+
+The Cloud Code catalog advertises `gemini-4-argon` as `MODEL_PLACEHOLDER_M460`
+and `gemini-3.8-flash` as `MODEL_PLACEHOLDER_M461` only when available in the
+authenticated Copilot catalog. Direct model IDs also work.
+
+Supported inputs include text, inline images, function declarations, tool calls
+and results, and returned reasoning text. `thinkingLevel` LOW/MEDIUM/HIGH maps to
+Copilot's `reasoning_effort`; `includeThoughts` controls returned reasoning.
+Antigravity CLI's tool-only model-role function responses are translated to tool
+messages, not assistant text. Mixed assistant text and function responses are
+rejected. Native thought signatures, Google built-in tools, file URIs, safety
+overrides, thinking budgets, multiple candidates and token counting are
+unsupported and fail explicitly. Google login, onboarding and account/quota
+methods return HTTP 501; this is inference compatibility, not Google account
+integration or a fully verified Antigravity replacement.
+
+#### Stream failures and bounded retries
+
+Incomplete streams are errors: the bridge never invents a finish reason or
+completes partial function arguments. Upstream streaming HTTP failures retain
+their status in an error event instead of appearing as an empty successful
+stream. Diagnostics record the model, attempt, number of forwarded events and
+exception without request bodies or authentication headers.
+
+Retries are off by default. `GHC_API_GEMINI_SAFE_STREAM_RETRY=1` allows at most
+one retry after one second, only before any event has been forwarded, for a
+missing finish reason or an explicit upstream 429/502/503/504. Forwarded text,
+reasoning, usage or function calls prohibit retry. Other malformed streams fail
+without retry. This does not retry an agent turn or replay an executed tool.
+
+#### Optional Antigravity helper substitution
+
+`GHC_API_GEMINI_FLASH_LITE_FALLBACK=1` explicitly substitutes
+`gemini-3.1-flash-lite-preview` with `gemini-3.8-flash` and maps only that
+helper's MINIMAL effort to LOW. The replacement must advertise Chat Completions
+and LOW support. The default is off; substitutions emit warnings and do not
+alter main-model requests or fabricate check results. This is not verified
+safety-equivalent to the original helper. Unsupported API safety overrides
+remain rejected.
+
+Offline regression tests and an opt-in synthetic live probe:
+
+```powershell
+python -m pytest tests\test_gemini_native.py
+python tests\probe_gemini_live.py --base-url http://127.0.0.1:8314 --model gemini-4-argon
+```
+
+The live probe consumes provider quota, targets a local test server, and checks
+JSON/SSE text and a structured tool/result roundtrip for native and Cloud Code
+routes. It does not configure user-token credentials: use an isolated loopback
+test instance with user-token authentication disabled, not an exposed server.
+Offline tests mock authentication and remote HTTP and do not call a provider.
+
 ## Installation
 
 Install the package using pip:
