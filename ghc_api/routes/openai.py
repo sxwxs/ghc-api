@@ -6,6 +6,7 @@ Copilot requests omit the unsupported OpenAI service_tier parameter.
 
 import copy
 import json
+import logging
 import queue
 import time
 import uuid
@@ -34,6 +35,7 @@ from ..config import chat_completions_model_support
 from ..model_metadata import normalize_model_metadata
 from ..perf_stats import is_output_event
 from ..sse import OpenAIResponsesStreamHandler, RetryingResponsesResponse
+from ..sse.events import DONE, json_events
 from ..sse.keepalive import (
     BackgroundResult,
     KEEPALIVE,
@@ -1808,6 +1810,8 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         output_started = False
         tool_index_map = {}
         response = None
+        terminal_sent = False
+        finish_received = False
 
         try:
             # Update state to sending
@@ -1824,40 +1828,45 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             if status_code >= 400:
                 response.raise_for_status()
 
-            for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
-                if line is KEEPALIVE:
+            def upstream_chunks():
+                for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
+                    yield KEEPALIVE if line is KEEPALIVE else line + b"\n"
+
+            for chunk in json_events(upstream_chunks()):
+                if chunk is KEEPALIVE:
                     counters.incr("ping_sent")
                     yield ": keepalive\n\n"
                     continue
+                if chunk is DONE:
+                    if not finish_received:
+                        logging.getLogger(__name__).warning(
+                            "Upstream Chat SSE missing finish reason: request=%s chunks=%d done=True",
+                            request_id, len(response_chunks),
+                        )
+                    terminal_sent = True
+                    yield "data: [DONE]\n\n"
+                    break
+                chunk = _normalize_stream_tool_calls(chunk, tool_index_map)
+                response_chunks.append(chunk)
+                finish_received = finish_received or any(
+                    choice.get("finish_reason") for choice in chunk.get("choices", [])
+                )
 
-                if not line:
-                    continue
+                if not output_started and is_output_event(chunk):
+                    output_started = True
+                    cache.update_request_state(request_id, cache.STATE_RECEIVING)
 
-                line = line.decode("utf-8")
-                if line.startswith("data: "):
-                    data = line[6:]
-                    if data == "[DONE]":
-                        yield "data: [DONE]\n\n"
-                        break
+                if chunk.get("usage"):
+                    total_output_tokens = chunk["usage"].get("completion_tokens", 0)
+                    total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                    total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
 
-                    try:
-                        chunk = json.loads(data)
-                        chunk = _normalize_stream_tool_calls(chunk, tool_index_map)
-                        response_chunks.append(chunk)
-
-                        if not output_started and is_output_event(chunk):
-                            output_started = True
-                            cache.update_request_state(request_id, cache.STATE_RECEIVING)
-
-                        # Track tokens from streaming chunks
-                        if chunk.get("usage"):
-                            total_output_tokens = chunk["usage"].get("completion_tokens", 0)
-                            total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
-
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    except json.JSONDecodeError:
-                        continue
+                yield f"data: {json.dumps(chunk)}\n\n"
+            if not terminal_sent and not finish_received:
+                logging.getLogger(__name__).warning(
+                    "Upstream Chat SSE missing finish reason: request=%s chunks=%d done=False",
+                    request_id, len(response_chunks),
+                )
         except requests.exceptions.HTTPError:
             error_occurred = True
             log_upstream_error("chat_completions_stream", "/chat/completions",
@@ -1869,15 +1878,30 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             except GeneratorExit:
                 print(f"[Stream] Client closed HTTP {status_code} error for request {request_id}")
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            # Timeout or connection error from upstream - log but don't try to yield after client disconnect
             error_occurred = True
             status_code = 504
-            print(f"[Stream] Upstream timeout/connection error for request {request_id}: {type(e).__name__}")
+            logging.getLogger(__name__).warning(
+                "Upstream Chat SSE transport failure: request=%s chunks=%d error_type=%s",
+                request_id, len(response_chunks), type(e).__name__,
+            )
+            try:
+                yield 'data: {"error":{"code":504,"message":"Upstream stream transport failure"}}\n\n'
+            except GeneratorExit:
+                pass
         except GeneratorExit:
-            # Client disconnected: fall through and record what we have.
+            if not terminal_sent:
+                error_occurred = True
+                status_code = 499
+                print(f"[Stream] Client disconnected for request {request_id}")
+        except ValueError as e:
             error_occurred = True
-            status_code = 499
-            print(f"[Stream] Client disconnected for request {request_id}")
+            status_code = 502
+            log_upstream_error("chat_completions_stream", "/chat/completions",
+                               status_code=status_code, error=f"Invalid upstream SSE: {e}")
+            try:
+                yield 'data: {"error":{"code":502,"message":"Invalid upstream SSE","retryable":false}}\n\n'
+            except GeneratorExit:
+                pass
         except Exception as e:
             error_occurred = True
             status_code = 500

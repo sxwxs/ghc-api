@@ -8,9 +8,11 @@ from flask import Blueprint, Response, current_app, jsonify, request, stream_wit
 
 from ..api_helpers import supported_reasoning_efforts
 from ..gemini_native import CLOUD_MODELS, IncompleteChatStream, from_chat, from_chat_stream, to_chat
+from ..sse.keepalive import KEEPALIVE
 from . import openai
 
 gemini_bp = Blueprint("gemini", __name__)
+BUFFERED_STREAM_MAX_BYTES = 8 * 1024 * 1024
 
 
 def _error(message, code=400):
@@ -82,23 +84,43 @@ def _generate(model=None, action=None):
     def generate():
         response = upstream
         attempts = 2 if os.environ.get("GHC_API_GEMINI_SAFE_STREAM_RETRY") == "1" else 1
+        buffered = os.environ.get("GHC_API_GEMINI_BUFFER_STREAM") == "1"
         for attempt in range(attempts):
             emitted = 0
+            pending = []
+            pending_bytes = 0
             retry = False
             try:
                 for event in from_chat_stream(response.iter_encoded(), include_thoughts):
+                    if event is KEEPALIVE:
+                        yield ": keepalive\n\n"
+                        continue
                     error = event.get("error")
                     code = error.get("code") if isinstance(error, dict) else None
-                    if not emitted and attempt + 1 < attempts and code in (429, 502, 503, 504):
+                    if (not emitted and attempt + 1 < attempts and code in (429, 502, 503, 504)
+                            and error.get("retryable") is not False):
                         current_app.logger.warning(
                             "Gemini stream retry before output: model=%s attempt=%d upstream_status=%s",
                             selected, attempt + 1, code,
                         )
                         retry = True
                         break
-                    emitted += 1
-                    yield "data: " + json.dumps(wrap(event)) + "\n\n"
+                    encoded = "data: " + json.dumps(wrap(event)) + "\n\n"
+                    if "error" in event:
+                        yield encoded
+                        return
+                    if buffered:
+                        pending_bytes += len(encoded.encode("utf-8"))
+                        if pending_bytes > BUFFERED_STREAM_MAX_BYTES:
+                            raise ValueError("Buffered Gemini response exceeds 8 MiB")
+                        pending.append(encoded)
+                    else:
+                        emitted += 1
+                        yield encoded
                 if not retry:
+                    for encoded in pending:
+                        emitted += 1
+                        yield encoded
                     return
             except (ValueError, KeyError, TypeError) as exc:
                 retry = (isinstance(exc, IncompleteChatStream) and not emitted
@@ -106,8 +128,8 @@ def _generate(model=None, action=None):
                 current_app.logger.log(
                     30 if retry else 40,
                     "Gemini stream translation failed: model=%s attempt=%d emitted_events=%d "
-                    "error_type=%s retry=%s reason=%s",
-                    selected, attempt + 1, emitted, type(exc).__name__, retry, exc,
+                    "buffered_events=%d error_type=%s retry=%s reason=%s",
+                    selected, attempt + 1, emitted, len(pending), type(exc).__name__, retry, exc,
                 )
                 if not retry:
                     yield "event: error\ndata: " + json.dumps({

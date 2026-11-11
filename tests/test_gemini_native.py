@@ -329,6 +329,75 @@ class GeminiNativeTest(unittest.TestCase):
             response = self.client.post(f"/v1beta/models/{MODEL}:generateContent", json=BODY)
         self.assertEqual(response.get_json()["candidates"][0]["content"]["parts"][0]["text"], "approved-user")
 
+    def test_buffered_stream_discards_partial_output_before_one_safe_retry(self):
+        complete = 'data: ' + json.dumps({"choices": [{
+            "delta": {"tool_calls": [{"index": 0, "id": "once", "function": {
+                "name": "lookup", "arguments": '{"key": 2}',
+            }}]}, "finish_reason": "tool_calls",
+        }]}) + '\n\ndata: [DONE]\n\n'
+        partial = 'data: {"choices":[{"delta":{"content":"discard me"}}]}\n\n'
+        for ending in ('data: [DONE]\n\n', 'data: {"error":{"code":503}}\n\n'):
+            with self.subTest(ending=ending), mock.patch.dict(os.environ, {
+                "GHC_API_GEMINI_SAFE_STREAM_RETRY": "1", "GHC_API_GEMINI_BUFFER_STREAM": "1",
+            }), mock.patch.object(gemini.time, "sleep"):
+                self.handler.reset_mock()
+                self.handler.side_effect = [
+                    Response(partial + ending, mimetype="text/event-stream"),
+                    Response(complete, mimetype="text/event-stream"),
+                ]
+                output = self.client.post(
+                    f"/v1beta/models/{MODEL}:streamGenerateContent", json=BODY,
+                ).get_data(as_text=True)
+                self.assertNotIn("discard me", output)
+                self.assertNotIn('"error"', output)
+                self.assertEqual(output.count('"functionCall"'), 1)
+                self.assertEqual(self.handler.call_count, 2)
+
+    def test_buffered_stream_exhaustion_and_malformed_tools_never_escape(self):
+        partial = 'data: {"choices":[{"delta":{"content":"discard me"}}]}\n\n'
+        malformed = 'data: ' + json.dumps({"choices": [{
+            "delta": {"tool_calls": [{"index": 0, "id": "bad", "function": {
+                "name": "lookup", "arguments": '{"key":',
+            }}]}, "finish_reason": "tool_calls",
+        }]}) + '\n\n'
+        for ending, attempts in (('data: [DONE]\n\n', 2), (malformed, 1),
+                                 ('data: {"error":{"code":502,"retryable":false}}\n\n', 1)):
+            with self.subTest(ending=ending), mock.patch.dict(os.environ, {
+                "GHC_API_GEMINI_SAFE_STREAM_RETRY": "1", "GHC_API_GEMINI_BUFFER_STREAM": "1",
+            }), mock.patch.object(gemini.time, "sleep"):
+                self.handler.reset_mock()
+                self.handler.side_effect = [
+                    Response(partial + ending, mimetype="text/event-stream") for _ in range(attempts)
+                ]
+                output = self.client.post(
+                    f"/v1beta/models/{MODEL}:streamGenerateContent", json=BODY,
+                ).get_data(as_text=True)
+                self.assertIn('"code": 502', output)
+                self.assertNotIn("discard me", output)
+                self.assertNotIn('"functionCall"', output)
+                self.assertNotIn('"finishReason"', output)
+                self.assertEqual(self.handler.call_count, attempts)
+
+    def test_buffered_stream_keeps_heartbeats_but_bounds_response_memory(self):
+        with mock.patch.dict(os.environ, {"GHC_API_GEMINI_BUFFER_STREAM": "1"}):
+            self.handler.return_value = Response(
+                ': keepalive\n\ndata: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                'data: [DONE]\n\n', mimetype="text/event-stream",
+            )
+            response = self.client.post(f"/v1beta/models/{MODEL}:streamGenerateContent", json=BODY)
+            self.assertTrue(next(iter(response.response)).startswith(b": keepalive"))
+            self.assertIn('"text": "ok"', response.get_data(as_text=True))
+            with mock.patch.object(gemini, "BUFFERED_STREAM_MAX_BYTES", 8):
+                self.handler.return_value = Response(
+                    'data: {"choices":[{"delta":{"content":"too big"},"finish_reason":"stop"}]}\n\n',
+                    mimetype="text/event-stream",
+                )
+                output = self.client.post(
+                    f"/v1beta/models/{MODEL}:streamGenerateContent", json=BODY,
+                ).get_data(as_text=True)
+                self.assertIn('"code": 502', output)
+                self.assertNotIn("too big", output)
+
     def test_parallel_call_results_are_matched_by_id(self):
         body = {"contents": [
             {"role": "model", "parts": [
@@ -377,6 +446,101 @@ class GeminiNativeTest(unittest.TestCase):
 
 
 class GeminiForwardingTest(unittest.TestCase):
+    def test_shared_stream_accepts_sse_variants_and_rejects_malformed_json(self):
+        good = {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}
+        cases = [
+            ([b"data:" + json.dumps(good).encode(), b"", b"data:[DONE]", b""], True),
+            ([b'data:{"choices":', b'data:[{"delta":{"content":"ok"},"finish_reason":"stop"}]}',
+              b"", b"data: [DONE]", b""], True),
+            ([b'data:{"choices":broken}', b"", b"data: [DONE]", b""], False),
+        ]
+        app = Flask(__name__)
+        for lines, valid in cases:
+            with self.subTest(lines=lines), app.test_request_context(), mock.patch.object(
+                openai, "cache",
+            ) as cache, mock.patch.object(openai.requests, "post") as post, mock.patch.object(
+                state, "sse_keepalive_interval", 0,
+            ), mock.patch.object(openai, "get_copilot_base_url", return_value="https://synthetic.invalid"):
+                post.return_value.status_code = 200
+                post.return_value.iter_lines.return_value = iter(lines)
+                output = openai.stream_chat_completions(
+                    {"stream": True}, {}, "synthetic-sse", "{}", 2, 0, MODEL, MODEL,
+                ).get_data(as_text=True)
+                if valid:
+                    self.assertIn('"content": "ok"', output)
+                    self.assertIn("[DONE]", output)
+                else:
+                    self.assertIn('"code":502', output.replace(" ", ""))
+                    self.assertNotIn("[DONE]", output)
+                    self.assertEqual(cache.complete_request.call_args.args[1]["status_code"], 502)
+
+    def test_normal_terminal_close_is_not_recorded_as_client_disconnect(self):
+        app = Flask(__name__)
+        with app.test_request_context(), mock.patch.object(openai, "cache") as cache, mock.patch.object(
+            openai.requests, "post",
+        ) as post, mock.patch.object(state, "sse_keepalive_interval", 0), mock.patch.object(
+            openai, "get_copilot_base_url", return_value="https://synthetic.invalid",
+        ):
+            post.return_value.status_code = 200
+            post.return_value.iter_lines.return_value = iter([
+                b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}', b"",
+                b"data: [DONE]", b"",
+            ])
+            response = openai.stream_chat_completions(
+                {"stream": True}, {}, "synthetic-terminal-close", "{}", 2, 0, MODEL, MODEL,
+            )
+            stream = iter(response.response)
+            next(stream)
+            self.assertIn("[DONE]", next(stream))
+            response.close()
+            self.assertEqual(cache.complete_request.call_args.args[1]["status_code"], 200)
+
+    def test_upstream_transport_failure_is_explicit_and_accounted(self):
+        app = Flask(__name__)
+        for error in (openai.requests.exceptions.ReadTimeout, openai.requests.exceptions.ConnectionError):
+            with self.subTest(error=error), app.test_request_context(), mock.patch.object(
+                openai, "cache",
+            ) as cache, mock.patch.object(openai.requests, "post", side_effect=error), mock.patch.object(
+                openai, "get_copilot_base_url", return_value="https://synthetic.invalid",
+            ):
+                output = openai.stream_chat_completions(
+                    {"stream": True}, {}, "synthetic-transport-failure", "{}", 2, 0, MODEL, MODEL,
+                ).get_data(as_text=True)
+                self.assertIn('"code":504', output)
+                self.assertNotIn("[DONE]", output)
+                self.assertEqual(cache.complete_request.call_args.args[1]["status_code"], 504)
+
+    def test_buffered_native_retry_crosses_shared_transport_without_replaying_tools(self):
+        first = mock.Mock(status_code=200)
+        first.iter_lines.return_value = iter([
+            b'data: {"choices":[{"delta":{"content":"discard me"}}]}', b"",
+            b"data: [DONE]", b"",
+        ])
+        second = mock.Mock(status_code=200)
+        second.iter_lines.return_value = iter([
+            b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"once","function":'
+            b'{"name":"lookup","arguments":"{\\"key\\":2}"}}]},"finish_reason":"tool_calls"}]}',
+            b"", b"data: [DONE]", b"",
+        ])
+        app = Flask(__name__)
+        app.register_blueprint(gemini.gemini_bp)
+        with mock.patch.dict(os.environ, {
+            "GHC_API_GEMINI_SAFE_STREAM_RETRY": "1", "GHC_API_GEMINI_BUFFER_STREAM": "1",
+        }), mock.patch.object(openai, "handle_chat_completions", side_effect=lambda payload:
+            openai.stream_chat_completions(payload, {}, "synthetic-cross-layer", "{}", 2, 0, MODEL, MODEL)
+        ), mock.patch.object(openai.requests, "post", side_effect=[first, second]) as post, mock.patch.object(
+            openai, "cache",
+        ), mock.patch.object(state, "sse_keepalive_interval", 0), mock.patch.object(
+            openai, "get_copilot_base_url", return_value="https://synthetic.invalid",
+        ), mock.patch.object(gemini.time, "sleep"):
+            output = app.test_client().post(
+                f"/v1beta/models/{MODEL}:streamGenerateContent", json=BODY,
+            ).get_data(as_text=True)
+            self.assertNotIn("discard me", output)
+            self.assertNotIn('"error"', output)
+            self.assertEqual(output.count('"functionCall"'), 1)
+            self.assertEqual(post.call_count, 2)
+
     def test_streaming_http_error_keeps_status_and_closes_upstream(self):
         app = Flask(__name__)
         for status in (400, 429, 503):

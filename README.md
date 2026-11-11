@@ -113,6 +113,20 @@ missing finish reason or an explicit upstream 429/502/503/504. Forwarded text,
 reasoning, usage or function calls prohibit retry. Other malformed streams fail
 without retry. This does not retry an agent turn or replay an executed tool.
 
+`GHC_API_GEMINI_BUFFER_STREAM=1` additionally holds each native streaming
+response until its completion and tool arguments have been validated. It is
+off by default and delays text/reasoning delivery. Buffered output is capped
+at 8 MiB; exceeding the cap fails explicitly without retry. Keepalive comments
+still pass through and do not count as model output. With safe retries enabled,
+an incomplete buffered response can be discarded and retried once before any
+model event escapes. Malformed JSON or tool arguments are never retried, and
+no retry is allowed after a model event has been forwarded.
+
+The shared Chat Completions reader supports optional spaces after `data:`,
+multiline data events and CRLF, and reports malformed JSON rather than silently
+discarding it. Closing after the terminal `[DONE]` is recorded as normal
+completion, not a client disconnect.
+
 #### Optional Antigravity helper substitution
 
 `GHC_API_GEMINI_FLASH_LITE_FALLBACK=1` explicitly substitutes

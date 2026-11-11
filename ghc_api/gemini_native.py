@@ -1,8 +1,10 @@
 """Gemini GenerateContent translation without a separate proxy process."""
 
-import codecs
 import json
 import uuid
+
+from .sse.events import DONE, json_events
+from .sse.keepalive import KEEPALIVE
 
 
 CLOUD_MODELS = {
@@ -242,33 +244,19 @@ def from_chat(body, include_thoughts=True):
 
 
 def stream_events(chunks):
-    buffer = ""
-    data = []
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    for chunk in chunks:
-        buffer += decoder.decode(chunk) if isinstance(chunk, bytes) else chunk
-        if len(buffer) + sum(map(len, data)) > 2 * 1024 * 1024:
-            raise ValueError("Upstream SSE event exceeds 2 MiB")
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            line = line.rstrip("\r")
-            if line.startswith("data:"):
-                data.append(line[5:].lstrip())
-            elif not line and data:
-                value = "\n".join(data)
-                data = []
-                if value == "[DONE]":
-                    return
-                yield json.loads(value)
-    buffer += decoder.decode(b"", final=True)
-    if data or (buffer.strip() and not buffer.strip().startswith(":")):
-        raise ValueError("Incomplete upstream SSE event")
+    for event in json_events(chunks):
+        if event is DONE:
+            return
+        yield event
 
 
 def from_chat_stream(chunks, include_thoughts=True):
     calls = {}
     finished = False
     for event in stream_events(chunks):
+        if event is KEEPALIVE:
+            yield KEEPALIVE
+            continue
         if "error" in event:
             yield {"error": event["error"]}
             return
