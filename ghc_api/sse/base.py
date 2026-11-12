@@ -70,7 +70,6 @@ class SSEStreamHandler:
     # signals end-of-stream via ``message_stop`` events) and clients parsing
     # each line as Anthropic JSON would choke on a bare ``[DONE]``.
     emit_done_sentinel: bool = True
-    capture_raw_sse_lines: bool = False
 
     def __init__(
         self,
@@ -85,7 +84,6 @@ class SSEStreamHandler:
         request_headers: Optional[Dict] = None,
         client_ip: Optional[str] = None,
         user_id: str = "anonymous",
-        max_raw_capture_bytes: int = 0,
     ) -> None:
         self.response = response
         self.request_id = request_id
@@ -100,17 +98,8 @@ class SSEStreamHandler:
         self.user_id = user_id
 
         # Every ``data:`` payload seen on the wire, in order. This is what gets
-        # persisted to the cache for later inspection -- no transformation.
+        # written to the request log -- complete, with no transformation.
         self.raw_events: List[str] = []
-        # Logical SSE lines, including event headers, comments, unknown fields
-        # and blank frame separators. Protocol adapters may opt into this view
-        # without changing the bounded dashboard cache contract.
-        self.raw_sse_lines: List[str] = []
-        self.max_raw_capture_bytes = max(0, int(max_raw_capture_bytes or 0))
-        # Combined retained-content budget across raw_events and raw_sse_lines.
-        # A data payload is charged for both copies when both views are enabled.
-        self.raw_capture_bytes = 0
-        self.raw_capture_truncated = False
         self.response_wire_bytes = 0
 
         # Bookkeeping for cache totals -- populated by ``on_event``.
@@ -174,22 +163,6 @@ class SSEStreamHandler:
         """Extra keys for ``cache.complete_request``. Default: none."""
         return {}
 
-    def raw_events_for_cache(self) -> List[str]:
-        """Dashboard projection of captured data payloads."""
-
-        return list(self.raw_events)
-
-    def _capture_raw_value(self, target: List[str], value: str) -> None:
-        size = len(value.encode("utf-8", errors="strict"))
-        if (
-            self.max_raw_capture_bytes > 0
-            and self.raw_capture_bytes + size > self.max_raw_capture_bytes
-        ):
-            self.raw_capture_truncated = True
-            return
-        target.append(value)
-        self.raw_capture_bytes += size
-
     # ----------------------------------------------------------- cache helpers
 
     def _seed_cache(self) -> None:
@@ -224,7 +197,7 @@ class SSEStreamHandler:
         response_size = self.response_wire_bytes
         record = {
             "request_body": self.request_body_for_cache,
-            "raw_events": self.raw_events_for_cache(),
+            "raw_events": list(self.raw_events),
             "model": self.original_model,
             "translated_model": (
                 self.translated_model
@@ -279,20 +252,9 @@ class SSEStreamHandler:
                     continue
 
                 if not line:
-                    if self.capture_raw_sse_lines:
-                        self._capture_raw_value(self.raw_sse_lines, "")
                     continue
 
-                try:
-                    line = line.decode("utf-8")
-                except UnicodeDecodeError:
-                    if self.capture_raw_sse_lines:
-                        self._capture_raw_value(
-                            self.raw_sse_lines, "hex:" + bytes(line).hex()
-                        )
-                    raise
-                if self.capture_raw_sse_lines:
-                    self._capture_raw_value(self.raw_sse_lines, line)
+                line = line.decode("utf-8")
 
                 if line.startswith("event:"):
                     sse_event_type = line[6:]
@@ -319,9 +281,9 @@ class SSEStreamHandler:
                         break
 
                     # Record the raw payload before anything else so even
-                    # malformed JSON is preserved in the cache.
+                    # malformed JSON is preserved in the request log.
                     self.response_wire_bytes += len(data.encode("utf-8"))
-                    self._capture_raw_value(self.raw_events, data)
+                    self.raw_events.append(data)
 
                     try:
                         event = self.parse_event_data(data)

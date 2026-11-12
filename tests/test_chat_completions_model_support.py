@@ -569,7 +569,7 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
         tool_args = chunks[2]["choices"][0]["delta"]["tool_calls"][0]
         self.assertEqual(tool_args["index"], 0)
 
-        response_body = cache.cache["req-1"]["response_body"]
+        response_body = cache.get_record("req-1")["response_body"]
         self.assertEqual(response_body["choices"][0]["finish_reason"], "tool_calls")
         self.assertEqual(response_body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"], "{\"location\":\"SF\"}")
 

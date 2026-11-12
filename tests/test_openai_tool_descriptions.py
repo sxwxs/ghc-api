@@ -117,7 +117,7 @@ class ResponsesToolDescriptionNormalizationTests(unittest.TestCase):
             forwarded["input"][0]["tools"][0]["description"],
             "Tools in the functions namespace.",
         )
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(
             cached["original_request_body"]["input"][0]["tools"][0]["description"],
             "",

@@ -1,10 +1,8 @@
-import json
 import time
 import unittest
-from datetime import datetime
-from unittest import mock
 
 from flask import Flask
+from unittest import mock
 
 from ghc_api.cache import RequestCache
 from ghc_api.routes import dashboard as dashboard_routes
@@ -21,72 +19,58 @@ class RequestCacheTimestampTests(unittest.TestCase):
         self.assertIsInstance(item["timestamp"], int)
         self.assertGreater(item["timestamp"], 0)
 
-    def test_import_request_converts_iso_timestamp_to_unix(self) -> None:
-        cache = RequestCache()
-        iso_timestamp = "2026-03-22T10:20:30"
 
-        cache.import_request({
-            "id": "req-1",
-            "timestamp": iso_timestamp,
-            "model": "gpt-5",
-            "endpoint": "/v1/chat/completions",
-        })
-
-        item = cache.get_request("req-1")
-        self.assertIsNotNone(item)
-        self.assertEqual(
-            item["timestamp"],
-            int(datetime.fromisoformat(iso_timestamp).timestamp()),
-        )
-
-    def test_import_request_keeps_numeric_timestamp(self) -> None:
-        cache = RequestCache()
-
-        cache.import_request({
-            "id": "req-1",
-            "timestamp": 1711111111,
-            "model": "gpt-5",
-            "endpoint": "/v1/chat/completions",
-        })
-
-        item = cache.get_request("req-1")
-        self.assertIsNotNone(item)
-        self.assertEqual(item["timestamp"], 1711111111)
-
-
-class DashboardRequestTimestampTests(unittest.TestCase):
+class DashboardRequestRoutesTests(unittest.TestCase):
     def setUp(self) -> None:
         self.app = Flask(__name__)
         self.app.register_blueprint(dashboard_routes.dashboard_bp)
         self.client = self.app.test_client()
 
-    def test_request_routes_return_unix_timestamp_for_imported_legacy_record(self) -> None:
+    def test_list_has_metadata_and_detail_reads_full_record_from_log(self) -> None:
         cache = RequestCache()
-        iso_timestamp = "2026-03-22T10:20:30"
-        expected_timestamp = int(datetime.fromisoformat(iso_timestamp).timestamp())
-        cache.import_request({
-            "id": "req-1",
-            "timestamp": iso_timestamp,
-            "request_body": {"messages": []},
-            "response_body": {"id": "resp-1"},
-            "model": "gpt-5",
-            "endpoint": "/v1/chat/completions",
+        cache.start_request("req-1", {
+            "model": "gpt-5", "endpoint": "/v1/chat/completions",
+            "request_body": {"messages": ["hello"]},
         })
+        cache.complete_request("req-1", {"response_body": {"id": "resp-1"}, "status_code": 200})
 
         with mock.patch.object(dashboard_routes, "cache", cache):
-            detail_response = self.client.get("/api/request/req-1")
-            list_response = self.client.get("/api/requests")
+            detail = self.client.get("/api/request/req-1")
+            listing = self.client.get("/api/requests")
+            response_body = self.client.get("/api/request/req-1/response-body")
 
-        self.assertEqual(detail_response.status_code, 200)
-        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.get_json()["request_body"], {"messages": ["hello"]})
+        self.assertEqual(detail.get_json()["response_body"], {"id": "resp-1"})
+        self.assertEqual(response_body.get_json(), {"id": "resp-1"})
+        item = listing.get_json()["items"][0]
+        self.assertEqual(item["id"], "req-1")
+        self.assertIsInstance(item["timestamp"], int)
+        self.assertNotIn("request_body", item)
+        self.assertEqual(item["log"]["file"], cache.get_request("req-1")["log"]["file"])
 
-        detail_data = detail_response.get_json()
-        self.assertEqual(detail_data["timestamp"], expected_timestamp)
-        self.assertIsInstance(detail_data["timestamp"], int)
+    def test_in_flight_detail_comes_from_memory(self) -> None:
+        cache = RequestCache()
+        cache.start_request("req-1", {"model": "gpt-5", "request_body": {"q": 1}})
 
-        list_data = list_response.get_json()
-        self.assertEqual(list_data["items"][0]["timestamp"], expected_timestamp)
-        self.assertIsInstance(list_data["items"][0]["timestamp"], int)
+        with mock.patch.object(dashboard_routes, "cache", cache):
+            detail = self.client.get("/api/request/req-1")
+
+        self.assertEqual(detail.get_json()["request_body"], {"q": 1})
+        self.assertEqual(detail.get_json()["state"], "pending")
+
+    def test_unknown_request_and_mismatched_locator_are_404(self) -> None:
+        cache = RequestCache()
+        cache.start_request("other", {"model": "gpt-5"})
+        cache.complete_request("other", {"response_body": {}})
+        locator = cache.get_request("other")["log"]
+
+        with mock.patch.object(dashboard_routes, "cache", cache):
+            missing = self.client.get("/api/request/nope")
+            wrong = self.client.get("/api/request/nope", query_string=locator)
+
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(wrong.status_code, 404)
 
 
 class CancelRequestTests(unittest.TestCase):
@@ -119,30 +103,65 @@ class CancelRequestTests(unittest.TestCase):
         self.assertEqual(cache.request_count, 1)
 
 
-class RequestCacheTranslatedStreamTests(unittest.TestCase):
-    def test_raw_events_and_terminal_projection_share_cache_when_small(self) -> None:
-        cache = RequestCache(max_request_size=1024)
+class FullFidelityRecordTests(unittest.TestCase):
+    def test_finished_entry_keeps_no_bodies_in_memory(self) -> None:
+        cache = RequestCache()
+        cache.start_request("req", {
+            "model": "gpt-5",
+            "request_headers": {"X": "y"},
+            "original_request_body": {"a": 1},
+            "request_body": {"a": 1},
+        })
+        cache.complete_request("req", {
+            "raw_events": ["raw"],
+            "response_body": {"type": "message"},
+            "conversion_report": {"big": "sidecar"},
+        })
+        entry = cache.get_request("req")
+        for key in ("request_headers", "original_request_body", "request_body",
+                    "response_body", "raw_events", "conversion_report"):
+            self.assertNotIn(key, entry)
+        self.assertEqual(entry["state"], RequestCache.STATE_COMPLETED)
+        self.assertIsNotNone(entry["log"])
+
+    def test_large_bodies_are_persisted_untruncated(self) -> None:
+        cache = RequestCache()
+        image = "iVBORw0KGgo" * 300_000  # ~3.3 MB of base64, like a generated PNG
+        events = ["x" * 2_000_000, "y" * 2_000_000]
+        cache.start_request("req", {"model": "gpt-image", "request_body": {"prompt": "p" * 2_000_000}})
+        cache.complete_request("req", {
+            "raw_events": events,
+            "response_body": {"data": [{"b64_json": image}]},
+            "response_size": 8_000_000,
+        })
+        record = cache.get_record("req")
+        self.assertEqual(record["response_body"]["data"][0]["b64_json"], image)
+        self.assertEqual(record["raw_events"], events)
+        self.assertEqual(record["request_body"]["prompt"], "p" * 2_000_000)
+        self.assertNotIn("_truncated", str(record)[:200])
+
+    def test_raw_events_and_terminal_projection_are_both_recorded(self) -> None:
+        cache = RequestCache()
         cache.start_request("req", {"request_size": 1})
         cache.complete_request("req", {
             "raw_events": ["raw"],
             "response_body": {"type": "message"},
             "response_size": 3,
         })
-        item = cache.get_request("req")
-        self.assertEqual(item["raw_events"], ["raw"])
-        self.assertEqual(item["response_body"], {"type": "message"})
+        record = cache.get_record("req")
+        self.assertEqual(record["raw_events"], ["raw"])
+        self.assertEqual(record["response_body"], {"type": "message"})
 
-    def test_both_stream_views_are_truncated_at_dashboard_limit(self) -> None:
-        cache = RequestCache(max_request_size=4)
-        cache.start_request("req", {"request_size": 1})
-        cache.complete_request("req", {
-            "raw_events": ["private raw event"],
-            "response_body": {"private": "terminal projection"},
-            "response_size": 100,
-        })
-        item = cache.get_request("req")
-        self.assertTrue(json.loads(item["raw_events"][0])["_truncated"])
-        self.assertTrue(item["response_body"]["_truncated"])
+    def test_failed_write_keeps_metadata_without_locator(self) -> None:
+        cache = RequestCache()
+        cache.start_request("req", {"model": "gpt-5", "request_body": {"a": 1}})
+        with mock.patch("ghc_api.request_log.append_jsonl_line", side_effect=OSError("disk full")):
+            cache.complete_request("req", {"response_body": {}})
+        entry = cache.get_request("req")
+        self.assertIsNone(entry["log"])
+        self.assertNotIn("request_body", entry)
+        self.assertIsNone(cache.get_record("req"))
+        self.assertEqual(cache.request_count, 1)
 
 
 if __name__ == "__main__":

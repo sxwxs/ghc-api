@@ -58,7 +58,7 @@
     }
     function renderFiles() {
         $('file-list').replaceChildren();
-        if (!state.files.length) text('p', 'No daily logs found. Enable save_request_to_file to record new requests.', $('file-list'));
+        if (!state.files.length) text('p', 'No daily request logs found yet. They appear once a request completes.', $('file-list'));
         for (const file of state.files) {
             const label = document.createElement('label'); label.className = 'file-row';
             const input = document.createElement('input'); input.type = 'checkbox'; input.checked = state.selected.has(file.name);
