@@ -4,7 +4,7 @@ Image creation is billable and not idempotent. Never replay a request after a
 read timeout or connection failure: the upstream may already have generated it.
 """
 
-import copy
+import base64
 import json
 import time
 import uuid
@@ -34,20 +34,21 @@ def _error(message, code, param=None, status=400):
     return jsonify({"error": error}), status
 
 
-def _image_log_body(body):
-    """Keep usage and parameters, not multi-megabyte image payloads in logs."""
-    if isinstance(body, list):
-        return [_image_log_body(item) for item in body]
-    if isinstance(body, dict):
-        return {
-            key: ({"_omitted": True, "_chars": len(value)}
-                  if key == "b64_json" and isinstance(value, str)
-                  else _image_log_body(value))
-            for key, value in body.items()
-        }
-    if isinstance(body, str) and body.startswith("data:image/"):
-        return {"_omitted": True, "_chars": len(body)}
-    return body
+def _multipart_log_body(fields, files):
+    """Exact JSON form of a multipart request: every field, every file's bytes."""
+    return {
+        "_form": [[key, value] for key, value in fields],
+        "_files": [
+            {
+                "field": key,
+                "filename": filename,
+                "content_type": content_type,
+                "size": len(content),
+                "data_base64": base64.b64encode(content).decode("ascii"),
+            }
+            for key, (filename, content, content_type) in files
+        ],
+    }
 
 
 def check_image_upload_limit():
@@ -120,35 +121,36 @@ def _forward_image_request(operation):
             return _error("Copilot authentication is currently unavailable.", "upstream_auth_unavailable", status=502)
         headers = get_copilot_headers()
         headers["X-Initiator"] = "user"
-        original_body = _image_log_body(copy.deepcopy(payload))
-        upstream_payload = {**payload, "model": translated_model}
-        upstream_payload.pop("stream", None)
         kwargs = {}
         if multipart:
             # requests supplies the multipart boundary, not application/json.
             headers.pop("Content-Type", None)
+            # Read each upload once: the bytes go upstream and into the log.
+            files = [
+                (key, (file.filename, file.read(), file.mimetype))
+                for key, file in request.files.items(multi=True)
+            ]
+            fields = list(request.form.items(multi=True))
             kwargs["data"] = [
                 (key, translated_model if key == "model" else value)
-                for key, value in request.form.items(multi=True) if key != "stream"
+                for key, value in fields if key != "stream"
             ]
-            kwargs["files"] = [
-                (key, (file.filename, file.stream, file.mimetype))
-                for key, file in request.files.items(multi=True)
-            ]
-            upstream_payload["_files"] = [
-                {"field": key, "filename": file.filename, "content_type": file.mimetype}
-                for key, file in request.files.items(multi=True)
-            ]
-            original_body["_files"] = upstream_payload["_files"]
+            kwargs["files"] = files
+            original_body = _multipart_log_body(fields, files)
+            upstream_body = _multipart_log_body(kwargs["data"], files)
         else:
+            upstream_payload = {**payload, "model": translated_model}
+            upstream_payload.pop("stream", None)
             kwargs["json"] = upstream_payload
+            original_body = payload
+            upstream_body = upstream_payload
 
         request_id = str(uuid.uuid4())
         record = {
             "request_headers": redact_auth_headers(dict(request.headers)),
             "client_ip": get_client_ip(request),
             "original_request_body": original_body,
-            "request_body": _image_log_body(upstream_payload),
+            "request_body": upstream_body,
             "model": original_model,
             "translated_model": translated_model if translated_model != original_model else None,
             "endpoint": endpoint,
@@ -181,7 +183,7 @@ def _forward_image_request(operation):
             usage_counts = responses_usage_counts(result.get("usage") if isinstance(result, dict) else None)
             cache.complete_request(request_id, {
                 **record,
-                "response_body": _image_log_body(result),
+                "response_body": result,
                 "status_code": response.status_code,
                 "response_size": len(response.content),
                 **usage_counts,

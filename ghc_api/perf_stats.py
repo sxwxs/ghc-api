@@ -24,9 +24,9 @@ Design constraints, in order of importance:
    exactly the question being asked ("what is running right now"). Historical
    analysis already exists in ``request_file_stats``.
 
-Imported requests (``RequestCache.import_request``) deliberately do not feed
-this store: replaying a JSONL export would otherwise fabricate throughput that
-this process never produced.
+Requests restored from the request log after a restart
+(``RequestCache.restore``) deliberately do not feed this store: replaying
+history would otherwise fabricate throughput that this process never produced.
 """
 
 import threading

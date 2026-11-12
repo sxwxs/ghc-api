@@ -180,7 +180,7 @@ class DeepJsonRequestRejectionTests(unittest.TestCase):
         ):
             with self.subTest(content_type=content_type):
                 response = self.client.post(
-                    "/api/requests/import", data=data, content_type=content_type
+                    "/v1/images/edits", data=data, content_type=content_type
                 )
                 self.assertNotIn(b"nesting", response.data.lower())
 

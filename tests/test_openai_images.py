@@ -1,4 +1,5 @@
 """Images contract tests; no model service or real config directory is used."""
+import base64
 import io
 import json
 from unittest import mock
@@ -67,7 +68,8 @@ def test_generate_passthrough_and_usage(api, path):
     assert record["output_tokens"] == 196
     assert record["cache_read_input_tokens"] == 5
     assert record["request_headers"]["Authorization"] == "***REDACTED***"
-    assert record["response_body"]["data"][0]["b64_json"]["_omitted"]
+    # The generated image is recorded verbatim so it can be recovered from the log.
+    assert record["response_body"] == RESULT
     assert record["response_body"]["copilot_usage"] == RESULT["copilot_usage"]
     post.return_value.close.assert_called_once()
 
@@ -78,7 +80,7 @@ def test_multipart_multiple_images_mask_and_repeated_fields(api, path):
     captured = {}
     def send(*args, **kwargs):
         captured.update(kwargs)
-        captured["file_contents"] = [f[1][1].read() for f in kwargs["files"]]
+        captured["file_contents"] = [f[1][1] for f in kwargs["files"]]
         return upstream()
     post.side_effect = send
     form = MultiDict([
@@ -96,17 +98,25 @@ def test_multipart_multiple_images_mask_and_repeated_fields(api, path):
     assert ("extra", "one") in captured["data"] and ("extra", "two") in captured["data"]
     record = cache.complete_request.call_args.args[1]
     assert record["endpoint"] == "/v1/images/edits"
-    assert record["request_body"]["_files"][0]["filename"] == "one.png"
-    assert "image-one" not in json.dumps(record)
+    # Every field (repeated ones too) and every uploaded file's bytes are recorded.
+    original = record["original_request_body"]
+    assert original["_form"] == [["model", MODEL], ["prompt", "Make it red"], ["quality", "low"],
+                                 ["extra", "one"], ["extra", "two"]]
+    files = original["_files"]
+    assert [(f["field"], f["filename"], f["content_type"]) for f in files] == [
+        ("image[]", "one.png", "image/png"), ("image[]", "two.webp", "image/webp"), ("mask", "mask.png", "image/png")]
+    assert [base64.b64decode(f["data_base64"]) for f in files] == [b"image-one", b"image-two", b"mask"]
+    assert record["request_body"]["_files"] == files
+    assert ["model", MODEL] in record["request_body"]["_form"]
 
 
-def test_json_edits_pass_through_without_logging_data_urls(api):
+def test_json_edits_pass_through_and_log_data_urls_verbatim(api):
     client, post, cache = api
     body = {**BODY, "images": [{"image_url": "data:image/png;base64,c2VjcmV0"}]}
     response = client.post("/v1/images/edits", json=body)
     assert response.status_code == 200
     assert post.call_args.kwargs["json"] == body
-    assert "c2VjcmV0" not in json.dumps(cache.start_request.call_args.args[1])
+    assert cache.start_request.call_args.args[1]["original_request_body"] == body
 
 
 def test_model_mapping_and_advertised_bare_endpoint(api):

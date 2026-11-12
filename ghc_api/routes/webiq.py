@@ -121,10 +121,10 @@ def _record_search(
     """Record one search in both places. Never raises into the request path.
 
     Two destinations on purpose:
-      * the daily .jl file - full fidelity, nothing truncated;
+      * the Web IQ daily .jl file - full fidelity, nothing truncated;
       * the shared request cache - so a search shows up in the request list,
-        full-text search, detail view and export next to the LLM requests.
-        That copy is subject to cache_max_request_size like any other entry.
+        full-text search and detail view next to the LLM requests. It is
+        written untruncated to requests/YYYY-MM-DD.jl like any other entry.
     """
     client_ip = get_client_ip(request)
     user_id = getattr(g, "user_id", ANONYMOUS_USER_ID) or ANONYMOUS_USER_ID

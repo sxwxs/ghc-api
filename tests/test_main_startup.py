@@ -224,3 +224,32 @@ def test_invalid_anysearch_key_does_not_leak_during_startup(startup_env, capsys)
     fake_app.run.assert_not_called()
     captured = capsys.readouterr()
     assert "STARTUP-SECRET" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("config_text, expected_days, expected_warning", [
+    ("save_request_to_file: false\n", 7, "no longer turns request logging off"),
+    ("save_request_to_file: true\n", 0, "keep request logs forever"),
+    ("save_request_to_file: true\nrequest_log_retention_days: 2\n", 2, "is deprecated and ignored"),
+    ("cache_max_request_size: 1048576\n", 7, "'cache_max_request_size' is ignored"),
+])
+def test_deprecated_request_log_settings_warn_and_still_start(
+        startup_env, capsys, config_text, expected_days, expected_warning):
+    tmp_path, fake_app = startup_env
+    (tmp_path / "config.yaml").write_text(config_text, encoding="utf-8")
+
+    main_module.main()
+
+    fake_app.run.assert_called_once()
+    assert state.request_log_retention_days == expected_days
+    assert expected_warning in capsys.readouterr().out
+
+
+def test_invalid_request_log_retention_aborts_startup(startup_env, capsys):
+    tmp_path, fake_app = startup_env
+    (tmp_path / "config.yaml").write_text("request_log_retention_days: -3\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        main_module.main()
+
+    fake_app.run.assert_not_called()
+    assert "request_log_retention_days" in capsys.readouterr().err

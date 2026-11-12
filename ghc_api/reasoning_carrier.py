@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import base64
 import copy
-import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -138,25 +137,6 @@ def parse_reasoning_carrier(signature: Any) -> Optional[ReasoningCarrier]:
     return ReasoningCarrier(model, wire_profile, item_id, encrypted_content)
 
 
-def redact_reasoning_carriers_for_cache(value: Any) -> Any:
-    """Replace carrier payloads with bounded diagnostics before caching."""
-    if isinstance(value, list):
-        return [redact_reasoning_carriers_for_cache(item) for item in value]
-    if not isinstance(value, dict):
-        return copy.deepcopy(value)
-    result: Dict[str, Any] = {}
-    for key, child in value.items():
-        if key == "signature" and is_reasoning_carrier(child):
-            encoded = str(child).encode("utf-8", errors="strict")
-            result[key] = (
-                "[Responses reasoning carrier: "
-                f"{len(encoded)} bytes, sha256={hashlib.sha256(encoded).hexdigest()}]"
-            )
-        else:
-            result[key] = redact_reasoning_carriers_for_cache(child)
-    return result
-
-
 def strip_reasoning_carriers_from_messages_payload(
     payload: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], int]:
@@ -213,6 +193,5 @@ __all__ = [
     "build_reasoning_carrier",
     "is_reasoning_carrier",
     "parse_reasoning_carrier",
-    "redact_reasoning_carriers_for_cache",
     "strip_reasoning_carriers_from_messages_payload",
 ]

@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import traceback
 import yaml
 
@@ -29,6 +30,7 @@ from .config import (
 )
 from .config_sync import print_sync_diff_status
 from .generate_config import generate_config_file, open_config_in_editor
+from .request_log import request_log, resolve_retention_days
 from .state import state
 from .token_manager import (
     authenticate_github_device_flow,
@@ -295,8 +297,9 @@ def main():
                 max(0.0, float(config['responses_pre_header_grace'])), 5.0)
         if 'auto_remove_encrypted_content_on_parse_error' in config:
             state.auto_remove_encrypted_content_on_parse_error = bool(config['auto_remove_encrypted_content_on_parse_error'])
-        if 'save_request_to_file' in config:
-            state.save_request_to_file = bool(config['save_request_to_file'])
+        state.request_log_retention_days, retention_warnings = resolve_retention_days(config)
+        for warning in retention_warnings:
+            _print_banner(f"DEPRECATED: {warning}")
         if 'disable_onedrive_access' in config:
             state.disable_onedrive_access = bool(config['disable_onedrive_access'])
         if 'enable_tool_call_recovery' in config:
@@ -307,14 +310,17 @@ def main():
         if 'session_flush_interval' in config:
             state.session_flush_interval = int(config['session_flush_interval'])
 
-        # Load request cache memory limits
+        # Number of recent requests listed from memory (metadata only).
         if 'cache_max_entries' in config:
             state.cache_max_entries = int(config['cache_max_entries'])
         if 'cache_max_request_size' in config:
-            state.cache_max_request_size = int(config['cache_max_request_size'])
+            _print_banner(
+                "DEPRECATED: 'cache_max_request_size' is ignored. Finished requests "
+                "no longer keep bodies in memory, and request logs are never "
+                "truncated. Remove it from config.yaml."
+            )
         from .cache import cache as _request_cache
         _request_cache.max_entries = state.cache_max_entries
-        _request_cache.max_request_size = state.cache_max_request_size
 
         # Live throughput sample ring (/live dashboard)
         if 'perf_sample_capacity' in config:
@@ -450,6 +456,11 @@ def main():
     with app.app_context():
         initialize_app()
 
+    # Drop expired request logs, then refill the request list from disk in the
+    # background so a large log never delays startup.
+    request_log.cleanup_if_new_day()
+    threading.Thread(target=_restore_recent_requests, name="restore-requests", daemon=True).start()
+
     # Print available models after initialization
     print_available_models()
 
@@ -474,6 +485,23 @@ def main():
             print(f"AnySearch API: http://{host}:{port}{path}")
 
     serve_app(app, host=host, port=port, debug=debug)
+
+
+def _print_banner(message: str) -> None:
+    print("\n" + "=" * 60)
+    print(f"WARNING: {message}")
+    print("=" * 60 + "\n")
+
+
+def _restore_recent_requests() -> None:
+    from .cache import cache as request_cache
+    try:
+        restored = request_cache.restore(request_log.recent_entries(request_cache.max_entries))
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[Request Log] Could not restore recent requests: {exc}")
+        return
+    if restored:
+        print(f"[Request Log] Restored {restored} recent request(s) from disk")
 
 
 def serve_app(app, host: str, port: int, debug: bool = False) -> None:

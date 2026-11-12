@@ -805,23 +805,6 @@
             font-size: 0.8125rem;
         }
 
-        /* File input styling */
-        .file-input-wrapper {
-            position: relative;
-            overflow: hidden;
-            display: inline-block;
-        }
-
-        .file-input-wrapper input[type=file] {
-            position: absolute;
-            left: 0;
-            top: 0;
-            opacity: 0;
-            cursor: pointer;
-            width: 100%;
-            height: 100%;
-        }
-
         /* Highlight for search matches */
         .search-highlight {
             background: #fff3cd;
@@ -851,13 +834,6 @@
 </head>
 <body>
     <nav class="navbar" id="app-nav" data-title="Request Browser">
-        <template id="nav-extras">
-            <button onclick="downloadRequests()" title="Download all requests as JSON Lines">Download .jl</button>
-            <div class="file-input-wrapper">
-                <button title="Load requests from JSON Lines file">Load .jl</button>
-                <input type="file" id="file-input" accept=".jl,.jsonl" onchange="uploadRequests(this)">
-            </div>
-        </template>
     </nav>
     <script src="{{ url_for('static', filename='nav.js') }}"></script>
 
@@ -955,6 +931,13 @@
                         <button class="search-type-btn active" data-type="basic" title="Search by model, endpoint">Basic</button>
                         <button class="search-type-btn" data-type="fulltext" title="Full-text search in request/response bodies">Full-text</button>
                     </div>
+                    <select id="search-hours" title="Time range for full-text search" style="display: none;">
+                        <option value="1">Last hour</option>
+                        <option value="24" selected>Last 24 hours</option>
+                        <option value="168">Last 7 days</option>
+                        <option value="720">Last 30 days</option>
+                        <option value="0">All retained days</option>
+                    </select>
                 </div>
                 <div class="controls-row">
                     <div class="per-page-select">
@@ -992,6 +975,10 @@
         let totalPages = 1;
         let searchQuery = '';
         let searchType = 'basic';
+        let searchHours = 24;
+        // Request-log locators of the listed items. Full-text hits from older
+        // days are not in the in-memory list, so their details are read by locator.
+        let itemLocators = {};
         let searchTimeout = null;
         let selectedRequestId = null;
         let currentRequestData = null;
@@ -1040,7 +1027,7 @@
 
         // Output decode speed: tokens per second of generation time (duration
         // minus time to first token). Computed server-side; recomputed here only
-        // for older cached/imported entries that predate the field.
+        // for older logged entries that predate the field.
         function computeTokensPerSecond(item) {
             if (item.tokens_per_second !== null && item.tokens_per_second !== undefined) {
                 return Number(item.tokens_per_second);
@@ -1658,6 +1645,7 @@
                     if (searchType === 'fulltext') {
                         endpoint = '/api/requests/search';
                         params.set('q', searchQuery);
+                        params.set('hours', searchHours);
                     } else {
                         params.set('search', searchQuery);
                     }
@@ -1676,7 +1664,9 @@
                 if (data.items && data.items.length > 0) {
                     // Build list HTML
                     let html = '';
+                    itemLocators = {};
                     for (const item of data.items) {
+                        if (item.log) itemLocators[item.id] = item.log;
                         const state = item.state || 'completed';
                         const isSelected = item.id === selectedRequestId;
                         const duration = formatDuration(item);
@@ -1844,8 +1834,15 @@
             });
 
             try {
-                const response = await fetch(`/api/request/${requestId}`);
+                const locator = itemLocators[requestId];
+                const query = locator
+                    ? '?' + new URLSearchParams({file: locator.file, offset: locator.offset, length: locator.length})
+                    : '';
+                const response = await fetch(`/api/request/${encodeURIComponent(requestId)}${query}`);
                 const data = await response.json();
+                if (!response.ok && !data.id) {
+                    throw new Error(data.error || `HTTP ${response.status}`);
+                }
 
                 showRequestDetails(data);
             } catch (error) {
@@ -1980,6 +1977,7 @@
 
                 // Update placeholder
                 const input = document.getElementById('search-input');
+                document.getElementById('search-hours').style.display = searchType === 'fulltext' ? '' : 'none';
                 if (searchType === 'fulltext') {
                     input.placeholder = 'Search in request/response bodies...';
                 } else {
@@ -2004,63 +2002,20 @@
             }, 300);
         });
 
+        document.getElementById('search-hours').addEventListener('change', (e) => {
+            searchHours = parseInt(e.target.value);
+            if (searchQuery && searchType === 'fulltext') {
+                currentPage = 1;
+                loadRequests();
+            }
+        });
+
         // Per page selector
         document.getElementById('per-page').addEventListener('change', (e) => {
             perPage = parseInt(e.target.value);
             currentPage = 1;
             loadRequests();
         });
-
-        // Download requests as JSON Lines
-        async function downloadRequests() {
-            try {
-                const response = await fetch('/api/requests/export');
-                const blob = await response.blob();
-
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `requests_${new Date().toISOString().slice(0, 10)}.jl`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                window.URL.revokeObjectURL(url);
-            } catch (error) {
-                console.error('Failed to download requests:', error);
-                alert('Failed to download requests: ' + error.message);
-            }
-        }
-
-        // Upload requests from JSON Lines
-        async function uploadRequests(input) {
-            const file = input.files[0];
-            if (!file) return;
-
-            try {
-                const formData = new FormData();
-                formData.append('file', file);
-
-                const response = await fetch('/api/requests/import', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                const result = await response.json();
-
-                if (response.ok) {
-                    alert(`Successfully imported ${result.imported} requests`);
-                    loadRequests();
-                } else {
-                    alert('Failed to import: ' + (result.error || 'Unknown error'));
-                }
-            } catch (error) {
-                console.error('Failed to upload requests:', error);
-                alert('Failed to upload requests: ' + error.message);
-            } finally {
-                // Reset file input
-                input.value = '';
-            }
-        }
 
         // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
