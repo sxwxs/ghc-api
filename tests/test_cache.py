@@ -132,6 +132,16 @@ class EvictionTests(unittest.TestCase):
         cache.start_request("c", {"model": "m"})
         self.assertEqual(sorted(cache.cache), ["b", "c"])
 
+    def test_list_is_trimmed_back_to_the_limit_after_a_burst(self) -> None:
+        cache = RequestCache(max_entries=1)
+        for key in ("a", "b", "c"):
+            cache.start_request(key, {"model": "m"})
+        for key in ("a", "b", "c"):
+            cache.complete_request(key, {"status_code": 200})
+        self.assertEqual(len(cache.cache), 3)
+        cache.start_request("d", {"model": "m"})
+        self.assertEqual(list(cache.cache), ["d"])
+
 
 class FullFidelityRecordTests(unittest.TestCase):
     def test_finished_entry_keeps_no_bodies_in_memory(self) -> None:

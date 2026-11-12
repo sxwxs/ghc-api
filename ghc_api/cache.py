@@ -102,18 +102,20 @@ class RequestCache:
         }
 
     def _insert(self, request_id: str, entry: Dict[str, Any]) -> None:
-        """Insert a new entry, evicting the oldest finished one. Called from within self.lock.
+        """Insert a new entry, evicting the oldest finished ones. Called from within self.lock.
 
         In-flight entries are never evicted: their bodies exist only here until
         completion writes them to the request log, and the live view lists
-        them. With more in-flight requests than max_entries the list simply
-        grows until they finish; the routes hold that data anyway.
+        them. With more in-flight requests than max_entries the list grows
+        until they finish (the routes hold that data anyway) and is trimmed
+        back to the limit on later inserts.
         """
-        if request_id not in self.cache and len(self.cache) >= self.max_entries:
-            for key, cached in self.cache.items():
-                if cached.get("state") not in IN_FLIGHT_STATES:
-                    del self.cache[key]
+        if request_id not in self.cache:
+            for key in [key for key, cached in self.cache.items()
+                        if cached.get("state") not in IN_FLIGHT_STATES]:
+                if len(self.cache) < self.max_entries:
                     break
+                del self.cache[key]
         self.cache[request_id] = entry
 
     def start_request(self, request_id: str, data: Dict) -> None:

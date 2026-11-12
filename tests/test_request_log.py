@@ -195,6 +195,25 @@ def test_search_matches_literal_json_fragments(log_dir):
     assert [item["id"] for item in log.search('said "hi"', since=None)] == ["quoted"]
 
 
+def test_search_handles_legacy_iso_and_string_timestamps(log_dir):
+    write_lines(log_dir / "2026-03-10.jl", [
+        {"id": "iso", "timestamp": "2026-03-10T10:20:30", "request_body": "needle"},
+        {"id": "numeric-string", "timestamp": "1773000000", "request_body": "needle"},
+        {"id": "missing", "request_body": "needle"},
+    ])
+    hits = RequestLog().search("needle", since=None)
+    assert [item["id"] for item in hits] == ["missing", "numeric-string", "iso"]
+    assert all(isinstance(item["timestamp"], int) for item in hits)
+    # A string timestamp in a file inside the search window is compared, not crashed on.
+    recent_iso = datetime.fromtimestamp(time.time() - 60).isoformat()
+    write_lines(log_dir / f"{date.today().isoformat()}.jl", [
+        {"id": "recent-iso", "timestamp": recent_iso, "request_body": "needle"},
+        {"id": "old-iso", "timestamp": "2026-03-10T10:20:30", "request_body": "needle"},
+    ])
+    hits = RequestLog().search("needle", since=time.time() - 86400)
+    assert [item["id"] for item in hits] == ["recent-iso"]
+
+
 def test_search_ignores_a_partially_written_tail(log_dir):
     path = log_dir / f"{date.today().isoformat()}.jl"
     write_lines(path, [{"id": "done", "timestamp": int(time.time()), "request_body": "needle"}])

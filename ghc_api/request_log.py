@@ -258,6 +258,8 @@ class RequestLog:
         self, filename: str, needle: str, escaped_needle: str,
         since: Optional[float], user_id: Optional[str],
     ) -> Iterable[Dict[str, Any]]:
+        from .request_file_stats import _normalize_timestamp
+
         try:
             file = _resolve(filename).open("rb")
         except (OSError, RequestLogError):
@@ -280,7 +282,9 @@ class RequestLog:
                     continue
                 if not isinstance(record, dict):
                     continue
-                if since is not None and (record.get("timestamp") or 0) < since:
+                # Logs written before 2026-03-23 store ISO-string timestamps.
+                record["timestamp"] = _normalize_timestamp(record.get("timestamp"))
+                if since is not None and record["timestamp"] < since:
                     continue
                 if user_id is not None and (record.get("user_id") or "anonymous") != user_id:
                     continue
