@@ -145,9 +145,6 @@ class State:
         # and no auth check is performed.
         self.enable_auth: bool = False
 
-        # Session persistence settings
-        self.session_flush_interval: int = 5  # seconds between buffered writes
-
         # Live throughput metrics (/live). Number of finished-request samples
         # kept in memory for tokens-per-second aggregation. Each sample is one
         # small tuple, so the default stays well under 1 MB; windows wider than
@@ -164,6 +161,9 @@ class State:
         # WSGI server thread pool. Every streaming request holds a thread for
         # its whole lifetime, so this bounds concurrent chat streams.
         self.server_threads: int = 16
+        # Where this server listens; the /agent coding agent calls models through it.
+        self.server_host: str = "localhost"
+        self.server_port: int = 8313
 
     @property
     def editor_plugin_version(self) -> str:

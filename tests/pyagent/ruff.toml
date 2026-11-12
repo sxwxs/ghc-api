@@ -1,0 +1,1 @@
+extend = "../../ghc_api/pyagent/ruff.toml"

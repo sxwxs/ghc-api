@@ -26,7 +26,7 @@ from ..api_helpers import (
     get_github_api_base_url,
     get_github_web_base_url,
 )
-from ..auth import ANONYMOUS_USER_ID, get_user_registry
+from ..auth import ANONYMOUS_USER_ID, INTERNAL_TOKEN, get_user_registry
 from ..perf_stats import WINDOW_PRESETS, parse_window, perf_stats
 from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
@@ -174,6 +174,7 @@ def chat_page():
         webiq_tool_chat=webiq_tool_definition("chat"),
         anysearch_available=anysearch_is_configured(state),
         anysearch_tools_chat=anysearch_tool_definitions("chat"),
+        internal_token=INTERNAL_TOKEN if state.enable_auth else "",
     )
 
 

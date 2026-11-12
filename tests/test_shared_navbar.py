@@ -78,7 +78,6 @@ class NavScriptContractTests(unittest.TestCase):
         secondary = self.nav_js.split("var SECONDARY", 1)[1].split("];", 1)[0]
         for label in (
             "Runtime Config Override",
-            "Code Agent",
             "Request Stats",
             "API Stats",
         ):

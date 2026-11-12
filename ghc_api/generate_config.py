@@ -232,12 +232,6 @@ anthropic_responses_model_profiles:
 # default; set false to disable this retry. Encrypted-content recovery is independent.
 enable_responses_early_failure_retry: true
 
-# Session File Flush Interval
-# ---------------------------
-# How often (in seconds) buffered session updates are flushed to disk.
-# Lower values mean less data loss on crash but more disk I/O.
-session_flush_interval: 5
-
 # Request Cache Memory Limits
 # ---------------------------
 # Recent requests are kept in memory for the dashboard / inspection UI.

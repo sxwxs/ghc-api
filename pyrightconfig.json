@@ -1,0 +1,7 @@
+{
+  "include": ["ghc_api/pyagent", "tests/pyagent"],
+  "strict": ["ghc_api/pyagent"],
+  "pythonVersion": "3.11",
+  "venvPath": ".",
+  "venv": ".venv"
+}

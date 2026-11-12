@@ -246,27 +246,6 @@ def get_agent_root() -> Optional[Path]:
     return onedrive / ".ghc-api" / "agents" / f"{host}_{_os_label()}"
 
 
-def get_machines_list() -> List[str]:
-    """List available machine names from OneDrive agents directory. Current machine is always first."""
-    current = f"{socket.gethostname()}_{_os_label()}"
-    if onedrive_access_disabled():
-        return [current]
-    onedrive = get_onedrive_path()
-    if not onedrive:
-        return [current]
-    agents_root = onedrive / ".ghc-api" / "agents"
-    machines = []
-    if agents_root.exists() and agents_root.is_dir():
-        machines = sorted(
-            [p.name for p in agents_root.iterdir() if p.is_dir()],
-            key=lambda n: n.lower(),
-        )
-    # Always put current machine first
-    machines = [m for m in machines if m != current]
-    machines.insert(0, current)
-    return machines
-
-
 def _backup_file(path: Path) -> Optional[Path]:
     if not path.exists():
         return None

@@ -1,228 +1,86 @@
 """
-Code Agent interaction routes — ACP session management and prompt streaming.
+Code Agent: the /agent page and its bridge to pyagent (see agent_bridge.py).
+
+The page speaks pyagent's JSON-RPC protocol (docs/pyagent/protocol.md) through
+POST /api/agent/rpc and follows a session's events over SSE. The agent runs
+shell commands on this machine, so these routes are admin-only: keep them behind
+the reverse-proxy auth, like /api/users/*.
 """
 
-import json
-import logging
-from typing import Optional
+import os
 
 from flask import Blueprint, Response, jsonify, render_template, request, stream_with_context
 
-logger = logging.getLogger(__name__)
+from ..agent_bridge import get_bridge
 
 agent_bp = Blueprint("agent", __name__)
 
-# Lazy-initialized session manager (singleton)
-_session_manager = None
+# Keepalive interval while a run is active; an idle session's stream closes after this long without events.
+KEEPALIVE_SECONDS = 15.0
 
-
-def _get_session_manager():
-    global _session_manager
-    if _session_manager is None:
-        from ..acp.session_manager import SessionManager
-        _session_manager = SessionManager()
-    return _session_manager
-
-
-# ---------------------------------------------------------------------------
-# Page route
-# ---------------------------------------------------------------------------
 
 @agent_bp.route("/agent", methods=["GET"])
 def agent_page():
     return render_template("agent.html")
 
 
-# ---------------------------------------------------------------------------
-# Session CRUD
-# ---------------------------------------------------------------------------
-
-@agent_bp.route("/api/agent/sessions", methods=["POST"])
-def api_create_session():
-    """Create a new agent session."""
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"error": "Invalid JSON body"}), 400
-
-    agent_kind = payload.get("agent_kind", "")
-    working_directory = payload.get("working_directory", "")
-    bypass_permissions = payload.get("bypass_permissions", True)
-
-    if not agent_kind:
-        return jsonify({"error": "agent_kind is required"}), 400
-    if not working_directory:
-        return jsonify({"error": "working_directory is required"}), 400
-
-    valid_kinds = ["claude-code", "codex", "copilot-cli"]
-    if agent_kind not in valid_kinds:
-        return jsonify({"error": f"agent_kind must be one of: {valid_kinds}"}), 400
-
-    mgr = _get_session_manager()
+@agent_bp.route("/api/agent/rpc", methods=["POST"])
+def agent_rpc():
+    """Forward one protocol request: {"method", "params"} -> {"result"} or {"error": {"code", "message"}}."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("method"), str):
+        return jsonify({"error": {"code": -32600, "message": "Expected {\"method\": str, \"params\": object}"}}), 400
+    method, params = body["method"], body.get("params") or {}
+    if not isinstance(params, dict):
+        return jsonify({"error": {"code": -32602, "message": "params must be an object"}}), 400
+    if method == "initialize":
+        return jsonify({"error": {"code": -32601, "message": "ghc-api initializes the agent itself"}}), 400
+    if method == "session/new" and params.get("cwd"):
+        cwd = os.path.abspath(os.path.expanduser(str(params["cwd"])))
+        if not os.path.isdir(cwd):
+            return jsonify({"error": {"code": -32602, "message": f"Not a directory: {cwd}"}}), 400
+        params = {**params, "cwd": cwd}
     try:
-        result = mgr.create_session(agent_kind, working_directory, bypass_permissions)
-        return jsonify(result), 201
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 500
-    except Exception as e:
-        logger.exception("Failed to create session")
-        return jsonify({"error": f"Failed to create session: {e}"}), 500
+        reply = get_bridge().call(method, params)
+    except TimeoutError:
+        return jsonify({"error": {"code": -32603, "message": f"pyagent did not answer {method} in time"}}), 504
+    return jsonify({key: reply[key] for key in ("result", "error") if key in reply})
 
 
-@agent_bp.route("/api/agent/sessions", methods=["GET"])
-def api_list_sessions():
-    """List sessions, paginated, optionally filtered by machine."""
-    machine = request.args.get("machine", None)
-    page = request.args.get("page", 1, type=int)
-    per_page = request.args.get("per_page", 50, type=int)
+@agent_bp.route("/api/agent/sessions/<session_id>/events", methods=["GET"])
+def agent_events(session_id: str):
+    """SSE: the session's events after `since` (or Last-Event-ID).
 
-    mgr = _get_session_manager()
-    result = mgr.list_sessions(machine=machine, page=page, per_page=per_page)
-    return jsonify(result)
-
-
-@agent_bp.route("/api/agent/sessions/<session_id>", methods=["GET"])
-def api_session_detail(session_id: str):
-    """Get full session detail including message history."""
-    machine = request.args.get("machine", None)
-    mgr = _get_session_manager()
-    detail = mgr.get_session_detail(session_id, machine=machine)
-    if detail is None:
-        return jsonify({"error": "Session not found"}), 404
-    return jsonify(detail)
-
-
-@agent_bp.route("/api/agent/sessions/<session_id>", methods=["DELETE"])
-def api_terminate_session(session_id: str):
-    """Terminate a session and kill the agent process."""
-    mgr = _get_session_manager()
+    Every open stream holds a server worker thread, so a stream lasts only while the session runs: once it is
+    idle and quiet, `idle` ends it and the page subscribes again when it starts a run or comes back into view.
+    `resync` tells the page to reload the session, because it is not open or the events it missed are gone.
+    """
+    last_id = request.headers.get("Last-Event-ID") or request.args.get("since") or "0"
     try:
-        mgr.terminate_session(session_id)
-        return jsonify({"ok": True})
-    except Exception as e:
-        logger.exception("Failed to terminate session %s", session_id)
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------------------------------
-# Prompt (SSE streaming)
-# ---------------------------------------------------------------------------
-
-@agent_bp.route("/api/agent/sessions/<session_id>/prompt", methods=["POST"])
-def api_send_prompt(session_id: str):
-    """Send a prompt to an active session. Returns SSE stream of updates."""
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"error": "Invalid JSON body"}), 400
-
-    text = payload.get("text", "")
-    if not text:
-        return jsonify({"error": "text is required"}), 400
-
-    mgr = _get_session_manager()
-    from ..acp.session_manager import SENTINEL
-
-    try:
-        update_queue = mgr.send_prompt(session_id, text)
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 400
+        since = int(last_id)
+    except ValueError:
+        since = 0
+    bridge = get_bridge()
 
     def generate():
-        collected_updates = []
-        stop_reason = "endTurn"
-        event_count = 0
-        try:
-            while True:
-                try:
-                    # No hard timeout — agent tool calls can take arbitrarily long
-                    item = update_queue.get(block=True)
-                except Exception as e:
-                    print(f"[ACP SSE] queue.get exception: {e}")
-                    break
-
-                if item is SENTINEL:
-                    print(f"[ACP SSE] got SENTINEL after {event_count} events")
-                    break
-
-                if isinstance(item, dict):
-                    if "_error" in item:
-                        print(f"[ACP SSE] got error item: {item['_error']}")
-                        yield _sse_event("error", {"message": item["_error"]})
-                        stop_reason = "error"
-                        continue
-
-                    # Extract the update payload
-                    event_count += 1
-                    update = item.get("update", item)
-                    collected_updates.append(update)
-                    yield _sse_event("update", update)
-
-            yield _sse_event("done", {"stop_reason": stop_reason})
-
-        except GeneratorExit:
-            print(f"[ACP SSE] GeneratorExit after {event_count} events (client disconnected)")
-            stop_reason = "cancelled"
-        finally:
-            # Persist agent response
-            try:
-                mgr.append_agent_response(session_id, collected_updates, stop_reason)
-            except Exception:
-                logger.warning("Failed to persist agent response for %s", session_id)
+        position = since
+        while True:
+            events = bridge.wait_events(session_id, position, KEEPALIVE_SECONDS)
+            if events is None:
+                yield "event: resync\ndata: {}\n\n"
+                return
+            if events:
+                for seq, text in events:
+                    yield f"id: {seq}\ndata: {text}\n\n"
+                position = events[-1][0]
+            elif bridge.is_running(session_id):
+                yield ": keepalive\n\n"
+            else:
+                yield "event: idle\ndata: {}\n\n"
+                return
 
     return Response(
         stream_with_context(generate()),
         mimetype="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@agent_bp.route("/api/agent/sessions/<session_id>/cancel", methods=["POST"])
-def api_cancel_prompt(session_id: str):
-    """Cancel the current prompt for a session."""
-    mgr = _get_session_manager()
-    try:
-        mgr.cancel_prompt(session_id)
-        return jsonify({"ok": True})
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        logger.exception("Failed to cancel prompt for %s", session_id)
-        return jsonify({"error": str(e)}), 500
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-@agent_bp.route("/api/agent/machines", methods=["GET"])
-def api_list_machines():
-    """List available machine names."""
-    mgr = _get_session_manager()
-    machines = mgr.list_machines()
-    return jsonify({"machines": machines})
-
-
-@agent_bp.route("/api/agent/workdirs", methods=["GET"])
-def api_list_workdirs():
-    """List recent working directories."""
-    mgr = _get_session_manager()
-    dirs = mgr.list_recent_workdirs()
-    return jsonify({"dirs": dirs})
-
-
-@agent_bp.route("/api/agent/sessions/<session_id>/storage-path", methods=["GET"])
-def api_session_storage_path(session_id: str):
-    """Get the storage path for a session."""
-    machine = request.args.get("machine", None)
-    mgr = _get_session_manager()
-    path = mgr.get_session_storage_path(session_id, machine=machine)
-    return jsonify({"path": path})
-
-
-def _sse_event(event_type: str, data: dict) -> str:
-    """Format a Server-Sent Event."""
-    return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

@@ -21,7 +21,7 @@ from .state import state
 # Paths that require an approved user token when state.enable_auth is True.
 # Dynamic model detail routes and raw catalog slash variants are also protected
 # by endpoint in _auth_gate. Other paths bypass auth at the Flask layer
-# (dashboard, /signup, /api/users/*, /agent, static files). Production deployments
+# (dashboard, /signup, /api/users/*, static files). Production deployments
 # are expected to put nginx (or equivalent) in front to gate admin paths.
 PROTECTED_PATHS = frozenset({
     "/v1/chat/completions",

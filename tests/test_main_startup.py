@@ -68,7 +68,7 @@ def test_invalid_setting_value_aborts_startup(startup_env, capsys):
     """A well-formed YAML with an unusable value must not start with defaults silently."""
     tmp_path, fake_app = startup_env
     (tmp_path / "config.yaml").write_text(
-        "address: 127.0.0.1\nport: 9999\nsession_flush_interval:\nenable_auth: true\n",
+        "address: 127.0.0.1\nport: 9999\ncache_max_entries:\nenable_auth: true\n",
         encoding="utf-8",
     )
 
