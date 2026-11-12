@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections import deque
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
@@ -151,6 +152,28 @@ METADATA_FIELDS = (
 SEARCHABLE_FIELDS = ("original_request_body", "request_body", "response_body", "raw_events")
 
 
+def _searchable_text(record: Mapping[str, Any]) -> str:
+    """Lower-cased text full-text search matches against.
+
+    Every string value is searched as-is (so quotes in a prompt, or a raw SSE
+    event's literal ``"content":"hello"``, match), followed by the JSON form
+    of the bodies for structural fragments such as ``"role": "user"``.
+    """
+    values = [record.get(key) for key in SEARCHABLE_FIELDS]
+    strings: List[str] = []
+    stack: List[Any] = [values]
+    while stack:
+        value = stack.pop()
+        if isinstance(value, str):
+            strings.append(value)
+        elif isinstance(value, dict):
+            stack.extend(value.values())
+        elif isinstance(value, list):
+            stack.extend(value)
+    strings.append(json.dumps(values, ensure_ascii=False))
+    return "\n".join(strings).lower()
+
+
 class RequestLog:
     def __init__(self) -> None:
         self._cleanup_lock = threading.Lock()
@@ -219,17 +242,21 @@ class RequestLog:
         Returns metadata views (with locators), not full records.
         """
         needle = query.lower()
+        # How the needle looks inside a JSON-encoded line: quotes, backslashes
+        # and newlines in string values (prompts, raw SSE events) are escaped.
+        escaped_needle = json.dumps(needle, ensure_ascii=False)[1:-1]
         first_day = datetime.fromtimestamp(since).date() if since is not None else None
         matches: List[Dict[str, Any]] = []
         for filename in daily_files():
             day = file_date(filename)
             if first_day is not None and day is not None and day < first_day:
                 break
-            matches.extend(reversed(list(self._search_file(filename, needle, since, user_id))))
+            matches.extend(reversed(list(self._search_file(filename, needle, escaped_needle, since, user_id))))
         return matches
 
     def _search_file(
-        self, filename: str, needle: str, since: Optional[float], user_id: Optional[str],
+        self, filename: str, needle: str, escaped_needle: str,
+        since: Optional[float], user_id: Optional[str],
     ) -> Iterable[Dict[str, Any]]:
         try:
             file = _resolve(filename).open("rb")
@@ -244,7 +271,8 @@ class RequestLog:
                     break  # a record still being written
                 text = raw.decode("utf-8", errors="replace")
                 # Cheap pre-filter on the raw line before parsing it.
-                if needle not in text.lower():
+                lowered = text.lower()
+                if needle not in lowered and escaped_needle not in lowered:
                     continue
                 try:
                     record = json.loads(text)
@@ -256,10 +284,7 @@ class RequestLog:
                     continue
                 if user_id is not None and (record.get("user_id") or "anonymous") != user_id:
                     continue
-                body_text = json.dumps(
-                    [record.get(key) for key in SEARCHABLE_FIELDS], ensure_ascii=False,
-                ).lower()
-                if needle in body_text:
+                if needle in _searchable_text(record):
                     yield metadata_view(record, {"file": filename, "offset": start, "length": len(raw)})
 
     # -------------------------------------------------------------- restore
@@ -269,7 +294,9 @@ class RequestLog:
 
         Uses the request-statistics sidecar index, which already holds per-line
         metadata and byte locators, so restoring never parses request bodies
-        more than once per line.
+        more than once per line. Index rows follow file order, which is the
+        order requests finished, and only the last ``limit`` rows of a file are
+        kept while streaming it, so memory stays bounded however large a day is.
         """
         from .request_file_stats import build_or_load_file_index, iter_index_rows
 
@@ -277,17 +304,17 @@ class RequestLog:
         for filename in daily_files():
             if len(entries) >= limit:
                 break
-            path = _resolve(filename)
             try:
-                build_or_load_file_index(path)
-                rows = list(iter_index_rows(filename))
+                build_or_load_file_index(_resolve(filename))
+                newest = deque(
+                    filter(None, map(_entry_from_index_row, iter_index_rows(filename))),
+                    maxlen=limit - len(entries),
+                )
             except Exception as exc:
                 print(f"[Request Log] Could not restore requests from {filename}: {exc}")
                 continue
-            rows.sort(key=lambda row: (row.get("timestamp") or 0, row.get("offset") or 0))
-            restored = [entry for entry in map(_entry_from_index_row, rows) if entry]
-            entries = restored + entries
-        return entries[-limit:] if limit > 0 else []
+            entries = list(newest) + entries
+        return entries
 
     # -------------------------------------------------------------- cleanup
 

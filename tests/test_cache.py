@@ -103,6 +103,36 @@ class CancelRequestTests(unittest.TestCase):
         self.assertEqual(cache.request_count, 1)
 
 
+class EvictionTests(unittest.TestCase):
+    def test_eviction_skips_in_flight_requests(self) -> None:
+        cache = RequestCache(max_entries=2)
+        cache.start_request("streaming", {
+            "model": "m", "request_headers": {"X-Trace": "t"},
+            "original_request_body": {"prompt": "original"},
+        })
+        for n in range(3):
+            cache.start_request(f"done{n}", {"model": "m"})
+            cache.complete_request(f"done{n}", {"status_code": 200})
+
+        # The oldest finished entries were evicted, never the running stream.
+        self.assertEqual([e["id"] for e in cache.get_in_flight()], ["streaming"])
+        self.assertEqual(len(cache.cache), 2)
+
+        cache.complete_request("streaming", {"raw_events": ["e"], "status_code": 200})
+        record = cache.get_record("streaming")
+        self.assertEqual(record["original_request_body"], {"prompt": "original"})
+        self.assertEqual(record["request_headers"], {"X-Trace": "t"})
+
+    def test_list_grows_past_the_limit_only_while_everything_is_in_flight(self) -> None:
+        cache = RequestCache(max_entries=1)
+        cache.start_request("a", {"model": "m"})
+        cache.start_request("b", {"model": "m"})
+        self.assertEqual(len(cache.cache), 2)
+        cache.complete_request("a", {"status_code": 200})
+        cache.start_request("c", {"model": "m"})
+        self.assertEqual(sorted(cache.cache), ["b", "c"])
+
+
 class FullFidelityRecordTests(unittest.TestCase):
     def test_finished_entry_keeps_no_bodies_in_memory(self) -> None:
         cache = RequestCache()

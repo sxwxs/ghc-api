@@ -183,6 +183,18 @@ def test_search_matches_bodies_newest_first_within_time_range(log_dir):
     assert [item["id"] for item in log.search("中文", since=None)] == ["r3"]
 
 
+def test_search_matches_literal_json_fragments(log_dir):
+    now = int(time.time())
+    event = json.dumps({"type": "delta", "content": "hello"}, separators=(",", ":"))
+    write_lines(log_dir / f"{date.today().isoformat()}.jl", [
+        {"id": "sse", "timestamp": now, "raw_events": [event]},
+        {"id": "quoted", "timestamp": now, "request_body": {"text": 'he said "hi"'}},
+    ])
+    log = RequestLog()
+    assert [item["id"] for item in log.search('"content":"hello"', since=None)] == ["sse"]
+    assert [item["id"] for item in log.search('said "hi"', since=None)] == ["quoted"]
+
+
 def test_search_ignores_a_partially_written_tail(log_dir):
     path = log_dir / f"{date.today().isoformat()}.jl"
     write_lines(path, [{"id": "done", "timestamp": int(time.time()), "request_body": "needle"}])
