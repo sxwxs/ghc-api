@@ -35,6 +35,16 @@ proxies:
       scope: model
       persist: true
 
+    # Optional quota control (see UPSTREAM_PROXY.md "Quota control").
+    # The command prints a JSON snapshot of remaining "points"; ghc-api does
+    # not know which platform it queries. Enable this block together with a
+    # model's quota_cost below. A model without quota_cost is unrestricted.
+    # quota:
+    #   command: [/path/to/quota-command]
+    #   refresh_interval_seconds: 3600
+    #   command_timeout_seconds: 30
+    #   min_remaining: 10
+
     apis:
       responses:
         enabled: true
@@ -83,6 +93,7 @@ proxies:
         input: [text]
         context_window: 128000
         max_output_tokens: 16384
+        # quota_cost: 2   # points per request; enable the quota block above too
 
         # Shared model-specific outbound headers.
         headers:

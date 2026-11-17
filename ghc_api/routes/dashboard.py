@@ -32,6 +32,7 @@ from ..state import state
 from ..webiq import is_configured as webiq_is_configured, tool_definition as webiq_tool_definition
 from ..anysearch import is_configured as anysearch_is_configured, tool_definitions as anysearch_tool_definitions
 from ..token_usage_reporter import get_token_usage_overview
+from ..proxy.quota import quota_manager
 from .. import billing
 from ..token_manager import (
     get_token_file_path,
@@ -529,6 +530,15 @@ def api_stats():
     stats = cache.get_stats(user_id=_user_filter_from_request())
     stats["counters"] = counters.snapshot()
     return jsonify(stats)
+
+
+@dashboard_bp.route("/api/quota", methods=["GET"])
+def api_quota():
+    """In-memory upstream quota ledgers and calibration alerts.
+
+    Numeric-only payload: no credential or command content is exposed here.
+    """
+    return jsonify(quota_manager.api_snapshot())
 
 
 @dashboard_bp.route("/api/live-stats", methods=["GET"])

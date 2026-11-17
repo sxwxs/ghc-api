@@ -8,6 +8,7 @@ from .config import (
     ProxyModelApiConfig,
     ProxyModelConfig,
     ProxyProfileConfig,
+    ProxyQuotaConfig,
     ProxyRegistry,
     parse_proxy_config,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "ProxyModelApiConfig",
     "ProxyModelConfig",
     "ProxyProfileConfig",
+    "ProxyQuotaConfig",
     "ProxyRegistry",
     "ProxyRequestError",
     "ProxyRuntime",

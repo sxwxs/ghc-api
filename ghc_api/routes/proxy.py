@@ -15,6 +15,7 @@ from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
 from ..cache import cache
 from ..model_metadata import normalize_model_metadata
 from ..proxy import ProxyRequestError, ProxyRuntime
+from ..proxy.quota import quota_manager
 from ..proxy.config import (
     NON_STREAMING_APIS,
     ProxyApiConfig,
@@ -114,6 +115,28 @@ def _error(
     client_headers: Optional[Dict[str, str]] = None,
 ):
     return _with_client_headers(jsonify(_error_payload(message, code, status, param, api_name)), client_headers), status
+
+
+def _quota_error(message: str, api_name: Optional[str], client_headers: Optional[Dict[str, str]]):
+    """429 returned before any upstream call, with a shared quota_exceeded code."""
+    if api_name == "messages":
+        payload = {
+            "type": "error",
+            "error": {
+                "type": "rate_limit_error",
+                "message": message,
+                "code": "quota_exceeded",
+            },
+        }
+    else:
+        payload = {
+            "error": {
+                "message": message,
+                "type": "invalid_request_error",
+                "code": "quota_exceeded",
+            }
+        }
+    return _with_client_headers(jsonify(payload), client_headers), 429
 
 
 def _resolve_target(
@@ -309,6 +332,15 @@ def _handle_proxy_request(profile_name: str, api_name: str):
     }
     endpoint = f"/proxy/{profile_name}/v1/{api_paths[api_name]}"
 
+    reservation = quota_manager.reserve(profile, model.quota_cost)
+    if not reservation.allowed:
+        message = (
+            "Upstream quota information is unavailable."
+            if reservation.reason == "unavailable"
+            else "Upstream quota is insufficient for this request."
+        )
+        return _quota_error(message, api_name, client_headers)
+
     try:
         upstream = proxy_runtime.post(
             profile=profile,
@@ -320,6 +352,7 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             dynamic_headers=dynamic_headers,
         )
     except ProxyRequestError as exc:
+        quota_manager.refund(profile.name, reservation.receipt)
         print(f"[Configured Proxy] Request {request_id} could not start: {exc}")
         return _error(
             "Configured upstream request could not be started.",
@@ -330,6 +363,8 @@ def _handle_proxy_request(profile_name: str, api_name: str):
         )
 
     response = upstream.response
+    if not (200 <= response.status_code < 300):
+        quota_manager.refund(profile.name, reservation.receipt)
     upstream_payload = upstream.payload
     translated_model = upstream_payload.get("model")
     if not isinstance(translated_model, str) or not translated_model:

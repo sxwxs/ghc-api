@@ -57,6 +57,7 @@ PROTECTED_PATHS = frozenset({
     "/v1/search",
     "/v1/extract",
     "/v1/sub-domains",
+    "/api/quota",
 })
 
 
@@ -175,6 +176,11 @@ def initialize_app() -> None:
     from .state import state
     from .token_usage_reporter import start_token_usage_reporter
     from .token_manager import get_github_token
+    from .proxy.quota import quota_manager
+
+    # Synchronous first fetch, then the background refresh loop. create_app()
+    # deliberately does not start it, so tests never spawn the thread.
+    quota_manager.start()
 
     # Get GitHub token using the token management system
     token = get_github_token()

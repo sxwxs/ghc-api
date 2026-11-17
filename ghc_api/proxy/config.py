@@ -70,6 +70,19 @@ class ProxyAffinityConfig:
 
 
 @dataclass(frozen=True)
+class ProxyQuotaConfig:
+    command: Tuple[str, ...]
+    refresh_interval_seconds: int = 3600
+    command_timeout_seconds: int = 30
+    min_remaining: float = 0.0
+
+    def fingerprint(self) -> Tuple:
+        # A change to anything else (interval, min_remaining, quota_cost) must
+        # not clear the ledger or force a re-fetch.
+        return (self.command, self.command_timeout_seconds)
+
+
+@dataclass(frozen=True)
 class ProxyHeaderBinding:
     client_name: str
     upstream_name: str
@@ -105,6 +118,7 @@ class ProxyModelConfig:
     input_types: Tuple[str, ...] = ("text",)
     context_window: int = 128000
     max_output_tokens: int = 16384
+    quota_cost: Optional[float] = None
 
     def api_config(self, api_name: str) -> Optional[ProxyModelApiConfig]:
         value = self.apis.get(api_name)
@@ -121,6 +135,7 @@ class ProxyProfileConfig:
     affinity: ProxyAffinityConfig
     apis: Dict[str, ProxyApiConfig]
     models: Dict[str, ProxyModelConfig]
+    quota: Optional[ProxyQuotaConfig] = None
 
     def resolve(self, api_name: str, model_id: str) -> Optional[Tuple[ProxyApiConfig, ProxyModelConfig, ProxyModelApiConfig]]:
         api_config = self.apis.get(api_name)
@@ -184,6 +199,40 @@ def _parse_positive_int(value, default: int, field_name: str, allow_zero: bool =
         comparator = ">= 0" if allow_zero else "> 0"
         raise ProxyConfigError(f"'{field_name}' must be {comparator}")
     return value
+
+
+def _parse_number(value, default, field_name: str, *, positive: bool) -> Optional[float]:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProxyConfigError(f"'{field_name}' must be a number")
+    if positive and value <= 0:
+        raise ProxyConfigError(f"'{field_name}' must be > 0")
+    if not positive and value < 0:
+        raise ProxyConfigError(f"'{field_name}' must be >= 0")
+    return float(value)
+
+
+def _parse_quota(value, field_name: str) -> Optional[ProxyQuotaConfig]:
+    if value is None:
+        return None
+    raw = _require_mapping(value, field_name)
+    command_value = raw.get("command")
+    if (not isinstance(command_value, list) or not command_value
+            or any(not isinstance(item, str) or not item for item in command_value)):
+        raise ProxyConfigError(f"'{field_name}.command' must be a non-empty list of non-empty strings")
+    return ProxyQuotaConfig(
+        command=tuple(command_value),
+        refresh_interval_seconds=_parse_positive_int(
+            raw.get("refresh_interval_seconds"), 3600, f"{field_name}.refresh_interval_seconds"
+        ),
+        command_timeout_seconds=_parse_positive_int(
+            raw.get("command_timeout_seconds"), 30, f"{field_name}.command_timeout_seconds"
+        ),
+        min_remaining=_parse_number(
+            raw.get("min_remaining"), 0.0, f"{field_name}.min_remaining", positive=False
+        ),
+    )
 
 
 def _parse_auth(value, field_name: str) -> ProxyAuthConfig:
@@ -432,6 +481,9 @@ def _parse_models(value, enabled_apis: Dict[str, ProxyApiConfig], field_name: st
             max_output_tokens=_parse_positive_int(
                 raw.get("max_output_tokens"), 16384, f"{field_name}.{model_id}.max_output_tokens"
             ),
+            quota_cost=_parse_number(
+                raw.get("quota_cost"), None, f"{field_name}.{model_id}.quota_cost", positive=True
+            ),
         )
     return models
 
@@ -450,13 +502,23 @@ def parse_proxy_config(data) -> ProxyConfigSnapshot:
         apis = _parse_apis(raw.get("apis"), f"proxies.{profile_name}.apis")
         affinity = _parse_affinity(raw.get("affinity"), f"proxies.{profile_name}.affinity")
         _validate_bindings_against_affinity(affinity, apis, f"proxies.{profile_name}")
+        quota = _parse_quota(raw.get("quota"), f"proxies.{profile_name}.quota")
+        models = _parse_models(raw.get("models"), apis, f"proxies.{profile_name}.models")
+        if quota is None:
+            for model_id, model in models.items():
+                if model.quota_cost is not None:
+                    raise ProxyConfigError(
+                        f"'proxies.{profile_name}.models.{model_id}.quota_cost' requires "
+                        f"a 'quota' block on the profile"
+                    )
         profiles[profile_name] = ProxyProfileConfig(
             name=profile_name,
             auth=_parse_auth(raw.get("auth"), f"proxies.{profile_name}.auth"),
             headers=_parse_headers(raw.get("headers"), f"proxies.{profile_name}.headers"),
             affinity=affinity,
             apis=apis,
-            models=_parse_models(raw.get("models"), apis, f"proxies.{profile_name}.models"),
+            models=models,
+            quota=quota,
         )
 
     return ProxyConfigSnapshot(profiles=profiles)

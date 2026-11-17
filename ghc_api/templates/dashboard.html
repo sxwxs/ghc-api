@@ -528,6 +528,17 @@
                 </tbody>
             </table>
         </div>
+
+        <div class="section" id="quota-section" style="display:none;">
+            <div class="header-row">
+                <h2>Upstream Quota</h2>
+                <button class="refresh-btn" onclick="loadQuota()">Refresh</button>
+            </div>
+            <p style="color:#888; font-size:12px; margin:0 0 8px;">
+                In-memory quota ledgers for configured upstream proxies. Values reset on restart.
+            </p>
+            <div id="quota-profiles"></div>
+        </div>
     </div>
 
     <!-- Modal for request details -->
@@ -667,6 +678,94 @@
                 }
                 return '<span class="' + cls + '">' + match + '</span>';
             });
+        }
+
+        function quotaEscape(value) {
+            return String(value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function formatQuotaTime(ts) {
+            if (ts === null || ts === undefined) return '-';
+            const d = new Date(ts * 1000);
+            return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString();
+        }
+
+        function formatQuotaDuration(seconds) {
+            if (seconds === null || seconds === undefined) return '-';
+            const s = Math.max(0, Math.round(seconds));
+            const h = Math.floor(s / 3600);
+            const m = Math.floor((s % 3600) / 60);
+            const sec = s % 60;
+            return h > 0 ? `${h}h ${m}m ${sec}s` : (m > 0 ? `${m}m ${sec}s` : `${sec}s`);
+        }
+
+        async function loadQuota() {
+            const section = document.getElementById('quota-section');
+            try {
+                const response = await fetch('/api/quota');
+                // Auth-gated endpoint: hide the block for unauthenticated viewers.
+                if (!response.ok) {
+                    section.style.display = 'none';
+                    return;
+                }
+                const data = await response.json();
+                const profiles = data.profiles || [];
+                if (profiles.length === 0) {
+                    section.style.display = 'none';
+                    return;
+                }
+                const container = document.getElementById('quota-profiles');
+                container.innerHTML = '';
+                for (const p of profiles) {
+                    const card = document.createElement('div');
+                    card.className = 'section';
+                    card.style.marginBottom = '12px';
+                    const batches = (p.batches || []).map(b => `
+                        <tr>
+                            <td>${formatQuotaTime(b.expires_at)}</td>
+                            <td>${Number(b.amount).toFixed(2)}</td>
+                            <td>${formatQuotaDuration(b.seconds_remaining)}</td>
+                        </tr>`).join('');
+                    const alerts = (p.alerts || []).map(a => `
+                        <tr>
+                            <td>${formatQuotaTime(a.time)}</td>
+                            <td>${formatQuotaTime(a.expires_at)}</td>
+                            <td>${Number(a.ours).toFixed(2)}</td>
+                            <td>${Number(a.fetched).toFixed(2)}</td>
+                            <td>${Number(a.diff).toFixed(2)}</td>
+                        </tr>`).join('');
+                    card.innerHTML = `
+                        <h3>${quotaEscape(p.profile)}</h3>
+                        <p style="margin:4px 0;">
+                            Remaining: <strong>${Number(p.remaining).toFixed(2)}</strong>
+                            &nbsp;|&nbsp; min_remaining: ${Number(p.min_remaining).toFixed(2)}
+                        </p>
+                        <p style="color:#888; font-size:12px; margin:4px 0;">
+                            Last fetch: ${formatQuotaTime(p.last_fetch_at)}
+                            &nbsp;|&nbsp; Last success: ${formatQuotaTime(p.last_success_at)}
+                            &nbsp;|&nbsp; Last error: ${quotaEscape(p.last_error || '-')}
+                        </p>
+                        <table>
+                            <thead><tr><th>Expires at</th><th>Amount</th><th>Remaining</th></tr></thead>
+                            <tbody>${batches || '<tr><td colspan="3">No active batches</td></tr>'}</tbody>
+                        </table>
+                        ${alerts ? `
+                        <h4 style="margin:10px 0 4px;">Calibration alerts</h4>
+                        <table>
+                            <thead><tr><th>Time</th><th>Batch (expires)</th><th>Our ledger</th><th>Fetched</th><th>Diff</th></tr></thead>
+                            <tbody>${alerts}</tbody>
+                        </table>` : ''}
+                    `;
+                    container.appendChild(card);
+                }
+                section.style.display = 'block';
+            } catch (err) {
+                section.style.display = 'none';
+            }
         }
 
         async function loadStats() {
@@ -1077,6 +1176,7 @@
         loadUserFilterOptions();
         loadStats();
         loadRecentRequests();
+        loadQuota();
         refreshConfigManagerStatus();
 
         // Reload stats whenever the user filter changes.
@@ -1087,6 +1187,7 @@
             loadUserFilterOptions();
             loadStats();
             loadRecentRequests();
+            loadQuota();
             refreshConfigManagerStatus();
         }, 30000);
     </script>

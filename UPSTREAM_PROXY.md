@@ -118,6 +118,159 @@ The example above does not enable the `systemone` API; decision models normally 
 
 A model that omits an entry from its `apis` mapping still enables that API with no `upstream_model`, so every API enabled on the profile must either be mapped by the model or disabled with `enabled: false` on it. Enabling an API with `request_model: upstream` while a model leaves its `upstream_model` unset is rejected at config load.
 
+## Quota control
+
+Some upstream models are billed against a quota that expires (for example one
+batch per day, void 24 hours later). ghc-api can refuse a request before it
+reaches the upstream when the remaining points are too low. This is generic:
+ghc-api does not know any platform. How to query the quota and authenticate is
+entirely inside an external command; configuration, UI, errors and examples
+only talk about a "quota", measured in points.
+
+Models are unrestricted by default. A profile opts in with a `quota` block, and
+individual models opt in with `quota_cost`:
+
+```yaml
+proxies:
+  example-llm:
+    auth:
+      type: none
+    apis:
+      responses:
+        upstream_url: https://gateway.example.test/responses
+    quota:
+      command: [/path/to/quota-command]
+      refresh_interval_seconds: 3600
+      command_timeout_seconds: 30
+      min_remaining: 10
+    models:
+      limited-model:
+        quota_cost: 2
+      free-model: {}          # no quota_cost, unrestricted
+```
+
+| Key | Meaning | Default |
+|---|---|---|
+| `quota.command` | command returning the current quota snapshot, as a list of strings, without a shell | required |
+| `quota.refresh_interval_seconds` | how often to refresh | 3600 |
+| `quota.command_timeout_seconds` | maximum runtime of the command | 30 |
+| `quota.min_remaining` | safety threshold: remaining points must not drop below it after a request | 0 |
+| `models.<id>.quota_cost` | points charged per request for this model | none (unrestricted) |
+
+`min_remaining: 0` lets the quota be used up completely; `min_remaining: 10`
+stops admitting requests when only 10 points are left. `quota_cost` is a
+positive number and may be fractional (for example `0.5`); prefer rounding up.
+A model with `quota_cost` inside a profile without a `quota` block is rejected
+at config load. After a failed refresh, retries are fixed at 60 seconds and are
+not configurable.
+
+### The quota command
+
+Standard output is a single JSON object:
+
+```json
+{"batches": [{"amount": 250, "expires_at": 1794008691}]}
+```
+
+- `amount`: points currently left in this batch, a non-negative number.
+- `expires_at`: expiry as an **integer unix timestamp in seconds**.
+- Two batches with the same `expires_at` are merged.
+- `batches` may be empty, meaning no quota is available.
+
+Any of the following counts as a failed refresh: non-zero exit code, timeout,
+output not matching the format above, `expires_at` not an integer, or `amount`
+not a number / negative. The command must not print credentials to stdout or
+stderr; ghc-api only shows the first 200 characters of stderr on the dashboard.
+
+### Request admission
+
+Applies only to models with `quota_cost`, identically for `responses`,
+`chat_completions`, `messages` and `systemone`, after model/body validation and
+before the upstream call:
+
+1. Expired batches are dropped; expiry takes effect 60 seconds early to avoid
+   clock skew letting a nearly-expired batch through.
+2. If `remaining - quota_cost < min_remaining`, ghc-api returns **429** with
+   code `quota_exceeded` and never calls the upstream.
+3. Otherwise the points are deducted first (earliest-expiring batch first,
+   continuing into the next batch if needed), then the request is sent. This
+   step holds a lock, so concurrent requests cannot all pass the check.
+
+"Not fetched yet" and "last refresh failed" both count as zero remaining, so
+restricted models return 429. The error message distinguishes "quota
+insufficient" from "quota information unavailable"; the code is the same.
+
+Refunds:
+
+- The request could not be sent (connection failure, credential unavailable): refund.
+- The upstream returned a non-2xx status: refund.
+- Everything else is not refunded, including a stream that breaks mid-response
+  or a client cancellation.
+- A refund goes back to the batch it was deducted from; if that batch has
+  already expired, it is not refunded.
+
+This is deliberately conservative: cases where the upstream did not charge are
+still not refunded, and an upstream that does charge on non-2xx is discovered
+by calibration.
+
+### Refresh scheduling
+
+- **At startup**: one synchronous fetch in `initialize_app`, bounded by
+  `command_timeout_seconds`. A failure does not prevent startup; restricted
+  models are simply rejected until a later success.
+- **Afterwards**: a background thread refreshes every
+  `refresh_interval_seconds`. On failure it retries every 60 seconds until
+  success.
+- **Config hot reload**: changing `command` or `command_timeout_seconds`
+  clears that profile's ledger and fetches immediately; deleting a profile
+  drops its ledger. Changing `min_remaining` or `quota_cost` does not trigger a
+  re-fetch.
+- Only one refresh runs per profile at a time, and the command never holds the
+  ledger lock, so requests are not slowed by it.
+
+When a refresh completes, the new ledger = fetched data − requests deducted
+after the refresh started. Those requests may or may not already be reflected
+in the fetched data, so they are deducted once more (prefer under-estimating).
+
+### Calibration and alerts
+
+After each successful fetch, the ledger as it stood when the fetch started is
+compared with the fetched data per batch (by `expires_at`):
+
+- Our ledger higher than fetched means the upstream charged more than we
+  recorded: emit an alert.
+- Our ledger lower is expected (`quota_cost` set high): no alert.
+- A new batch in the fetched data that our ledger lacks: no alert.
+- A difference below 0.01 points: no alert.
+- No comparison if the previous fetch failed (the ledger was cleared), nor on
+  the first fetch.
+
+An alert records time, profile, batch (expiry), our value, fetched value and
+the difference. Alerts are **in-memory only, at most 50 per profile, and are
+lost on restart**. The ledger then adopts the fetched data.
+
+### Dashboard
+
+`GET /api/quota` returns, for every profile with a `quota` block: current
+remaining points, `min_remaining`, each batch (amount, expiry, time left), last
+fetch / last success / last error, and the alert list. The dashboard shows a
+block for these values, hidden when no profile configures a quota.
+
+The endpoint contains numbers only — no credentials or command content. It is
+listed in `PROTECTED_PATHS`, so when authentication is enabled it requires a
+login; the dashboard block hides itself for unauthenticated viewers.
+
+### Limits
+
+- No persistence: ledger and alerts are in memory and rebuilt by a refresh
+  after restart.
+- Per-request charging only, not per token: each request deducts a fixed
+  `quota_cost`.
+- Single process by default: multiple processes keep separate ledgers and only
+  discover divergence through calibration.
+- No retries or queuing: insufficient quota returns 429 immediately.
+- `quota_cost` is not learned automatically.
+
 ## Authentication
 
 ### No upstream authentication
