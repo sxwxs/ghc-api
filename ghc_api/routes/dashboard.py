@@ -46,6 +46,7 @@ from ..request_file_stats import (
     RequestStatsDatasetNotFound,
     RequestStatsJobNotFound,
     RequestStatsValidationError,
+    _normalize_timestamp,
     list_request_files,
     read_request_detail,
     request_stats_jobs,
@@ -734,6 +735,8 @@ def _load_request_record(request_id: str):
         return None, (jsonify({"error": str(exc)}), 410)
     if record.get("id") != request_id:
         return None, (jsonify({"error": "Request not found"}), 404)
+    # Logs written before 2026-03-23 store ISO-string timestamps; the page expects Unix seconds.
+    record["timestamp"] = _normalize_timestamp(record.get("timestamp"))
     return record, None
 
 

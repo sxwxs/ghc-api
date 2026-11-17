@@ -553,6 +553,12 @@ def _new_meta(
     }
 
 
+# Statistics jobs and the startup restore both build sidecars. A sidecar is
+# published as two files (index, then meta), so two builders must not overlap
+# or the pair can end up mismatched.
+_index_build_lock = threading.Lock()
+
+
 def build_or_load_file_index(
     request_path: Path,
     *,
@@ -560,6 +566,15 @@ def build_or_load_file_index(
     progress: Optional[ProgressCallback] = None,
 ) -> Tuple[Dict[str, Any], str, List[Dict[str, Any]]]:
     """Reuse, append, or rebuild one line-level request sidecar."""
+    with _index_build_lock:
+        return _build_or_load_file_index(request_path, cancel_event, progress)
+
+
+def _build_or_load_file_index(
+    request_path: Path,
+    cancel_event: Optional[threading.Event],
+    progress: Optional[ProgressCallback],
+) -> Tuple[Dict[str, Any], str, List[Dict[str, Any]]]:
     _check_cancelled(cancel_event)
     stat = request_path.stat()
     snapshot_size = stat.st_size

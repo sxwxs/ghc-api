@@ -305,6 +305,19 @@ def test_fulltext_search_defaults_to_24_hours_and_details_open_by_locator(client
     assert detail.get_json()["request_body"] == "needle"
 
 
+def test_detail_normalizes_legacy_iso_timestamps(client, log_dir):
+    test_client, _ = client
+    write_lines(log_dir / "2026-03-10.jl", [
+        {"id": "legacy", "timestamp": "2026-03-10T10:20:30", "request_body": "needle"},
+    ])
+
+    hit = test_client.get("/api/requests/search?q=needle&hours=0").get_json()["items"][0]
+    detail = test_client.get(f"/api/request/{hit['id']}", query_string=hit["log"]).get_json()
+
+    assert isinstance(detail["timestamp"], int)
+    assert detail["timestamp"] == hit["timestamp"]
+
+
 def test_detail_reports_missing_record_after_retention(client, log_dir):
     test_client, cache = client
     cache.start_request("gone", {"model": "m"})
