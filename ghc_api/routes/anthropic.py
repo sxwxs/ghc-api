@@ -39,10 +39,6 @@ from ..compat_profiles import (
     audit_anthropic_request,
     audit_responses_event,
 )
-from ..compat_redaction import (
-    redact_responses_response_for_cache,
-    redact_responses_value_for_cache,
-)
 from ..cache import cache
 from ..counters import counters
 from ..auth import redact_auth_headers
@@ -69,10 +65,7 @@ from ..translator import (
 )
 from ..utils import log_error_request, is_orphaned_tool_result_error, remove_orphaned_tool_results, extract_orphaned_tool_use_ids, log_tool_result_cleanup, log_connection_retry, get_client_ip
 from ..state import state
-from ..reasoning_carrier import (
-    redact_reasoning_carriers_for_cache,
-    strip_reasoning_carriers_from_messages_payload,
-)
+from ..reasoning_carrier import strip_reasoning_carriers_from_messages_payload
 from ..web_search import has_web_search_tool, is_web_search_unsupported_error, apply_web_search_fallback
 
 
@@ -992,13 +985,9 @@ def anthropic_messages():
     client_ip = get_client_ip(request)
     user_id = _current_user_id()
 
-    # Keep an unmodified copy for compatibility auditing, and a separate safe
-    # projection for every dashboard/cache path. Reasoning carriers are
-    # reversible and must never be persisted verbatim.
+    # Keep an unmodified copy of what the client sent: it is audited for
+    # compatibility and recorded in the request log as-is.
     original_request_body = copy.deepcopy(anthropic_payload)
-    cached_original_request_body = redact_reasoning_carriers_for_cache(
-        original_request_body
-    )
 
     original_model = anthropic_payload.get("model", "unknown")
 
@@ -1030,7 +1019,7 @@ def anthropic_messages():
         anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
         anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
         print(f"[Anthropic API] Using direct Anthropic API path for model: {translated_model}")
-        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, cached_original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+        return handle_direct_anthropic_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
 
     if (
         bool(getattr(state, "anthropic_responses_compat_enabled", False))
@@ -1071,7 +1060,7 @@ def anthropic_messages():
     anthropic_payload = translate_thinking_enabled_to_adaptive(anthropic_payload, translated_model)
     anthropic_payload = apply_effort_policy(anthropic_payload, translated_model)
     print(f"[Anthropic API] Using OpenAI translation path for model: {translated_model}")
-    return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, cached_original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
+    return handle_translated_request(anthropic_payload, request_id, start_time, original_model, translated_model, original_request_body, request_headers, client_ip=client_ip, user_id=user_id)
 
 
 def _strict_upstream_json(response: requests.Response) -> Dict[str, Any]:
@@ -1116,34 +1105,13 @@ def _responses_request_cache_record(
         )
     if response_report is not None:
         report["response"] = response_report.to_dict()
-    cached_upstream_body = redact_responses_response_for_cache(upstream_response_body)
-    cache_limit = int(getattr(cache, "max_request_size", 0) or 0)
-    if cache_limit > 0 and response_size > cache_limit:
-        try:
-            upstream_digest_source = json.dumps(
-                upstream_response_body,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-        except Exception:
-            upstream_digest_source = b""
-        cached_upstream_body = {
-            "_truncated": True,
-            "_size": response_size,
-            "_reason": "upstream body exceeded dashboard cache limit",
-            "_sha256": hashlib.sha256(upstream_digest_source).hexdigest(),
-        }
     record = {
         "request_headers": request_headers,
         "client_ip": client_ip,
-        "original_request_body": redact_reasoning_carriers_for_cache(
-            original_request_body
-        ),
-        "request_body": redact_responses_value_for_cache(responses_payload),
-        "response_body": redact_reasoning_carriers_for_cache(response_body),
-        "upstream_response_body": cached_upstream_body,
+        "original_request_body": original_request_body,
+        "request_body": responses_payload,
+        "response_body": response_body,
+        "upstream_response_body": upstream_response_body,
         "original_request_raw_sha256": hashlib.sha256(original_request_raw).hexdigest(),
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
@@ -1271,23 +1239,14 @@ def _make_anthropic_responses_stream_handler(
         start_time=start_time,
         original_model=original_model,
         translated_model=translated_model,
-        request_body_for_cache=redact_responses_value_for_cache(responses_payload),
-        original_request_body=redact_reasoning_carriers_for_cache(
-            original_request_body
-        ),
+        request_body_for_cache=responses_payload,
+        original_request_body=original_request_body,
         request_headers=request_headers,
         client_ip=client_ip,
         user_id=user_id,
         conversion=conversion,
         compatibility_warnings=warnings,
         compatibility_audit=request_audit.to_dict(),
-        max_raw_capture_bytes=min(
-            16 * 1024 * 1024,
-            max(
-                1024,
-                int(getattr(cache, "max_request_size", 0) or 1024 * 1024),
-            ),
-        ),
     )
 
 
@@ -1322,10 +1281,8 @@ def _stream_pending_anthropic_responses_request(
     cache.start_request(request_id, {
         "request_headers": request_headers,
         "client_ip": client_ip,
-        "original_request_body": redact_reasoning_carriers_for_cache(
-            original_request_body
-        ),
-        "request_body": redact_responses_value_for_cache(responses_payload),
+        "original_request_body": original_request_body,
+        "request_body": responses_payload,
         "model": original_model,
         "translated_model": translated_model if translated_model != original_model else None,
         "endpoint": "/v1/messages",
@@ -1917,9 +1874,10 @@ def handle_responses_anthropic_request(
             original_request_raw=original_request_raw,
             responses_payload=responses_payload,
             response_body=error_body,
-            upstream_response_body={"raw_sha256": hashlib.sha256(
-                _upstream_response_bytes(response)
-            ).hexdigest()},
+            # Not JSON, so record the bytes as text. backslashreplace keeps
+            # any invalid UTF-8 visible instead of dropping it.
+            upstream_response_body=_upstream_response_bytes(response).decode(
+                "utf-8", errors="backslashreplace"),
             status_code=502,
             request_size=request_size,
             response_size=len(_upstream_response_bytes(response)),

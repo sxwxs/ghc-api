@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 
 from ghc_api import anysearch_log, file_logging, webiq_log
-from ghc_api.cache import RequestCache
+from ghc_api.request_log import request_log
 from ghc_api.state import state
 
 
@@ -18,11 +18,13 @@ from ghc_api.state import state
 def log_writer(request, tmp_path, monkeypatch):
     monkeypatch.setenv("GHC_API_CONFIG_DIR", str(tmp_path))
     write, flag = {
-        "requests": (RequestCache()._append_request_to_daily_file, "save_request_to_file"),
+        # The request log has no on/off switch; it is always written.
+        "requests": (request_log.append, None),
         "webiq": (webiq_log.record_search_to_file, "log_webiq_requests"),
         "anysearch": (anysearch_log.record_search_to_file, "log_anysearch_requests"),
     }[request.param]
-    monkeypatch.setattr(state, flag, True)
+    if flag:
+        monkeypatch.setattr(state, flag, True)
     return write, flag, tmp_path / request.param
 
 
@@ -77,6 +79,8 @@ def test_concurrent_records_remain_whole(log_writer):
 
 def test_disabled_logging_does_not_open_a_file(log_writer, monkeypatch):
     write, flag, directory = log_writer
+    if flag is None:
+        pytest.skip("the request log cannot be disabled")
     monkeypatch.setattr(state, flag, False)
     with mock.patch("ghc_api.file_logging.open") as open_file:
         write({"id": "disabled"})

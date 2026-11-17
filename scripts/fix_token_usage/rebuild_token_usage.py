@@ -10,7 +10,7 @@ uncached-new slice; the cached portions are reported separately).
 
 The per-request files at ``<config_dir>/requests/YYYY-MM-DD.jl`` always
 carried the full per-request breakdown -- including cache fields -- because
-``cache.complete_request`` writes them via ``_append_request_to_daily_file``.
+``cache.complete_request`` writes them via ``request_log.append``.
 This script rebuilds ``token_usage.jl`` from that ground truth so historical
 dashboards become accurate.
 

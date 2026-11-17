@@ -11,7 +11,6 @@ from ghc_api.reasoning_carrier import (
     build_reasoning_carrier,
     is_reasoning_carrier,
     parse_reasoning_carrier,
-    redact_reasoning_carriers_for_cache,
     strip_reasoning_carriers_from_messages_payload,
 )
 
@@ -54,20 +53,6 @@ class ReasoningCarrierTests(unittest.TestCase):
             with self.subTest(signature=signature[:80]):
                 with self.assertRaises(ValueError):
                     parse_reasoning_carrier(signature)
-
-    def test_cache_redaction_removes_opaque_carrier_payload(self):
-        signature = build_reasoning_carrier(
-            model="gpt",
-            wire_profile="public_responses",
-            encrypted_content="sensitive-opaque-state",
-        )
-        redacted = redact_reasoning_carriers_for_cache({
-            "content": [{"type": "thinking", "signature": signature}]
-        })
-        cached = redacted["content"][0]["signature"]
-        self.assertIn("Responses reasoning carrier", cached)
-        self.assertIn("sha256=", cached)
-        self.assertNotIn(signature, cached)
 
     def test_native_anthropic_strip_removes_only_our_assistant_blocks(self):
         synthetic = build_reasoning_carrier(

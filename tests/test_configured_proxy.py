@@ -583,7 +583,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
 
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(post.call_args.kwargs["headers"]["X-Vendor-Key"], "server-credential")
-                cached = next(iter(cache.cache.values()))
+                cached = cache.get_record(next(iter(cache.cache)))
                 self.assertNotIn("x-vendor-key", {name.lower() for name in cached["request_headers"]})
                 self.assertEqual(cached["request_headers"]["X-Trace-Id"], "trace-1")
                 self.assertNotIn("client-credential", json.dumps(cached))
@@ -658,7 +658,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertIn('"model":"demo-model"', body)
         self.assertIn("data: [DONE]", body)
         self.assertEqual(post.call_args.kwargs["json"]["model"], "chat-deployment")
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["translated_model"], "chat-deployment")
         self.assertEqual(cached["input_tokens"], 2)
         self.assertEqual(cached["output_tokens"], 1)
@@ -707,7 +707,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertNotIn("X-Test-Client-Context", response.headers)  # Disabled unless configured.
         self.assertEqual(post.call_args.kwargs["json"]["model"], "claude-deployment")
         self.assertEqual(post.call_args.kwargs["headers"]["anthropic-version"], "2023-06-01")
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["input_tokens"], 5)
         self.assertEqual(cached["output_tokens"], 2)
         self.assertEqual(cached["cache_creation_input_tokens"], 3)
@@ -739,7 +739,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"]["X-API"], "systemone")
         self.assertFalse(post.call_args.kwargs["stream"])
 
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["input_tokens"], 182)
         self.assertEqual(cached["output_tokens"], 3)
         self.assertEqual(cached["cache_creation_input_tokens"], 0)
@@ -777,7 +777,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 422)
         self.assertEqual(response.get_json(), detail)
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["status_code"], 422)
         self.assertEqual(cached["input_tokens"], 0)
 
@@ -858,7 +858,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         )
         self.assertNotIn("X-Test-Client-Context", post.call_args.kwargs["headers"])
         self.assertNotIn("x-test-upstream-context", post.call_args.kwargs["headers"])
-        for entry in cache.cache.values():
+        for entry in map(cache.get_record, list(cache.cache)):
             self.assertNotIn("X-Test-Client-Context", entry["request_headers"])
 
     def test_multiple_header_bindings_are_independent(self):
@@ -879,7 +879,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"]["X-Test-Upstream-Trace"], supplied)
         self.assertEqual(post.call_args.kwargs["headers"]["X-Test-Upstream-Context"],
                          response.headers["X-Test-Client-Context"])
-        self.assertNotIn("X-Test-Client-Trace", next(iter(cache.cache.values()))["request_headers"])
+        self.assertNotIn("X-Test-Client-Trace", cache.get_record(next(iter(cache.cache)))["request_headers"])
         model = catalog.get_json()["data"][0]
         self.assertEqual(model["request_headers"]["/messages"], [
             {"name": "X-Test-Client-Context", "value_type": "uuid_v4"},
@@ -952,7 +952,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertNotIn('"model":"claude-deployment"', body)
         self.assertIn("event: message_stop", body)
         self.assertNotIn("[DONE]", body)
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["input_tokens"], 4)
         self.assertEqual(cached["output_tokens"], 2)
         self.assertEqual(cached["cache_creation_input_tokens"], 2)
@@ -997,7 +997,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
         self.assertIn('"model":"demo-model"', body)
         self.assertNotIn('"model":"private-deployment"', body)
         self.assertIn("data: [DONE]", body)
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         # input_tokens is the uncached slice: 4 total - 1 cached read.
         self.assertEqual(cached["input_tokens"], 3)
         self.assertEqual(cached["output_tokens"], 2)
@@ -1027,7 +1027,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 200)
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["model"], "demo-model")
         self.assertEqual(cached["translated_model"], "chat-deployment")
         self.assertEqual(
@@ -1060,7 +1060,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
                         response = client.post(path, json=request_body)
 
                 self.assertEqual(response.status_code, 200)
-                cached = next(iter(cache.cache.values()))
+                cached = cache.get_record(next(iter(cache.cache)))
                 self.assertEqual(cached["input_tokens"], uncached)
                 self.assertEqual(cached["output_tokens"], 3)
                 self.assertEqual(cached["cache_read_input_tokens"], cache_read)
@@ -1087,7 +1087,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 429)
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["input_tokens"], 0)
         self.assertEqual(cached["output_tokens"], 0)
         self.assertEqual(cached["cache_read_input_tokens"], 0)
@@ -1229,7 +1229,7 @@ class ConfiguredProxyRouteTest(unittest.TestCase):
                 })
 
         self.assertEqual(response.status_code, 200)
-        cached = next(iter(cache.cache.values()))
+        cached = cache.get_record(next(iter(cache.cache)))
         self.assertEqual(cached["user_id"], "alice")
         snapshot = cache.get_user_model_token_snapshot()
         self.assertEqual(snapshot[("alice", "chat-deployment")]["input_tokens"], 2)

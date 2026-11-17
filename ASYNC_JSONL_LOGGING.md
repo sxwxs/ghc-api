@@ -10,7 +10,7 @@ thread, both with the same shape:
 
 | Caller | File | Guarded by |
 |---|---|---|
-| `cache._append_request_to_daily_file()` | `<config_dir>/requests/YYYY-MM-DD.jl` | `save_request_to_file` |
+| `request_log.RequestLog.append()` | `<config_dir>/requests/YYYY-MM-DD.jl` | always on; `request_log_retention_days` |
 | `webiq_log.record_search_to_file()` | `<config_dir>/webiq/YYYY-MM-DD.jl` | `log_webiq_requests` (on by default) |
 
 Both do `open(path, "a")` / `write(one_line)` / `close()` **outside any lock**,
@@ -78,8 +78,12 @@ API for exactly this reason. Known call sites to update:
    accounting, `flush()` semantics, per-path error rate limiting).
 2. Route `webiq_log.record_search_to_file()` through it — small blast radius,
    and it is the caller with the multi-megabyte lines.
-3. Route `cache._append_request_to_daily_file()` through it — larger blast
-   radius (`save_request_to_file`, export/import, the request-statistics
-   indexer all read those files).
+3. Route `request_log.RequestLog.append()` through it — larger blast
+   radius: the dashboard reads every finished request's bodies back from
+   those files, and the request-statistics indexer scans them. `append()`
+   also returns the record's byte offset, which the in-memory cache keeps as
+   its locator, so an async writer has to hand that offset back (or the
+   cache has to keep the record until it is flushed). Dropping a record on a
+   full queue would now lose it entirely.
 
 Do **not** do 3 in the same commit as 2.

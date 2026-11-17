@@ -27,14 +27,7 @@ from ..anthropic_responses import (
     parse_strict_json_bytes,
 )
 from ..compat_profiles import audit_responses_event
-from ..reasoning_carrier import (
-    build_reasoning_carrier,
-    redact_reasoning_carriers_for_cache,
-)
-from ..compat_redaction import (
-    redact_responses_event_for_cache,
-    redacted_value,
-)
+from ..reasoning_carrier import build_reasoning_carrier
 from .base import SSEStreamHandler
 
 
@@ -1104,7 +1097,6 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
     log_prefix = "[Stream Anthropic/Responses]"
     emit_event_header = True
     emit_done_sentinel = False
-    capture_raw_sse_lines = False
 
     def __init__(
         self,
@@ -1153,23 +1145,6 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
             },
         }
         yield f"event: error\ndata: {_json(event)}\n\n"
-
-    def raw_events_for_cache(self) -> List[str]:
-        result: List[str] = []
-        for raw in self.raw_events:
-            try:
-                event = parse_strict_json_bytes(raw.encode("utf-8"))
-                safe = redact_responses_event_for_cache(event)
-            except Exception:
-                safe = redacted_value(raw, "malformed Responses event")
-            result.append(json.dumps(
-                safe,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ))
-        return result
 
     def forward_event(self, event_type: str, event: Dict[str, Any], raw_data: str) -> Iterator[Tuple[str, str]]:
         payload_type = str(event.get("type") or "")
@@ -1243,14 +1218,10 @@ class AnthropicResponsesStreamHandler(SSEStreamHandler):
                 "request": self.conversion.report.to_dict(),
                 "stream": self.translator.report.to_dict(),
             },
-            "raw_events_redacted": True,
-            "raw_capture_truncated": self.raw_capture_truncated,
         }
         if self._compatibility_audit is not None:
             result["compatibility_audit"] = copy.deepcopy(self._compatibility_audit)
         if self.translator.terminal_result is not None:
             result["conversion_report"]["response"] = self.translator.terminal_result.report.to_dict()
-            result["response_body"] = redact_reasoning_carriers_for_cache(
-                self.translator.terminal_result.response
-            )
+            result["response_body"] = self.translator.terminal_result.response
         return result

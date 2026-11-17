@@ -187,8 +187,12 @@ responses_pre_header_grace: 0.5
 # request, so it is disabled by default.
 auto_remove_encrypted_content_on_parse_error: false
 
-# If true, each completed request is appended to requests/YYYY-MM-DD.jl in the ghc-api config folder.
-save_request_to_file: false
+# Every finished request is appended, untruncated, to requests/YYYY-MM-DD.jl in the
+# ghc-api config folder. The dashboard reads request and response bodies from these
+# files. Daily files older than this many days are deleted; 0 keeps them forever.
+# Replaces the deprecated save_request_to_file. When only that legacy key is set,
+# true means 0 (keep forever) and false means the default of 7 days.
+request_log_retention_days: 7
 
 # If true, skip all OneDrive detection, sync, and OneDrive-backed shared status reads.
 # Local fallback files such as ~/.ghc-api/token_usage.jl are still used where supported.
@@ -238,21 +242,13 @@ enable_responses_early_failure_retry: true
 # Lower values mean less data loss on crash but more disk I/O.
 session_flush_interval: 5
 
-# Request Cache Memory Limits
-# ---------------------------
-# Recent requests are kept in memory for the dashboard / inspection UI.
-# These settings cap how much memory that cache may use.
-#
-# cache_max_entries: Maximum number of recent requests to keep in memory.
-#                    Older entries are evicted FIFO once this limit is reached.
-# cache_max_request_size: Maximum size in bytes for a single cached entry's
-#                         request or response body. If a body exceeds this
-#                         limit it is replaced with a small placeholder so the
-#                         metadata is preserved without holding the full
-#                         payload in memory. Set to 0 to disable the per-entry
-#                         size limit.
+# Request List
+# ------------
+# cache_max_entries: Number of recent requests listed on the dashboard from memory.
+#                    Only metadata is kept in memory; bodies are read from the
+#                    request log on demand. On startup the list is refilled from
+#                    the newest request log entries.
 cache_max_entries: 1000
-cache_max_request_size: 1048576
 
 # Web Search Proxy Settings
 # -------------------------

@@ -136,6 +136,11 @@ exceeds `cache_max_request_size`. For large agent requests — the ones most lik
 to hit auto-compaction, i.e. exactly the Codex path from §1 — the original body
 is not retained. The README sentence needs that qualifier.
 
+**Resolved:** `cache_max_request_size` was removed. Every finished request is
+now written untruncated to the request log (`ghc_api/request_log.py`), and the
+in-memory cache keeps only metadata, so the original body is always retained
+for as long as `request_log_retention_days` keeps the daily file.
+
 ### G5. Test and code nits
 
 - `tests/test_openai_service_tier.py` asserts on positional arguments —
@@ -157,7 +162,7 @@ is not retained. The README sentence needs that qualifier.
 ## 4. Follow-ups, in priority order
 
 1. **Scope the README claim** to the Responses and Chat Completions endpoints,
-   and add the `cache_max_request_size` qualifier (G2, G4). Documentation-only,
+   (G2; G4 is resolved). Documentation-only,
    but it is what misleads the next debugging session.
 2. **Record the upstream 400 body** in this document when it is next observed.
    It answers G3 — parameter-level versus value-level rejection — and determines

@@ -337,7 +337,7 @@
             if (!files.length) {
                 const empty = document.createElement("div");
                 empty.className = "empty";
-                empty.textContent = "No daily request files found. Enable save_request_to_file and complete at least one request.";
+                empty.textContent = "No daily request files found yet. They appear once a request completes.";
                 list.appendChild(empty);
                 updateSelectionSummary();
                 return;

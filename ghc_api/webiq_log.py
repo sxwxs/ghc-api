@@ -7,11 +7,11 @@ by ``state.log_webiq_requests``). Failures are recorded too. MCP calls append
 method, status, duration, session and user metadata, but never their streaming
 request or response bodies.
 
-This file is the only full-fidelity record of a REST call. Each REST call and
-MCP metadata record is also added to the shared request cache, which feeds the
-dashboard, request list, full-text search and export. The cache replaces any
-REST body over ``cache_max_request_size`` with a placeholder, both in memory
-and in ``requests/YYYY-MM-DD.jl``. Nothing in this Web IQ log is truncated.
+Each REST call and MCP metadata record is also added to the shared request
+cache, which feeds the dashboard request list, full-text search and detail
+view, and is written untruncated to ``requests/YYYY-MM-DD.jl`` like every
+other request. This Web IQ log is the search-specific view of the same calls,
+with its own on/off switch and no retention cleanup.
 
 There is deliberately no in-memory buffer: keeping a second copy of every
 search in RAM next to the cache's copy bought nothing but memory.

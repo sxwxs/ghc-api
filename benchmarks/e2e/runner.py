@@ -151,13 +151,11 @@ def _write_config(path: Path, fake_port: int, proxy_port: int, variant: Dict) ->
         "github_api_base_url": f"http://127.0.0.1:{fake_port}",
         "copilot_api_base_url": f"http://127.0.0.1:{fake_port}",
         "disable_onedrive_access": True,
-        "save_request_to_file": variant.get("save_request_to_file", False),
         "enable_tool_call_recovery": variant.get("enable_tool_call_recovery", False),
         "enable_auth": False,
         "sse_keepalive_interval": 0,
         "max_connection_retries": 0,
         "cache_max_entries": 1000,
-        "cache_max_request_size": 1048576,
         "model_mappings": {"exact": {}, "prefix": {}},
         "chat_completions_model_support": {"exact": [], "prefix": []},
     }
@@ -278,7 +276,6 @@ def run(suite: str, output_dir: Path | None = None) -> Path:
     concurrencies = [1, 8] if suite == "smoke" else [1, 8, 32]
     variants = [
         {"name": "baseline"},
-        {"name": "request-file-logging", "save_request_to_file": True},
         {"name": "tool-call-recovery", "enable_tool_call_recovery": True},
     ]
     generated = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

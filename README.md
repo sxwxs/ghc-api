@@ -12,12 +12,11 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - **Model Name Mapping**: Translate model names with exact and prefix-based matching
 - **Token Management**: Automatic GitHub Copilot token refresh
 - **Vision Support**: Handle image inputs and enable vision capabilities
-- **Memory Caching**: Cache all requests and responses (up to 1000 entries)
+- **Recent Request List**: Metadata of the most recent requests (default 1000) kept in memory and refilled from disk on restart
 - **Web Dashboard**: Real-time statistics and request browser
 - **Live Throughput**: Per-model tokens/second, time to first token, and currently running requests for the active process run
 - **Request Details**: View full request/response bodies with JSON formatting
-- **Export/Import**: Export and import request history as JSON Lines files
-- **Optional Request File Logging**: Save completed requests to daily JSON Lines files
+- **Request Log**: Every finished request is written untruncated to a daily JSON Lines file, with configurable retention
 - **Request File Statistics**: Build reusable line-level indexes, inspect size/latency/token distributions, and drill into exact historical requests
 - **Content Filtering**: Remove or add content from system prompts and tool results
 - **Code Agent Manager UI**: Install Codex/Claude/Copilot CLI and manage config sync from dashboard
@@ -163,8 +162,8 @@ system_prompt_remove: []    # Strings to remove from system prompts
 system_prompt_add: []       # Strings to append to system prompts
 tool_result_suffix_remove: [] # Strings to remove from end of tool results
 
-# Optional request persistence
-save_request_to_file: false # If true, save completed requests to requests/YYYY-MM-DD.jl
+# Request log (always on): days to keep requests/YYYY-MM-DD.jl, 0 = forever
+request_log_retention_days: 7
 
 # Optional OneDrive access gate
 disable_onedrive_access: true # If true, skip all OneDrive detection/sync/shared reads
@@ -425,21 +424,51 @@ Definitions that matter when reading the numbers:
 
 The same two fields, `ttft` and `tokens_per_second`, are attached to every cached request, so they also appear in the request browser, in `/api/requests`, and in persisted `.jl` request files.
 
-Scope is deliberate: these metrics cover the **current process run only** and reset on restart. A window wider than the retained samples is reported as truncated instead of under-reporting silently; raise `perf_sample_capacity` for a longer history, or use [Request File Logging](#request-file-logging) and `/request-stats` for cross-day analysis. Imported `.jl` requests never feed the live metrics — replaying an export must not invent throughput this process never produced.
+Scope is deliberate: these metrics cover the **current process run only** and reset on restart. A window wider than the retained samples is reported as truncated instead of under-reporting silently; raise `perf_sample_capacity` for a longer history, or use [Request File Logging](#request-file-logging) and `/request-stats` for cross-day analysis. Requests restored from the request log after a restart never feed the live metrics — replaying history must not invent throughput this process never produced.
 
 ### Request File Logging
 
-When `save_request_to_file: true`, ghc-api appends each completed request to:
+Every finished request is appended, as one JSON line, to:
 
 - `<ghc-api config dir>/requests/YYYY-MM-DD.jl`
 
-The saved `.jl` line format is the same as dashboard export (`/api/requests/export`) and can be imported by dashboard import (`/api/requests/import`).
+The record is complete: request headers (credentials redacted), the original
+client body, the body sent upstream, and the full response or every raw SSE
+`data:` payload. Nothing is truncated, stripped, or summarized — generated
+images stay in the response as base64, and image-edit uploads are recorded as
+base64 too. This file is the only copy of the bodies once a request finishes:
+the in-memory request list keeps metadata plus the record's byte offset, and
+the request browser reads details back from disk.
 
-Web IQ searches are recorded as requests too (model name `webiq_search`, zero tokens), so they appear in these files, in `/api/stats` and in the request statistics alongside LLM traffic. That copy obeys `cache_max_request_size` like any other; the untruncated record of a search lives in `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`.
+Retention is controlled by `request_log_retention_days` (default `7`; `0`
+keeps files forever). Expired daily files and their statistics indexes are
+deleted at startup and on the first request of each new day. Only files named
+`YYYY-MM-DD.jl` are ever deleted.
+
+`save_request_to_file` is deprecated. When `request_log_retention_days` is not
+set, `save_request_to_file: true` means `0` (keep forever) and `false` means the
+default 7 days. Note that `false` no longer turns request logging off; startup
+prints a warning saying where requests are written. `cache_max_request_size` is
+ignored: finished requests no longer hold bodies in memory, so there is nothing
+to cap.
+
+On startup, the request list is refilled from the newest records on disk (up to
+`cache_max_entries`), in the background. Restored requests are listed only;
+they do not count toward `/api/stats` or the live throughput metrics, which
+describe the current process run.
+
+Full-text search (`/api/requests/search`, the **Full-text** toggle in the
+request browser) scans these files. It defaults to the last 24 hours; pass
+`hours=N`, or `hours=0` for every retained day.
+
+There is no import/export: the daily files are the export. Copy them into
+another instance's `requests/` folder to browse them in `/request-stats`.
+
+Web IQ searches are recorded as requests too (model name `webiq_search`, zero tokens), so they appear in these files, in `/api/stats` and in the request statistics alongside LLM traffic. The search-specific log in `<ghc-api config dir>/webiq/YYYY-MM-DD.jl` is kept as well.
 
 Open `/request-stats` to select one or more daily files and generate request-size, request-duration, and billing-token distributions overall, by model, or by exact HTTP response code. Scans run asynchronously and write one lightweight JSONL sidecar plus metadata per request file under `requests/.request-stats-index/`. Each sidecar row stores scalar metrics and the source byte offset/length/hash, never request/response bodies or headers. If a source file is unchanged its sidecar is reused without reopening the source; append-only growth is indexed incrementally, while truncated, replaced, corrupt, or incompatible files are rebuilt safely.
 
-Histogram bars are interactive: selecting a bucket shows the exact indexed requests that contributed to it. Each result opens a stable `/request-file-detail` link which seeks directly to the original `.jl` line and verifies its SHA-256 before returning the complete persisted record. These links remain valid while the source file is unchanged; a changed source reports that the index must be rebuilt. Detail rendering is capped at 4 MiB per JSONL line.
+Histogram bars are interactive: selecting a bucket shows the exact indexed requests that contributed to it. Each result opens a stable `/request-file-detail` link which seeks directly to the original `.jl` line and verifies its SHA-256 before returning the complete persisted record. These links remain valid while the source file is unchanged; a changed source reports that the index must be rebuilt. Detail rendering is capped at 256 MiB per JSONL line.
 
 The token views follow the fields persisted by ghc-api: input not cached (`input_tokens`), cache write (`cache_creation_input_tokens`), cache read (`cache_read_input_tokens`), output (`output_tokens`), and their total. Provider compatibility paths use the same existing field mappings as the request log itself. Distributions include every persisted request attempt, including failed attempts; failures commonly record zero usage tokens.
 
@@ -789,7 +818,7 @@ is what turns those arguments into a full official request. See
 `scripts/webiq_search_demo.py`.
 
 Every REST call is written to `<ghc-api config dir>/webiq/YYYY-MM-DD.jl`
-(`log_webiq_requests`, on by default), which is the only untruncated record, and
+(`log_webiq_requests`, on by default) and
 added to the shared request cache with a service-specific model name such as
 `webiq_search`, `webiq_videos`, or `webiq_browse`. MCP calls are audited in both
 places with HTTP/MCP method, name, status, duration, session IDs and user ID;
@@ -876,7 +905,7 @@ Documented security exceptions:
 - Upstream 401/403 become safe 503 errors about the **server's** credentials/access.
 - **Every 402 body is replaced** with a fixed quota error, retaining only safe
   request-ID metadata. AnySearch may include generated credentials in 402s;
-  originals never reach logs, request caches, exports, or clients.
+  originals never reach logs, request caches, or clients.
 - Upstream redirects become safe 502 errors instead of being followed.
 - Timeout is 504; other network failure is 502. No exception details are exposed.
 
@@ -944,11 +973,9 @@ Configured models are selectable from `/chat` and participate in the same reques
 - `GET /api/runtime-config` - Read in-memory runtime config
 - `POST /api/runtime-config` - Update in-memory runtime config (no file write)
 - `GET /api/stats` - JSON statistics endpoint
-- `GET /api/requests` - Paginated list of requests
-- `GET /api/requests/search` - Full-text search in request/response bodies
-- `GET /api/requests/export` - Export all requests as JSON Lines file
-- `POST /api/requests/import` - Import requests from JSON Lines file
-- `GET /api/request/<id>` - Individual request details
+- `GET /api/requests` - Paginated list of recent requests (`search=` filters by model/endpoint)
+- `GET /api/requests/search` - Full-text search in persisted request/response bodies (`q=`, `hours=` default 24, 0 = all retained days)
+- `GET /api/request/<id>` - Full request record, read from the request log (`file`/`offset`/`length` from a search hit locate requests no longer in the list)
 - `GET /api/request/<id>/request-body` - Request body only
 - `GET /api/request/<id>/response-body` - Response body only
 - `GET /api/config-manager/status` - Config manager status and diff info
@@ -1070,7 +1097,7 @@ A template only declares its title and any page-specific buttons:
 ```html
 <nav class="navbar" id="app-nav" data-title="Request Browser">
     <template id="nav-extras">
-        <button onclick="downloadRequests()">Download .jl</button>
+        <button onclick="refreshRequests()">Refresh</button>
     </template>
 </nav>
 <script src="{{ url_for('static', filename='nav.js') }}"></script>
@@ -1089,7 +1116,7 @@ When you expose ghc-api beyond `localhost` (sharing a single instance with other
 | **Public — LLM & Web IQ API** | `POST /v1/chat/completions`, `/chat/completions`, `/v1/messages`, `/v1/messages/count_tokens`, `/v1/responses`, `/responses`, `/v1/embeddings`, `/embeddings`, `/v1/systemone`, `/systemone`, `/v1/decisions`, `/decisions`, `/v1/images/generations`, `/images/generations`, `/v1/images/edits`, `/images/edits`; all Web IQ routes listed above under `/v3/`; configured `/proxy/<profile>/v1/responses`, `/proxy/<profile>/v1/chat/completions`, `/proxy/<profile>/v1/messages`; `GET /v1/models`, `/models`, `/v1/models/<model_id>`, `/models/<model_id>`, `/v1/models/full/`, `/models/full/`, `/proxy/<profile>/v1/models`, `/proxy/<profile>/v1/models/<model_id>` | No basic-auth (clients send `Authorization: Bearer <user-token>`); ghc-api's own middleware checks the user token when `enable_auth=true` |
 | **Public — signup** | `GET /signup`, `POST /signup`, `GET /api/users-list` (token-redacted) | No basic-auth — anyone may request an account |
 | **Admin — user mgmt** | `GET /api/users`, `POST /api/users/<id>/approve`, `POST /api/users/<id>/revoke`, `DELETE /api/users/<id>` | basic-auth — `GET /api/users` returns plaintext tokens |
-| **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive`, `POST /api/requests/import` | basic-auth — affect global state |
+| **Admin — config & data** | `POST /api/runtime-config`, `POST /api/config-manager/install-tools`, `POST /api/config-manager/sync-to-onedrive`, `POST /api/config-manager/sync-from-onedrive` | basic-auth — affect global state |
 | **Admin — dashboard & inspection** | `GET /`, `/live`, `/requests`, `/request-stats`, `/request-perf`, `/request-file-detail`, `/code-agent-manager`, `/chat`, `/agent`, all `/api/request-stats/*`, `GET /api/stats`, `/api/live-stats`, `/api/requests*`, `/api/request/<id>*`, `/api/config-manager/*`, `/api/agent/*` | basic-auth — request data and usage aggregates may expose other users' activity |
 
 ### Sample nginx config

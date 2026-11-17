@@ -13,6 +13,11 @@ from ghc_api.cache import cache
 from ghc_api.counters import counters
 from ghc_api.state import state
 
+
+def recent_records(limit):
+    """Full logged records (bodies and sidecars) of the newest cached requests."""
+    return [cache.get_record(entry["id"]) for entry in cache.get_recent_requests(limit)]
+
 ID = "7d6f4e91-2a83-4c5b-9f10-6e8a3d27b541"
 SECRET = "PRIVATE-CREDENTIAL-NEVER-RETAIN"
 EXTRACT = {"code": 0, "message": "success", "request_id": ID,
@@ -37,7 +42,7 @@ def env(tmp_path, monkeypatch):
     for key, value in {"enable_anysearch": True, "anysearch_api_key": "SERVER-KEY",
                        "anysearch_base_url": "https://api.anysearch.com", "anysearch_timeout": 30,
                        "anysearch_extract_timeout": 60, "enable_auth": False,
-                       "log_anysearch_requests": True, "save_request_to_file": True}.items():
+                       "log_anysearch_requests": True}.items():
         monkeypatch.setattr(state, key, value)
     post, get = Mock(return_value=upstream(EXTRACT)), Mock(return_value=upstream(CATALOG))
     monkeypatch.setattr(anysearch.requests, "post", post)
@@ -121,7 +126,7 @@ def test_catalog_repeated_domains_and_parameters_are_not_rewritten(env):
     assert entry["type"] == "anysearch_sub_domains"
     assert entry["result_count"] == 2
     assert counters.snapshot() == {"anysearch.sub_domains": 1}
-    cached = cache.get_recent_requests(1)[0]
+    cached = recent_records(1)[0]
     assert cached["model"] == "anysearch_sub_domains"
     assert cached["uses_search_quota"] is False
     assert cached["input_tokens"] == cached["output_tokens"] == 0
@@ -155,8 +160,8 @@ def test_all_endpoints_use_local_auth_and_server_key(env, monkeypatch, path):
     sent = (get if path == anysearch.SUB_DOMAINS_PATH else post).call_args.kwargs['headers']
     assert sent['Authorization'] == 'Bearer SERVER-KEY'
     assert 'x-api-key' not in sent
-    assert 'CLIENT-KEY' not in str(cache.get_recent_requests(1))
-    assert cache.get_recent_requests(1)[0]['user_id'] == 'test-user'
+    assert 'CLIENT-KEY' not in str(recent_records(1))
+    assert recent_records(1)[0]['user_id'] == 'test-user'
 
 
 def test_catalog_never_forwards_or_records_client_query_token(env, capsys, monkeypatch):
@@ -170,7 +175,7 @@ def test_catalog_never_forwards_or_records_client_query_token(env, capsys, monke
     response = client.get('/v1/sub-domains?' + query)
     assert response.status_code == 200
     assert get.call_args.kwargs['params'] == b'domain=code&domain=finance'
-    sinks = str(audit(root)) + str(cache.get_recent_requests(1)) + capsys.readouterr().out
+    sinks = str(audit(root)) + str(recent_records(1)) + capsys.readouterr().out
     sinks += ''.join(p.read_text() for p in root.rglob('*.jl'))
     assert SECRET not in sinks
 
@@ -189,7 +194,7 @@ def test_sensitive_402_is_removed_from_all_endpoints_and_sinks(env, capsys, path
     assert response.get_json()['request_id'] == ID
     assert response.headers['Cache-Control'] == 'no-store'
     assert sender.call_count == 1
-    sinks = str(response.headers) + response.get_data(as_text=True) + str(cache.get_recent_requests(1))
+    sinks = str(response.headers) + response.get_data(as_text=True) + str(recent_records(1))
     sinks += capsys.readouterr().out + ''.join(p.read_text() for p in root.rglob('*.jl'))
     assert SECRET not in sinks
     assert audit(root)[0]['upstream']['status_code'] == 402
@@ -246,7 +251,7 @@ def test_malformed_success_is_recorded_as_error_without_rewriting_native_respons
     response = call(client, path)
     assert response.status_code == 200 and response.data == sender.return_value.content
     assert audit(root)[0]['state'] == 'error'
-    assert cache.get_recent_requests(1)[0]['state'] == 'error'
+    assert recent_records(1)[0]['state'] == 'error'
 
 
 @pytest.mark.parametrize('method,path,status', [

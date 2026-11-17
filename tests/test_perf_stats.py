@@ -260,28 +260,31 @@ class CacheSpeedFieldTests(unittest.TestCase):
         self.assertEqual(in_flight[0]["state"], "receiving")
         self.assertGreaterEqual(in_flight[0]["elapsed"], 0.0)
 
-    def test_imported_unfinished_request_is_not_in_flight(self) -> None:
-        self.cache.import_request({"id": "exported-mid-stream", "state": "receiving"})
-
-        self.assertEqual(self.cache.get_in_flight(), [])
-        self.assertEqual(self.cache.get_request("exported-mid-stream")["state"], "error")
-
-    def test_import_does_not_feed_live_metrics(self) -> None:
+    def test_restored_requests_do_not_feed_live_metrics_or_stats(self) -> None:
         from ghc_api.perf_stats import perf_stats
 
         before = perf_stats.snapshot(window_seconds=None)["samples_recorded"]
-        self.cache.import_request({
-            "id": "imported-1",
+        restored = self.cache.restore([{
+            "id": "restored-1",
+            "timestamp": 1,
+            "started_at": 1.0,
             "model": "gpt-5",
             "endpoint": "/v1/responses",
+            "state": "completed",
             "output_tokens": 100,
             "duration": 10.0,
-        })
+            "ttft": None,
+            "tokens_per_second": None,
+            "log": None,
+        }])
         after = perf_stats.snapshot(window_seconds=None)["samples_recorded"]
 
+        self.assertEqual(restored, 1)
         self.assertEqual(before, after)
-        # The derived speed is still shown for the imported row.
-        self.assertEqual(self.cache.get_request("imported-1")["tokens_per_second"], 10.0)
+        self.assertEqual(self.cache.request_count, 0)
+        self.assertEqual(self.cache.get_in_flight(), [])
+        # The derived speed is still shown for the restored row.
+        self.assertEqual(self.cache.get_request("restored-1")["tokens_per_second"], 10.0)
 
 
 class StreamingHandlerSpeedTests(unittest.TestCase):

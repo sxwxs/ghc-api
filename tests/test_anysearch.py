@@ -15,6 +15,11 @@ from ghc_api.cache import cache
 from ghc_api.counters import counters
 from ghc_api.state import state
 
+
+def recent_records(limit):
+    """Full logged records (bodies and sidecars) of the newest cached requests."""
+    return [cache.get_record(entry["id"]) for entry in cache.get_recent_requests(limit)]
+
 UPSTREAM_ID = "7d6f4e91-2a83-4c5b-9f10-6e8a3d27b541"
 LOCAL_ID = "5a3f8c27-1e64-4b90-a752-6d9e2f41c083"
 SECRET = "GENERATED-SECRET-NOT-FOR-LOGS"
@@ -45,7 +50,6 @@ def env(tmp_path, monkeypatch):
     for key, value in vars(settings()).items():
         monkeypatch.setattr(state, key, value)
     monkeypatch.setattr(state, "enable_auth", False)
-    monkeypatch.setattr(state, "save_request_to_file", True)
     post = Mock(return_value=upstream())
     monkeypatch.setattr(anysearch.requests, "post", post)
     cache.cache.clear()
@@ -77,7 +81,7 @@ def test_native_body_and_response_are_unchanged(env):
     assert entry["result_count"] == 1
     assert entry["upstream"] == {"status_code": 200, "request_id": UPSTREAM_ID}
     assert entry["state"] == "completed"
-    cached = cache.get_recent_requests(1)[0]
+    cached = recent_records(1)[0]
     assert cached["model"] == "anysearch_search"
     assert cached["input_tokens"] == cached["output_tokens"] == 0
     assert counters.snapshot()["anysearch.search"] == 1
@@ -127,7 +131,7 @@ def test_402_never_leaks_to_any_sink(env, capsys, raw):
     assert response.get_json()["request_id"] == UPSTREAM_ID
     assert response.headers["Cache-Control"] == "no-store"
     assert post.call_count == 1
-    sinks = [response.get_data(as_text=True), str(response.headers), str(cache.get_recent_requests(10)),
+    sinks = [response.get_data(as_text=True), str(response.headers), str(recent_records(10)),
              client.get("/api/requests").get_data(as_text=True), capsys.readouterr().out]
     sinks += [p.read_text() for p in directory.rglob("*.jl")]
     assert all(SECRET not in value for value in sinks)
@@ -193,7 +197,7 @@ def test_local_auth_and_server_key_are_separate(env, monkeypatch):
     assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer SERVER-KEY"
     assert "x-api-key" not in post.call_args.kwargs["headers"]
     assert audit(directory)[0]["user_id"] == "test-user"
-    recorded = str(cache.get_recent_requests(1)) + str(audit(directory))
+    recorded = str(recent_records(1)) + str(audit(directory))
     for secret in ("SERVER-KEY", "CLIENT-TOKEN", "CLIENT-KEY", "OTHER-CLIENT-KEY"):
         assert secret not in recorded
 
@@ -213,8 +217,8 @@ def test_business_and_malformed_responses_are_not_counted_as_success(env, body, 
     response = client.post("/v1/search", json={"query": "q"})
     assert response.data == post.return_value.content, "native API remains transparent"
     assert audit(directory)[0]["state"] == ("completed" if success else "error")
-    assert cache.get_recent_requests(1)[0]["state"] == ("completed" if success else "error")
-    assert cache.get_recent_requests(1)[0]["upstream_request_id"] == UPSTREAM_ID
+    assert recent_records(1)[0]["state"] == ("completed" if success else "error")
+    assert recent_records(1)[0]["upstream_request_id"] == UPSTREAM_ID
     assert counters.snapshot()["anysearch.search" if success else "anysearch.search_error"] == 1
 
 
@@ -228,7 +232,7 @@ def test_runtime_log_switch_and_no_key_exposure(env):
     assert client.post("/api/runtime-config", json={"log_anysearch_requests": False}).status_code == 200
     assert client.post("/v1/search", json={"query": "q"}).status_code == 200
     assert not audit(directory)
-    assert cache.get_recent_requests(1)[0]["model"] == "anysearch_search"
+    assert recent_records(1)[0]["model"] == "anysearch_search"
 
 
 def test_log_failure_does_not_break_search(env, monkeypatch):

@@ -113,7 +113,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
         handler = self._make_handler(lines)
         _collect(handler._generate())
 
-        entry = self.cache.get_request("req-1")
+        entry = self.cache.get_record("req-1")
         self.assertIsNotNone(entry)
         self.assertEqual(entry["raw_events"], [message_start, delta, message_delta])
         self.assertIsNone(entry["response_body"])
@@ -133,7 +133,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
         handler = self._make_handler(lines)
         out = "".join(_collect(handler._generate()))
         self.assertIn("data: not-json-at-all\n\n", out)
-        entry = self.cache.get_request("req-1")
+        entry = self.cache.get_record("req-1")
         self.assertEqual(entry["raw_events"], [good, "not-json-at-all"])
 
     def test_generator_exit_marks_cache_error_499(self):
@@ -150,7 +150,7 @@ class SSEBasePassthroughTest(unittest.TestCase):
         gen = handler._generate()
         next(gen)
         gen.close()
-        entry = self.cache.get_request("req-1")
+        entry = self.cache.get_record("req-1")
         self.assertEqual(entry["status_code"], 499)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
         self.assertEqual(entry["raw_events"], [message_start])
@@ -169,48 +169,22 @@ class SSEBasePassthroughTest(unittest.TestCase):
         ]
         handler = self._make_handler(lines)
         _collect(handler._generate())
-        entry = self.cache.get_request("req-1")
+        entry = self.cache.get_record("req-1")
         # complete_request stores the chosen status_code; STATE_ERROR because >= 400.
         self.assertEqual(entry["status_code"], 504)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
 
-    def test_raw_capture_limit_bounds_memory_without_truncating_client_stream(self):
-        first = json.dumps({"type": "ping", "value": "first"})
-        second = json.dumps({"type": "ping", "value": "second"})
-        handler = self._make_handler(
-            [f"data: {first}".encode(), f"data: {second}".encode()],
-            max_raw_capture_bytes=len(first.encode("utf-8")),
-        )
+    def test_large_stream_is_recorded_completely(self):
+        big = [json.dumps({"type": "ping", "value": str(n) * 500_000}) for n in range(4)]
+        handler = self._make_handler([f"data: {payload}".encode() for payload in big])
 
         output = "".join(handler._generate())
 
-        self.assertIn(first, output)
-        self.assertIn(second, output)
-        self.assertTrue(handler.raw_capture_truncated)
-        self.assertEqual(handler.raw_events, [first])
-        entry = self.cache.get_request("req-1")
-        self.assertEqual(
-            entry["response_size"],
-            len(first.encode("utf-8")) + len(second.encode("utf-8")),
-        )
-
-    def test_raw_capture_limit_counts_both_retained_stream_views(self):
-        payload = json.dumps({"type": "ping", "value": "fixture"})
-        wire_line = f"data: {payload}"
-        retained_bytes = len(wire_line.encode("utf-8")) + len(payload.encode("utf-8"))
-        handler = self._make_handler(
-            [wire_line.encode("utf-8")],
-            max_raw_capture_bytes=retained_bytes,
-        )
-        handler.capture_raw_sse_lines = True
-
-        output = "".join(handler._generate())
-
-        self.assertIn(payload, output)
-        self.assertFalse(handler.raw_capture_truncated)
-        self.assertEqual(handler.raw_sse_lines, [wire_line])
-        self.assertEqual(handler.raw_events, [payload])
-        self.assertEqual(handler.raw_capture_bytes, retained_bytes)
+        for payload in big:
+            self.assertIn(payload, output)
+        entry = self.cache.get_record("req-1")
+        self.assertEqual(entry["raw_events"], big)
+        self.assertEqual(entry["response_size"], sum(len(p.encode("utf-8")) for p in big))
 
 
 class OpenAIResponsesPassthroughTest(unittest.TestCase):
@@ -256,7 +230,7 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
         self.assertIn(f"data: {completed}\n\n", out)
         self.assertIn("data: [DONE]\n\n", out)
 
-        entry = self.cache.get_request("req-2")
+        entry = self.cache.get_record("req-2")
         # input_tokens is the uncached slice: 12 total - 2 cached reads.
         self.assertEqual(entry["input_tokens"], 10)
         self.assertEqual(entry["output_tokens"], 4)
@@ -289,7 +263,7 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
 
         _collect(handler._generate())
 
-        entry = self.cache.get_request("req-incomplete")
+        entry = self.cache.get_record("req-incomplete")
         # Uncached slice: 7 total - 1 cached read - 2 cache writes.
         self.assertEqual(entry["input_tokens"], 4)
         self.assertEqual(entry["output_tokens"], 3)
@@ -316,7 +290,7 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
 
         _collect(handler._generate())
 
-        entry = self.cache.get_request("req-failed")
+        entry = self.cache.get_record("req-failed")
         self.assertEqual(entry["status_code"], 502)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
 
@@ -347,7 +321,7 @@ class OpenAIResponsesPassthroughTest(unittest.TestCase):
 
         _collect(handler._generate())
 
-        entry = self.cache.get_request("req-error-event")
+        entry = self.cache.get_record("req-error-event")
         self.assertEqual(entry["status_code"], 502)
         self.assertEqual(entry["state"], RequestCache.STATE_ERROR)
 

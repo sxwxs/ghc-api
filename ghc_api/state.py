@@ -89,7 +89,8 @@ class State:
         # (see remove_encrypted_content_items),
         # so it is opt-in.
         self.auto_remove_encrypted_content_on_parse_error: bool = False
-        self.save_request_to_file: bool = False
+        # Days to keep requests/YYYY-MM-DD.jl; 0 keeps them forever.
+        self.request_log_retention_days: int = 7
         self.disable_onedrive_access: bool = True
 
         # Web search proxy settings
@@ -154,9 +155,9 @@ class State:
         # the retained samples are reported as truncated rather than wrong.
         self.perf_sample_capacity: int = 2000
 
-        # Request cache memory limits
-        self.cache_max_entries: int = 1000  # Max number of requests kept in memory
-        self.cache_max_request_size: int = 1024 * 1024  # Max bytes per cached entry body (0 disables limit)
+        # Number of recent requests whose metadata is kept in memory. Bodies
+        # are never held in memory once a request finishes; see request_log.
+        self.cache_max_entries: int = 1000
 
         # Background worker guards
         self.token_usage_reporter_started: bool = False

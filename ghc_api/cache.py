@@ -1,18 +1,20 @@
 """
-Thread-safe cache for storing API requests and responses
+Thread-safe in-memory index of recent requests, plus usage statistics.
+
+Request and response bodies are held here only while a request is in flight.
+When it finishes, the full record is appended to the request log
+(``request_log``) and the cached entry shrinks to metadata plus a locator
+pointing at that line. The log is the single source of truth for bodies, so
+nothing here ever needs to truncate one.
 """
 
-import json
-import os
 import threading
 import time
-import uuid
 from collections import OrderedDict
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from .file_logging import append_jsonl_line
 from .perf_stats import perf_stats, tokens_per_second
+from .request_log import RequestLogError, metadata_view, request_log
 
 
 ANONYMOUS_USER_ID = "anonymous"
@@ -40,9 +42,8 @@ class RequestCache:
     STATE_COMPLETED = "completed"
     STATE_ERROR = "error"
 
-    def __init__(self, max_entries: int = 1000, max_request_size: int = 1024 * 1024):
+    def __init__(self, max_entries: int = 1000):
         self.max_entries = max_entries
-        self.max_request_size = max_request_size
         self.cache: OrderedDict = OrderedDict()
         self.lock = threading.Lock()
         self.request_count = 0
@@ -67,83 +68,60 @@ class RequestCache:
     def _current_timestamp() -> int:
         return int(time.time())
 
-    def _truncate_oversize_bodies(self, entry: Dict[str, Any]) -> None:
-        """Replace request/response bodies with a placeholder when they exceed the configured size limit."""
-        if not self.max_request_size or self.max_request_size <= 0:
-            return
-        limit = self.max_request_size
-        if entry.get("request_size", 0) and entry["request_size"] > limit:
-            placeholder = {"_truncated": True, "_size": entry["request_size"], "_reason": f"request body exceeded cache_max_request_size ({limit} bytes)"}
-            entry["request_body"] = placeholder
-            entry["original_request_body"] = placeholder
-        if entry.get("response_size", 0) and entry["response_size"] > limit:
-            placeholder = {"_truncated": True, "_size": entry["response_size"], "_reason": f"response body exceeded cache_max_request_size ({limit} bytes)"}
-            if entry.get("raw_events") is not None:
-                entry["raw_events"] = [json.dumps(placeholder)]
-                if entry.get("response_body") is not None:
-                    entry["response_body"] = placeholder
-            else:
-                entry["response_body"] = placeholder
+    def _new_entry(self, request_id: str, data: Dict) -> Dict[str, Any]:
+        return {
+            "id": request_id,
+            "timestamp": self._current_timestamp(),
+            # Sub-second start time, the origin for both TTFT and duration.
+            # Callers pass the route's start_time: streaming handlers often
+            # start tracking only after upstream headers arrived.
+            "started_at": data.get("started_at") or time.time(),
+            "client_ip": data.get("client_ip"),
+            "request_headers": data.get("request_headers"),
+            "original_request_body": data.get("original_request_body"),
+            "request_body": data.get("request_body"),
+            "response_body": None,
+            "raw_events": None,
+            "model": data.get("model", "unknown"),
+            "translated_model": data.get("translated_model"),
+            "endpoint": data.get("endpoint", "unknown"),
+            "status_code": None,
+            "request_size": data.get("request_size", 0),
+            "response_size": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "duration": 0,
+            # Seconds until the first streamed chunk, and output decode
+            # speed. Both stay None until measurable (see _finalize_speed).
+            "ttft": None,
+            "tokens_per_second": None,
+            "state": self.STATE_PENDING,
+            "user_id": _coerce_user_id(data.get("user_id")),
+        }
 
-    @classmethod
-    def _normalize_import_timestamp(cls, value: Any) -> int:
-        """Normalize imported timestamps to Unix seconds."""
-        if isinstance(value, (int, float)):
-            return int(value)
+    def _insert(self, request_id: str, entry: Dict[str, Any]) -> None:
+        """Insert a new entry, evicting the oldest finished ones. Called from within self.lock.
 
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return cls._current_timestamp()
-
-            try:
-                return int(float(stripped))
-            except ValueError:
-                try:
-                    return int(datetime.fromisoformat(stripped.replace("Z", "+00:00")).timestamp())
-                except ValueError:
-                    return cls._current_timestamp()
-
-        return cls._current_timestamp()
+        In-flight entries are never evicted: their bodies exist only here until
+        completion writes them to the request log, and the live view lists
+        them. With more in-flight requests than max_entries the list grows
+        until they finish (the routes hold that data anyway) and is trimmed
+        back to the limit on later inserts.
+        """
+        if request_id not in self.cache:
+            for key in [key for key, cached in self.cache.items()
+                        if cached.get("state") not in IN_FLIGHT_STATES]:
+                if len(self.cache) < self.max_entries:
+                    break
+                del self.cache[key]
+        self.cache[request_id] = entry
 
     def start_request(self, request_id: str, data: Dict) -> None:
         """Start tracking a new request (before sending to upstream)"""
         with self.lock:
-            if len(self.cache) >= self.max_entries:
-                self.cache.popitem(last=False)
-
-            self.cache[request_id] = {
-                "id": request_id,
-                "timestamp": self._current_timestamp(),
-                # Sub-second start time, the origin for both TTFT and duration.
-                # Callers pass the route's start_time: streaming handlers often
-                # start tracking only after upstream headers arrived.
-                "started_at": data.get("started_at") or time.time(),
-                "client_ip": data.get("client_ip"),
-                "request_headers": data.get("request_headers"),
-                "original_request_body": data.get("original_request_body"),
-                "request_body": data.get("request_body"),
-                "response_body": None,
-                "raw_events": None,
-                "model": data.get("model", "unknown"),
-                "translated_model": data.get("translated_model"),
-                "endpoint": data.get("endpoint", "unknown"),
-                "status_code": None,
-                "request_size": data.get("request_size", 0),
-                "response_size": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-                "duration": 0,
-                # Seconds until the first streamed chunk, and output decode
-                # speed. Both stay None until measurable (see _finalize_speed).
-                "ttft": None,
-                "tokens_per_second": None,
-                "state": self.STATE_PENDING,
-                "user_id": _coerce_user_id(data.get("user_id")),
-            }
-            self._truncate_oversize_bodies(self.cache[request_id])
+            self._insert(request_id, self._new_entry(request_id, data))
 
     def update_request_state(self, request_id: str, state: str, **kwargs) -> None:
         """Update the state and optional fields of an existing request"""
@@ -161,153 +139,79 @@ class RequestCache:
                     entry["ttft"] = round(max(0.0, time.time() - entry["started_at"]), 3)
 
     def complete_request(self, request_id: str, data: Dict) -> None:
-        """Finalize a request attempt and update statistics, including errors."""
-        entry_snapshot = None
+        """Finalize a request attempt, persist its full record and update statistics.
+
+        The full record (bodies included, exactly as the route supplied them)
+        is appended to the request log. Afterwards the cached entry is replaced
+        by its metadata view, so finished requests never hold bodies in memory.
+        """
         with self.lock:
-            if request_id in self.cache:
-                # Update existing entry
-                entry = self.cache[request_id]
-                if "client_ip" in data:
-                    entry["client_ip"] = data.get("client_ip")
-                if "request_headers" in data:
-                    entry["request_headers"] = data.get("request_headers")
-                if "original_request_body" in data:
-                    entry["original_request_body"] = data.get("original_request_body")
-                if "request_body" in data:
-                    entry["request_body"] = data.get("request_body")
-                if "raw_events" in data:
-                    entry["raw_events"] = data.get("raw_events")
-                    # Translation handlers may provide both the authoritative
-                    # raw upstream events and a client-facing terminal
-                    # projection. Preserve the latter when explicitly supplied;
-                    # ordinary passthrough SSE handlers still omit it.
-                    entry["response_body"] = (
-                        data.get("response_body")
-                        if "response_body" in data else None
-                    )
-                else:
-                    entry["response_body"] = data.get("response_body")
-                entry["status_code"] = data.get("status_code", 200)
-                entry["request_size"] = data.get("request_size", entry.get("request_size", 0))
-                entry["response_size"] = data.get("response_size", 0)
-                entry["input_tokens"] = data.get("input_tokens", 0)
-                entry["output_tokens"] = data.get("output_tokens", 0)
-                entry["cache_creation_input_tokens"] = data.get("cache_creation_input_tokens", 0)
-                entry["cache_read_input_tokens"] = data.get("cache_read_input_tokens", 0)
-                entry["duration"] = data.get("duration", 0)
-                entry["state"] = self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR
-                # Defensive: if user_id wasn't set during start_request (legacy
-                # path or external caller forgot), fall back to anonymous.
-                if not entry.get("user_id"):
-                    entry["user_id"] = _coerce_user_id(data.get("user_id"))
-                # Pass through any unrecognized keys so subclasses can surface
-                # sidecar fields (e.g. recovered_content for tool-call recovery).
-                _KNOWN = {
-                    "client_ip", "request_headers", "original_request_body",
-                    "request_body", "response_body", "raw_events", "status_code",
-                    "request_size", "response_size", "input_tokens", "output_tokens",
-                    "cache_creation_input_tokens", "cache_read_input_tokens",
-                    "duration", "user_id", "model", "translated_model", "endpoint",
-                }
-                for key, value in data.items():
-                    if key not in _KNOWN:
-                        entry[key] = value
-                self._truncate_oversize_bodies(entry)
-            else:
-                # Fallback: create new entry if somehow missing
-                if len(self.cache) >= self.max_entries:
-                    self.cache.popitem(last=False)
+            record = self.cache.get(request_id)
+            if record is None:
+                # Fallback: the request was never started (or already evicted).
+                record = self._new_entry(request_id, data)
+                self._insert(request_id, record)
+            self._apply_completion(record, data)
+            self._finalize_speed(record)
+            model, endpoint = self._count_completion(record, data)
 
-                self.cache[request_id] = {
-                    "id": request_id,
-                    "timestamp": self._current_timestamp(),
-                    "client_ip": data.get("client_ip"),
-                    "request_headers": data.get("request_headers"),
-                    "original_request_body": data.get("original_request_body"),
-                    "request_body": data.get("request_body"),
-                    "response_body": (
-                        data.get("response_body")
-                        if "response_body" in data else None
-                    ),
-                    "raw_events": data.get("raw_events"),
-                    "model": data.get("model", "unknown"),
-                    "translated_model": data.get("translated_model"),
-                    "endpoint": data.get("endpoint", "unknown"),
-                    "status_code": data.get("status_code", 200),
-                    "request_size": data.get("request_size", 0),
-                    "response_size": data.get("response_size", 0),
-                    "input_tokens": data.get("input_tokens", 0),
-                    "output_tokens": data.get("output_tokens", 0),
-                    "cache_creation_input_tokens": data.get("cache_creation_input_tokens", 0),
-                    "cache_read_input_tokens": data.get("cache_read_input_tokens", 0),
-                    "duration": data.get("duration", 0),
-                    "ttft": data.get("ttft"),
-                    "tokens_per_second": data.get("tokens_per_second"),
-                    "state": self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR,
-                    "user_id": _coerce_user_id(data.get("user_id")),
-                }
-                self._truncate_oversize_bodies(self.cache[request_id])
+        locator = request_log.append(record)
 
-            self._finalize_speed(self.cache[request_id])
+        with self.lock:
+            # Only shrink the entry we wrote; it may have been evicted meanwhile.
+            if self.cache.get(request_id) is record:
+                self.cache[request_id] = metadata_view(record, locator)
 
-            self.request_count += 1
-            self.bytes_sent += data.get("request_size", 0)
-            self.bytes_received += data.get("response_size", 0)
+        self._record_perf_sample(record, model, endpoint)
 
-            user_id = _coerce_user_id(self.cache[request_id].get("user_id"))
+    def _apply_completion(self, entry: Dict[str, Any], data: Dict) -> None:
+        """Merge a completion payload into an entry. Called from within self.lock."""
+        for key in ("client_ip", "request_headers", "original_request_body", "request_body"):
+            if key in data:
+                entry[key] = data.get(key)
+        if "raw_events" in data:
+            entry["raw_events"] = data.get("raw_events")
+            # Translation handlers may provide both the authoritative raw
+            # upstream events and a client-facing terminal projection. Preserve
+            # the latter when explicitly supplied; ordinary passthrough SSE
+            # handlers still omit it.
+            entry["response_body"] = data.get("response_body") if "response_body" in data else None
+        else:
+            entry["response_body"] = data.get("response_body")
+        entry["status_code"] = data.get("status_code", 200)
+        entry["request_size"] = data.get("request_size", entry.get("request_size", 0))
+        entry["response_size"] = data.get("response_size", 0)
+        entry["input_tokens"] = data.get("input_tokens", 0)
+        entry["output_tokens"] = data.get("output_tokens", 0)
+        entry["cache_creation_input_tokens"] = data.get("cache_creation_input_tokens", 0)
+        entry["cache_read_input_tokens"] = data.get("cache_read_input_tokens", 0)
+        entry["duration"] = data.get("duration", 0)
+        for key in ("ttft", "tokens_per_second"):
+            if data.get(key) is not None:
+                entry[key] = data[key]
+        entry["state"] = self.STATE_COMPLETED if data.get("status_code", 200) < 400 else self.STATE_ERROR
+        # Defensive: if user_id wasn't set during start_request (legacy path
+        # or external caller forgot), fall back to anonymous.
+        if not entry.get("user_id"):
+            entry["user_id"] = _coerce_user_id(data.get("user_id"))
+        # Pass through any unrecognized keys so subclasses can surface sidecar
+        # fields (e.g. recovered_content for tool-call recovery).
+        for key, value in data.items():
+            if key not in _COMPLETION_KNOWN:
+                entry[key] = value
 
-            # Update model stats using translated name when available.
-            model = data.get("translated_model") or data.get("model", "unknown")
-            if model not in self.model_stats:
-                self.model_stats[model] = {
-                    "request_count": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "bytes_sent": 0,
-                    "bytes_received": 0,
-                }
-            self.model_stats[model]["request_count"] += 1
-            self.model_stats[model]["input_tokens"] += data.get("input_tokens", 0)
-            self.model_stats[model]["output_tokens"] += data.get("output_tokens", 0)
-            self.model_stats[model]["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
-            self.model_stats[model]["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
-            self.model_stats[model]["bytes_sent"] += data.get("request_size", 0)
-            self.model_stats[model]["bytes_received"] += data.get("response_size", 0)
+    def _count_completion(self, entry: Dict[str, Any], data: Dict) -> Tuple[str, str]:
+        """Update the usage counters for one finished request. Called from within self.lock."""
+        self.request_count += 1
+        self.bytes_sent += data.get("request_size", 0)
+        self.bytes_received += data.get("response_size", 0)
 
-            # Update endpoint stats
-            endpoint = data.get("endpoint", "unknown")
-            if endpoint not in self.endpoint_stats:
-                self.endpoint_stats[endpoint] = {
-                    "request_count": 0,
-                    "bytes_sent": 0,
-                    "bytes_received": 0,
-                }
-            self.endpoint_stats[endpoint]["request_count"] += 1
-            self.endpoint_stats[endpoint]["bytes_sent"] += data.get("request_size", 0)
-            self.endpoint_stats[endpoint]["bytes_received"] += data.get("response_size", 0)
+        user_id = _coerce_user_id(entry.get("user_id"))
 
-            # Per-user accumulators (kept in parallel to the global ones above).
-            self._bump_user_stats(
-                user_id=user_id,
-                model=model,
-                endpoint=endpoint,
-                input_tokens=data.get("input_tokens", 0),
-                output_tokens=data.get("output_tokens", 0),
-                cache_creation_input_tokens=data.get("cache_creation_input_tokens", 0),
-                cache_read_input_tokens=data.get("cache_read_input_tokens", 0),
-                bytes_sent=data.get("request_size", 0),
-                bytes_received=data.get("response_size", 0),
-            )
-
-            provider = str(
-                data.get("upstream_provider")
-                or self.cache[request_id].get("upstream_provider")
-                or "copilot"
-            )
-            billing_key = (user_id, provider, model)
-            billing = self.user_provider_model_stats.setdefault(billing_key, {
+        # Update model stats using translated name when available.
+        model = data.get("translated_model") or data.get("model", "unknown")
+        if model not in self.model_stats:
+            self.model_stats[model] = {
                 "request_count": 0,
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -315,20 +219,59 @@ class RequestCache:
                 "cache_read_input_tokens": 0,
                 "bytes_sent": 0,
                 "bytes_received": 0,
-            })
-            billing["request_count"] += 1
-            billing["input_tokens"] += data.get("input_tokens", 0)
-            billing["output_tokens"] += data.get("output_tokens", 0)
-            billing["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
-            billing["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
-            billing["bytes_sent"] += data.get("request_size", 0)
-            billing["bytes_received"] += data.get("response_size", 0)
+            }
+        self.model_stats[model]["request_count"] += 1
+        self.model_stats[model]["input_tokens"] += data.get("input_tokens", 0)
+        self.model_stats[model]["output_tokens"] += data.get("output_tokens", 0)
+        self.model_stats[model]["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
+        self.model_stats[model]["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
+        self.model_stats[model]["bytes_sent"] += data.get("request_size", 0)
+        self.model_stats[model]["bytes_received"] += data.get("response_size", 0)
 
-            entry_snapshot = dict(self.cache[request_id])
+        # Update endpoint stats
+        endpoint = data.get("endpoint", "unknown")
+        if endpoint not in self.endpoint_stats:
+            self.endpoint_stats[endpoint] = {
+                "request_count": 0,
+                "bytes_sent": 0,
+                "bytes_received": 0,
+            }
+        self.endpoint_stats[endpoint]["request_count"] += 1
+        self.endpoint_stats[endpoint]["bytes_sent"] += data.get("request_size", 0)
+        self.endpoint_stats[endpoint]["bytes_received"] += data.get("response_size", 0)
 
-        if entry_snapshot:
-            self._record_perf_sample(entry_snapshot, model, endpoint)
-            self._append_request_to_daily_file(entry_snapshot)
+        # Per-user accumulators (kept in parallel to the global ones above).
+        self._bump_user_stats(
+            user_id=user_id,
+            model=model,
+            endpoint=endpoint,
+            input_tokens=data.get("input_tokens", 0),
+            output_tokens=data.get("output_tokens", 0),
+            cache_creation_input_tokens=data.get("cache_creation_input_tokens", 0),
+            cache_read_input_tokens=data.get("cache_read_input_tokens", 0),
+            bytes_sent=data.get("request_size", 0),
+            bytes_received=data.get("response_size", 0),
+        )
+
+        provider = str(data.get("upstream_provider") or entry.get("upstream_provider") or "copilot")
+        billing_key = (user_id, provider, model)
+        billing = self.user_provider_model_stats.setdefault(billing_key, {
+            "request_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "bytes_sent": 0,
+            "bytes_received": 0,
+        })
+        billing["request_count"] += 1
+        billing["input_tokens"] += data.get("input_tokens", 0)
+        billing["output_tokens"] += data.get("output_tokens", 0)
+        billing["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
+        billing["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
+        billing["bytes_sent"] += data.get("request_size", 0)
+        billing["bytes_received"] += data.get("response_size", 0)
+        return model, endpoint
 
     @staticmethod
     def _finalize_speed(entry: Dict[str, Any]) -> None:
@@ -465,25 +408,6 @@ class RequestCache:
         totals["bytes_sent"] += bytes_sent
         totals["bytes_received"] += bytes_received
 
-    def _append_request_to_daily_file(self, request_entry: Dict[str, Any]) -> None:
-        try:
-            from .state import state
-            if not getattr(state, "save_request_to_file", False):
-                return
-
-            from .utils import get_config_dir
-            requests_dir = os.path.join(get_config_dir(), "requests")
-            os.makedirs(requests_dir, exist_ok=True)
-            daily_file = os.path.join(requests_dir, f"{datetime.now().strftime('%Y-%m-%d')}.jl")
-            append_jsonl_line(daily_file, self.format_request_jsonl_line(request_entry))
-        except Exception as e:
-            print(f"[Request File Logging] Failed to append request: {e}")
-
-    @staticmethod
-    def format_request_jsonl_line(request_entry: Dict[str, Any]) -> str:
-        """Format a request entry as one JSON Lines record."""
-        return json.dumps(request_entry, ensure_ascii=False) + "\n"
-
     def add_request(self, request_id: str, data: Dict) -> None:
         """Add a request to the cache (legacy method for backwards compatibility)"""
         # Check if request already exists (started with start_request)
@@ -498,9 +422,29 @@ class RequestCache:
             self.complete_request(request_id, data)
 
     def get_request(self, request_id: str) -> Optional[Dict]:
-        """Get a specific request by ID"""
+        """The cached entry: full while in flight, metadata plus ``log`` locator once finished."""
         with self.lock:
             return self.cache.get(request_id)
+
+    def get_record(self, request_id: str) -> Optional[Dict]:
+        """The full record of a listed request, bodies included.
+
+        In-flight requests are served from memory; finished ones are read back
+        from the request log. Returns None when the request is unknown or its
+        record was never written (or has since been deleted by retention).
+        """
+        entry = self.get_request(request_id)
+        if entry is None:
+            return None
+        if "log" not in entry:
+            return entry
+        if entry["log"] is None:
+            return None
+        try:
+            record = request_log.read(entry["log"])
+        except RequestLogError:
+            return None
+        return record if record.get("id") == request_id else None
 
     def get_recent_requests(self, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> List[Dict]:
         """Get recent requests with pagination, optionally filtered by user_id."""
@@ -614,157 +558,51 @@ class RequestCache:
                 ids.add(_coerce_user_id(entry.get("user_id")))
             return sorted(ids)
 
-    def search_requests(self, query: str, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> List[Dict]:
-        """Search requests by model, endpoint, or content (optionally per-user)."""
+    def search_requests(self, query: str, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> Tuple[List[Dict], int]:
+        """Search cached requests by model or endpoint (optionally per-user)."""
         with self.lock:
-            results = []
             query_lower = query.lower()
-            for item in reversed(list(self.cache.values())):
-                if user_id is not None and _coerce_user_id(item.get("user_id")) != user_id:
-                    continue
-                if (query_lower in item.get("model", "").lower() or
-                    query_lower in item.get("endpoint", "").lower() or
-                    query_lower in json.dumps(item.get("request_body", {})).lower()):
-                    results.append(item)
-            return results[offset:offset + limit]
+            results = [
+                item for item in reversed(list(self.cache.values()))
+                if (user_id is None or _coerce_user_id(item.get("user_id")) == user_id)
+                and (
+                    query_lower in str(item.get("model") or "").lower()
+                    or query_lower in str(item.get("translated_model") or "").lower()
+                    or query_lower in str(item.get("endpoint") or "").lower()
+                )
+            ]
+            return results[offset:offset + limit], len(results)
 
-    def fulltext_search(self, query: str, limit: int = 50, offset: int = 0, user_id: Optional[str] = None) -> Tuple[List[Dict], int]:
-        """Full-text search in request and response bodies (optionally per-user)."""
+    def restore(self, entries: List[Dict[str, Any]]) -> int:
+        """Prepend persisted metadata entries (oldest first) after a restart.
+
+        Restored entries only repopulate the request list. They are not
+        counted in the usage statistics or the live throughput samples, which
+        describe the current process run.
+        """
         with self.lock:
-            results = []
-            query_lower = query.lower()
-            for item in reversed(list(self.cache.values())):
-                if user_id is not None and _coerce_user_id(item.get("user_id")) != user_id:
-                    continue
-                # Search in request body
-                request_body_str = json.dumps(item.get("request_body", {})).lower()
-                # Search in response body (or raw SSE events for streaming entries)
-                if item.get("raw_events") is not None:
-                    response_body_str = "\n".join(item.get("raw_events") or []).lower()
-                else:
-                    response_body_str = json.dumps(item.get("response_body", {})).lower()
+            room = self.max_entries - len(self.cache)
+            fresh = [entry for entry in entries if entry["id"] not in self.cache]
+            if room <= 0 or not fresh:
+                return 0
+            fresh = fresh[-room:]
+            restored = OrderedDict()
+            for entry in fresh:
+                self._finalize_speed(entry)
+                restored[entry["id"]] = entry
+            restored.update(self.cache)
+            self.cache = restored
+            return len(fresh)
 
-                if query_lower in request_body_str or query_lower in response_body_str:
-                    results.append(item)
 
-            total = len(results)
-            return results[offset:offset + limit], total
-
-    def get_all_requests(self) -> List[Dict]:
-        """Get all requests for export"""
-        with self.lock:
-            return list(self.cache.values())
-
-    def import_request(self, data: Dict) -> None:
-        """Import a single request entry"""
-        with self.lock:
-            request_id = data.get("id", str(uuid.uuid4()))
-
-            if len(self.cache) >= self.max_entries:
-                self.cache.popitem(last=False)
-
-            user_id = _coerce_user_id(data.get("user_id"))
-
-            self.cache[request_id] = {
-                "id": request_id,
-                "timestamp": self._normalize_import_timestamp(data.get("timestamp")),
-                "client_ip": data.get("client_ip"),
-                "request_headers": data.get("request_headers"),
-                "original_request_body": data.get("original_request_body"),
-                "request_body": data.get("request_body"),
-                "response_body": data.get("response_body"),
-                "raw_events": data.get("raw_events"),
-                "model": data.get("model", "unknown"),
-                "translated_model": data.get("translated_model"),
-                "endpoint": data.get("endpoint", "unknown"),
-                "status_code": data.get("status_code", 200),
-                "request_size": data.get("request_size", 0),
-                "response_size": data.get("response_size", 0),
-                "input_tokens": data.get("input_tokens", 0),
-                "output_tokens": data.get("output_tokens", 0),
-                "cache_creation_input_tokens": data.get("cache_creation_input_tokens", 0),
-                "cache_read_input_tokens": data.get("cache_read_input_tokens", 0),
-                "duration": data.get("duration", 0),
-                "ttft": data.get("ttft"),
-                "tokens_per_second": data.get("tokens_per_second"),
-                # An export can catch requests mid-flight; nothing in this
-                # process will ever finish them, so they must not look running.
-                "state": (
-                    self.STATE_ERROR
-                    if data.get("state") in IN_FLIGHT_STATES
-                    else data.get("state", "completed")
-                ),
-                "user_id": user_id,
-            }
-            # Imported rows are shown with a speed when it can be derived, but
-            # they are deliberately not fed to perf_stats: that store answers
-            # "how is this process running now", and replaying an export would
-            # invent throughput this run never produced.
-            self._finalize_speed(self.cache[request_id])
-            # Pass through any unrecognized keys so sidecar fields written by
-            # subclassed SSE handlers (e.g. recovered_content) round-trip
-            # through export/import.
-            _IMPORT_KNOWN = {
-                "id", "timestamp", "client_ip", "request_headers",
-                "original_request_body", "request_body", "response_body",
-                "raw_events", "model", "translated_model", "endpoint",
-                "status_code", "request_size", "response_size", "input_tokens",
-                "output_tokens", "cache_creation_input_tokens",
-                "cache_read_input_tokens", "duration", "state", "user_id",
-                "ttft", "tokens_per_second",
-            }
-            for key, value in data.items():
-                if key not in _IMPORT_KNOWN:
-                    self.cache[request_id][key] = value
-            self._truncate_oversize_bodies(self.cache[request_id])
-
-            # Update stats
-            self.request_count += 1
-            self.bytes_sent += data.get("request_size", 0)
-            self.bytes_received += data.get("response_size", 0)
-
-            model = data.get("translated_model") or data.get("model", "unknown")
-            if model not in self.model_stats:
-                self.model_stats[model] = {
-                    "request_count": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                    "bytes_sent": 0,
-                    "bytes_received": 0,
-                }
-            self.model_stats[model]["request_count"] += 1
-            self.model_stats[model]["input_tokens"] += data.get("input_tokens", 0)
-            self.model_stats[model]["output_tokens"] += data.get("output_tokens", 0)
-            self.model_stats[model]["cache_creation_input_tokens"] += data.get("cache_creation_input_tokens", 0)
-            self.model_stats[model]["cache_read_input_tokens"] += data.get("cache_read_input_tokens", 0)
-            self.model_stats[model]["bytes_sent"] += data.get("request_size", 0)
-            self.model_stats[model]["bytes_received"] += data.get("response_size", 0)
-
-            endpoint = data.get("endpoint", "unknown")
-            if endpoint not in self.endpoint_stats:
-                self.endpoint_stats[endpoint] = {
-                    "request_count": 0,
-                    "bytes_sent": 0,
-                    "bytes_received": 0,
-                }
-            self.endpoint_stats[endpoint]["request_count"] += 1
-            self.endpoint_stats[endpoint]["bytes_sent"] += data.get("request_size", 0)
-            self.endpoint_stats[endpoint]["bytes_received"] += data.get("response_size", 0)
-
-            # Per-user accumulators.
-            self._bump_user_stats(
-                user_id=user_id,
-                model=model,
-                endpoint=endpoint,
-                input_tokens=data.get("input_tokens", 0),
-                output_tokens=data.get("output_tokens", 0),
-                cache_creation_input_tokens=data.get("cache_creation_input_tokens", 0),
-                cache_read_input_tokens=data.get("cache_read_input_tokens", 0),
-                bytes_sent=data.get("request_size", 0),
-                bytes_received=data.get("response_size", 0),
-            )
+_COMPLETION_KNOWN = {
+    "client_ip", "request_headers", "original_request_body",
+    "request_body", "response_body", "raw_events", "status_code",
+    "request_size", "response_size", "input_tokens", "output_tokens",
+    "cache_creation_input_tokens", "cache_read_input_tokens",
+    "duration", "ttft", "tokens_per_second", "user_id", "model",
+    "translated_model", "endpoint",
+}
 
 
 # Global cache instance

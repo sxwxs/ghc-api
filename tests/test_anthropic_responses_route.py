@@ -202,12 +202,9 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
             [block["type"] for block in cached_original["messages"][1]["content"]],
             ["thinking", "text"],
         )
-        self.assertIn(
-            "Responses reasoning carrier",
-            cached_original["messages"][1]["content"][0]["signature"],
-        )
+        self.assertEqual(cached_original, payload)
 
-    def test_legacy_fallback_strips_and_redacts_responses_reasoning_carriers(self):
+    def test_legacy_fallback_strips_carriers_upstream_but_records_them(self):
         signature = build_reasoning_carrier(
             model="gpt-5.6-sol",
             wire_profile="copilot_responses_lite",
@@ -234,10 +231,9 @@ class AnthropicResponsesRouteSelectionTests(unittest.TestCase):
             forwarded["messages"][0]["content"],
             [{"type": "text", "text": "answer"}],
         )
+        self.assertNotIn("opaque-secret", json.dumps(forwarded))
         cached_original = patched["fallback"].call_args.args[5]
-        cached_signature = cached_original["messages"][0]["content"][0]["signature"]
-        self.assertIn("Responses reasoning carrier", cached_signature)
-        self.assertNotIn("opaque-secret", json.dumps(cached_original))
+        self.assertEqual(cached_original, payload)
 
     def test_responses_branch_applies_policy_filters_without_legacy_thinking_rewrites(self):
         payload = {
@@ -530,7 +526,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         })
 
         self.assertEqual(len(self.cache.cache), 1)
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["endpoint"], "/v1/messages")
         self.assertEqual(cached["request_body"], kwargs["json"])
         self.assertEqual(cached["response_body"], body)
@@ -619,8 +615,8 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             forwarded["text"]["format"]["name"],
             r"^ghc_schema_[0-9a-f]{16}$",
         )
-        cached = next(iter(self.cache.cache.values()))
-        self.assertNotIn("private query", json.dumps(cached["upstream_response_body"]))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
+        self.assertEqual(cached["upstream_response_body"], upstream_body)
 
     def test_description_less_tool_is_not_forwarded_with_an_empty_description(self):
         payload = self._request_payload(stream=False)
@@ -748,7 +744,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             body["content"], [{"type": "text", "text": "hello back"}]
         )
         # The search is not invented as an Anthropic block, but it is on record.
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertTrue(any(
             record["source_path"] == "/output/0"
             and record["disposition"] == "sidecar"
@@ -800,7 +796,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.get_json()["type"], "error")
         self.assertNotIn("future-status-private", response.get_data(as_text=True))
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["status_code"], 502)
         warning_codes = {item["code"] for item in cached["compatibility_warnings"]}
         self.assertIn("responses.unknown_response_status", warning_codes)
@@ -878,11 +874,10 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertNotIn("data: [DONE]", body)
         self.assertTrue(post.call_args.kwargs["stream"])
 
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["state"], self.cache.STATE_COMPLETED)
-        self.assertFalse(any("opaque-fixture" in item for item in cached["raw_events"]))
-        self.assertTrue(cached["raw_events_redacted"])
-        self.assertTrue(any("opaque reasoning state" in item for item in cached["raw_events"]))
+        # Raw upstream events are recorded verbatim, opaque reasoning included.
+        self.assertTrue(any("opaque-fixture" in item for item in cached["raw_events"]))
         self.assertEqual(
             [block["type"] for block in cached["response_body"]["content"]],
             ["thinking", "text"],
@@ -1116,7 +1111,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertNotIn("event: error\n", body)
         self.assertEqual(len(attempts), 2)
         retry_log.assert_called_once()
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["state"], self.cache.STATE_COMPLETED)
 
     def test_pre_header_grace_commits_stream_before_keepalive_interval(self):
@@ -1195,7 +1190,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 self.assertTrue(post_started.wait(1))
                 response.close()
 
-                cached = next(iter(self.cache.cache.values()))
+                cached = self.cache.get_record(next(iter(self.cache.cache)))
                 self.assertEqual(cached["status_code"], 499)
                 self.assertEqual(cached["state"], self.cache.STATE_ERROR)
                 self.assertIn(
@@ -1248,7 +1243,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 pass
             response.close()
 
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["status_code"], 499)
         self.assertEqual(self.cache.request_count, 1)
 
@@ -1295,9 +1290,10 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("event: message_stop\n", body)
         self.assertNotIn("response.future_private_event", body)
         self.assertNotIn(secret, body)
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["status_code"], 200)
-        self.assertFalse(any(secret in item for item in cached["raw_events"]))
+        # The skipped event never reaches the client, but the log keeps it.
+        self.assertTrue(any(secret in item for item in cached["raw_events"]))
         warning_codes = {
             item["code"] for item in cached["compatibility_warnings"]
         }
@@ -1330,7 +1326,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("event: error\n", body)
         self.assertNotIn(secret, body)
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["status_code"], 502)
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
         warning_codes = {
@@ -1355,7 +1351,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("event: error\n", body)
         self.assertIn('"type":"timeout_error"', body)
         self.assertNotIn("PRIVATE-UPSTREAM-DETAIL", body)
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["status_code"], 504)
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
 
@@ -1378,7 +1374,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
                 "message": "fixture rate limit",
             },
         })
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
         self.assertEqual(cached["status_code"], 429)
         self.assertEqual(cached["response_body"], body)
@@ -1405,7 +1401,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertEqual(body["error"]["type"], "invalid_request_error")
         self.assertIn("messages", body["error"]["message"])
         post.assert_not_called()
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         self.assertEqual(cached["status_code"], 400)
         self.assertEqual(cached["state"], self.cache.STATE_ERROR)
         self.assertIn(
@@ -1413,7 +1409,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
             response.headers.get("X-GHC-Compatibility-Warnings", ""),
         )
 
-    def test_unknown_terminal_responses_item_fails_closed_without_leaking_value(self):
+    def test_unknown_terminal_responses_item_fails_closed_and_is_logged_verbatim(self):
         secret = "DO-NOT-LEAK-unknown-output-fixture"
         terminal = self._terminal_response()
         terminal["output"] = [{
@@ -1437,12 +1433,8 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         self.assertIn("responses.unknown_item", warning_header)
         self.assertNotIn(secret, response.get_data(as_text=True))
         self.assertNotIn(secret, warning_header)
-        cached = next(iter(self.cache.cache.values()))
-        self.assertTrue(cached["upstream_response_body"]["_redacted"])
-        self.assertNotIn(
-            secret,
-            json.dumps(cached["upstream_response_body"], ensure_ascii=False),
-        )
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
+        self.assertEqual(cached["upstream_response_body"], terminal)
         self.assertNotIn(
             secret,
             json.dumps(cached["compatibility_warnings"], ensure_ascii=False),
@@ -1468,7 +1460,7 @@ class AnthropicResponsesRouteTransportTests(unittest.TestCase):
         warning_header = response.headers.get("X-GHC-Compatibility-Warnings", "")
         self.assertIn("claude_cli.unknown_version", warning_header)
         self.assertNotIn(secret, warning_header)
-        cached = next(iter(self.cache.cache.values()))
+        cached = self.cache.get_record(next(iter(self.cache.cache)))
         warning_codes = {
             item["code"] for item in cached["compatibility_warnings"]
         }

@@ -102,7 +102,7 @@ def test_rotating_ids_render_one_message_and_keep_raw_cache():
     assert output[-1]["response"]["output"][0]["id"] == "opaque-start"
     assert output[-1]["response"]["id"] == "resp-final"
     assert "data: [DONE]\n\n" in chunks
-    entry = cache.get_request("item-id-test")
+    entry = cache.get_record("item-id-test")
     assert [json.loads(raw) for raw in entry["raw_events"]] == events
     assert entry["output_tokens"] == 1
 

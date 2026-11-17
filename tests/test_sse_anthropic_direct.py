@@ -113,7 +113,7 @@ class RecoverySubclassRoutingTest(unittest.TestCase):
         # Each upstream event reached the transformer.
         self.assertEqual(len(process_calls), 2)
 
-        entry = self.cache.get_request("req-r")
+        entry = self.cache.get_record("req-r")
         # Sidecar field present; raw_events still complete.
         self.assertIn("recovered_content", entry or {})
         self.assertEqual(entry["raw_events"], [message_start, delta])
@@ -161,7 +161,7 @@ class UsageAccountingTest(unittest.TestCase):
             request_body_for_cache={},
         )
         "".join(handler._generate())
-        entry = self.cache.get_request("req-usage")
+        entry = self.cache.get_record("req-usage")
         self.assertIsNotNone(entry)
         return entry
 

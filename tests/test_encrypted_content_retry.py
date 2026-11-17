@@ -486,7 +486,7 @@ class EncryptedContentStreamRetryTest(EncryptedContentTestCase):
                     self.assertIn("encrypted_content", json.dumps(post.call_args_list[0].kwargs["json"]))
                     self.assertTrue(failure.closed)
                     self.assertTrue(success.closed)
-                    record = cache.get_recent_requests(1)[0]
+                    record = cache.get_record(cache.get_recent_requests(1)[0]["id"])
                     self.assertEqual(record["status_code"], 200)
                     self.assertEqual(record["input_tokens"], 10)
                     self.assertEqual(record["request_body"], sent)

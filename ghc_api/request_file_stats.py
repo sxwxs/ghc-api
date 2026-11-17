@@ -29,8 +29,11 @@ MAX_SELECTED_FILES = 366
 MAX_MODELS_PER_DATASET = 500
 MAX_MODEL_NAME_LENGTH = 256
 MAX_METRIC_VALUE = (1 << 63) - 1
-MAX_LINE_BYTES = 64 * 1024 * 1024
-MAX_DETAIL_LINE_BYTES = 4 * 1024 * 1024
+# Records are stored untruncated. A 50 MiB image-edit upload is logged base64
+# encoded in both the original and the upstream request body (~134 MB), so the
+# per-line ceiling has to sit above that.
+MAX_LINE_BYTES = 256 * 1024 * 1024
+MAX_DETAIL_LINE_BYTES = MAX_LINE_BYTES
 DISCARD_CHUNK_BYTES = 1024 * 1024
 SIGNATURE_CHUNK_BYTES = 4 * 1024 * 1024
 INDEX_REPLACE_RETRIES = 10
@@ -550,6 +553,12 @@ def _new_meta(
     }
 
 
+# Statistics jobs and the startup restore both build sidecars. A sidecar is
+# published as two files (index, then meta), so two builders must not overlap
+# or the pair can end up mismatched.
+_index_build_lock = threading.Lock()
+
+
 def build_or_load_file_index(
     request_path: Path,
     *,
@@ -557,6 +566,15 @@ def build_or_load_file_index(
     progress: Optional[ProgressCallback] = None,
 ) -> Tuple[Dict[str, Any], str, List[Dict[str, Any]]]:
     """Reuse, append, or rebuild one line-level request sidecar."""
+    with _index_build_lock:
+        return _build_or_load_file_index(request_path, cancel_event, progress)
+
+
+def _build_or_load_file_index(
+    request_path: Path,
+    cancel_event: Optional[threading.Event],
+    progress: Optional[ProgressCallback],
+) -> Tuple[Dict[str, Any], str, List[Dict[str, Any]]]:
     _check_cancelled(cancel_event)
     stat = request_path.stat()
     snapshot_size = stat.st_size
@@ -994,6 +1012,12 @@ def _iter_indexed_rows(files: List[str], cancel_event: Optional[threading.Event]
                 if not isinstance(row, dict) or row.get("schema_version") != INDEX_SCHEMA_VERSION:
                     raise RequestIndexValidationError(f"Invalid sidecar row in {index_path.name}")
                 yield row, len(line) + 256
+
+
+def iter_index_rows(filename: str) -> Iterable[Dict[str, Any]]:
+    """Validated sidecar rows of one already-indexed request file."""
+    for row, _ in _iter_indexed_rows([filename]):
+        yield row
 
 
 def _load_dataset(files: List[str]) -> RequestStatsDataset:

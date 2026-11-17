@@ -2,11 +2,11 @@
 
 Two destinations, on purpose:
 
-* ``<config_dir>/webiq/YYYY-MM-DD.jl`` - the full-fidelity record. It is the
-  only place a search survives untruncated, so nothing here is abbreviated.
+* ``<config_dir>/webiq/YYYY-MM-DD.jl`` - the search-specific record, nothing
+  abbreviated.
 * the shared request cache - so a search shows up in the request list,
-  full-text search, detail view and export next to the LLM requests. That copy
-  obeys ``cache_max_request_size`` like any other entry.
+  full-text search and detail view next to the LLM requests. Like any other
+  request it is written untruncated to the request log.
 
 There is deliberately no third copy in an in-memory Web IQ buffer.
 
@@ -280,7 +280,7 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertNotIn("SECRET-REQUEST-BODY", serialized)
         self.assertNotIn("SECRET-STREAM-BODY", serialized)
 
-        cached = cache.get_recent_requests(1)[0]
+        cached = cache.get_record(cache.get_recent_requests(1)[0]["id"])
         self.assertEqual(cached["model"], "webiq_mcp")
         self.assertEqual(cached["request_body"]["mcp_name"], "browse")
         self.assertEqual(
@@ -314,7 +314,7 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(entry["status_code"], 200)
         self.assertFalse(entry["stream_completed"])
         self.assertIn("RuntimeError: stream broke", entry["error"])
-        cached = cache.get_recent_requests(1)[0]
+        cached = cache.get_record(cache.get_recent_requests(1)[0]["id"])
         self.assertEqual(cached["state"], "error")
         self.assertEqual(counters.snapshot().get("webiq.mcp_error"), 1)
         self.assertNotIn("webiq.mcp", counters.snapshot())
@@ -337,7 +337,7 @@ class RouteLoggingTest(IsolatedConfigDirTest):
         self.assertEqual(entry["status_code"], 200)
         self.assertFalse(entry["stream_completed"])
         self.assertIn("Client disconnected", entry["error"])
-        cached = cache.get_recent_requests(1)[0]
+        cached = cache.get_record(cache.get_recent_requests(1)[0]["id"])
         self.assertEqual(cached["state"], "cancelled")
         self.assertEqual(counters.snapshot().get("webiq.mcp_cancelled"), 1)
         self.assertNotIn("webiq.mcp", counters.snapshot())
