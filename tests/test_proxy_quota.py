@@ -277,38 +277,23 @@ class QuotaManagerTest(unittest.TestCase):
         self.assertEqual(results.count(False), 5)
         self.assertEqual(self.remaining(), 0.0)
 
-    def test_deductions_during_fetch_are_reapplied(self):
-        self.write_config(make_config())
-        e = int(self.now + 3600)
-        self.seed([{"amount": 10, "expires_at": e}])
-
-        def fake_run(*args, **kwargs):
-            # A request is admitted from the old ledger while the command runs.
-            self.manager.reserve(self.profile(), 2)
-            return quota_output([{"amount": 10, "expires_at": e}])
-
-        with mock.patch("ghc_api.proxy.quota.subprocess.run", side_effect=fake_run):
-            self.manager.refresh_now("demo")
-        # New ledger = fetched (10) - in-flight deductions (2).
-        self.assertEqual(self.remaining(), 8.0)
-
-    def test_deductions_during_fetch_skip_nearly_expired_batches(self):
+    def test_fetch_result_replaces_ledger_as_is(self):
         self.write_config(make_config())
         e_soon = int(self.now + 30)   # inside the 60s margin
         e_ok = int(self.now + 3600)
         self.seed([{"amount": 10, "expires_at": e_ok}])
 
         def fake_run(*args, **kwargs):
+            # A request admitted while the command runs is not re-deducted.
             self.manager.reserve(self.profile(), 2)
             return quota_output([
                 {"amount": 5, "expires_at": e_soon},
-                {"amount": 8, "expires_at": e_ok},
+                {"amount": 10, "expires_at": e_ok},
             ])
 
         with mock.patch("ghc_api.proxy.quota.subprocess.run", side_effect=fake_run):
             self.manager.refresh_now("demo")
-        # The replayed 2 points come out of the usable batch, not e_soon.
-        self.assertEqual(self.remaining(), 6.0)
+        self.assertEqual(self.remaining(), 10.0)
 
     def test_reserve_uses_request_profile_min_remaining(self):
         self.write_config(make_config(min_remaining=0))

@@ -57,9 +57,6 @@ class _Account:
     fetch_in_progress: bool = False
     # Ledger snapshot taken when the current fetch started, used for calibration.
     pre_fetch_batches: Optional[Dict[int, float]] = None
-    # Deductions made while the command was running, re-applied to the fetched
-    # data so in-flight requests are never counted twice (see design section 7).
-    deductions_during_fetch: List[Tuple[int, float]] = field(default_factory=list)
 
 
 def _prune_expired(batches: Dict[int, float], now: float) -> None:
@@ -169,8 +166,6 @@ class QuotaManager:
             if total - cost < profile.quota.min_remaining:
                 return ReserveResult(allowed=False, reason="exhausted")
             receipt = _deduct(account.batches, cost)
-            if account.fetch_in_progress:
-                account.deductions_during_fetch.extend(receipt)
             return ReserveResult(allowed=True, receipt=receipt)
 
     def refund(self, profile_name: str, receipt: List[Tuple[int, float]]) -> None:
@@ -204,7 +199,6 @@ class QuotaManager:
         with account.lock:
             account.fetch_in_progress = True
             account.pre_fetch_batches = dict(account.batches)
-            account.deductions_during_fetch = []
             account.last_fetch_at = now
 
         # The command runs WITHOUT holding the ledger lock, so requests are
@@ -223,25 +217,23 @@ class QuotaManager:
                 account.had_failure = True
                 account.last_error = str(payload)
                 account.pre_fetch_batches = None
-                account.deductions_during_fetch = []
             else:
-                # Drop expired batches first, so calibration ignores them and
-                # in-flight deductions are replayed onto usable points only.
+                # The ledger becomes the fetched data as-is. Requests still in
+                # flight are not re-deducted: the ledger is approximate between
+                # refreshes and min_remaining is the buffer (design section 7).
                 new_batches: Dict[int, float] = dict(payload)  # type: ignore[arg-type]
+                # Drop expired batches so calibration never compares them.
                 _prune_expired(new_batches, now)
                 if (account.initialized and not account.had_failure
                         and account.pre_fetch_batches is not None):
                     _prune_expired(account.pre_fetch_batches, now)
                     self._calibrate(account, account.pre_fetch_batches, new_batches, now)
-                for expires_at, amount in account.deductions_during_fetch:
-                    _deduct(new_batches, amount)
                 account.batches = new_batches
                 account.initialized = True
                 account.had_failure = False
                 account.last_success_at = now
                 account.last_error = None
                 account.pre_fetch_batches = None
-                account.deductions_during_fetch = []
             account.fetch_in_progress = False
         return ok
 
@@ -308,7 +300,6 @@ class QuotaManager:
                     account.initialized = False
                     account.had_failure = False
                     account.pre_fetch_batches = None
-                    account.deductions_during_fetch = []
                     account.last_fetch_at = None
                     due = True
                 # Always adopt the newest config so min_remaining / interval /

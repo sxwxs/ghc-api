@@ -229,9 +229,11 @@ by calibration.
 - Only one refresh runs per profile at a time, and the command never holds the
   ledger lock, so requests are not slowed by it.
 
-When a refresh completes, the new ledger = fetched data − requests deducted
-after the refresh started. Those requests may or may not already be reflected
-in the fetched data, so they are deducted once more (prefer under-estimating).
+When a refresh completes, the new ledger = fetched data (minus expired
+batches). Requests still in flight are not deducted again: the upstream may or
+may not have counted them yet. The ledger is therefore approximate between
+refreshes, off by roughly (requests in flight at refresh time × `quota_cost`);
+`min_remaining` is the buffer for that.
 
 ### Calibration and alerts
 
@@ -273,10 +275,12 @@ and needs no token when authentication is enabled.
   discover divergence through calibration.
 - No retries or queuing: insufficient quota returns 429 immediately.
 - `quota_cost` is not learned automatically.
-- Requests already in flight when a refresh starts are not re-deducted. If
-  the upstream charges only when a request completes, the new ledger can be
-  higher than reality until the next refresh, and the next calibration may
-  report that difference as an alert. Keep `min_remaining` as a buffer.
+- Requests in flight during a refresh are not re-deducted. If the upstream
+  charges only when a request completes, the new ledger can be higher than
+  reality until the next refresh, and the next calibration may report that
+  difference as an alert. Keep `min_remaining` as a buffer.
+- A refund that straddles a refresh (deducted before it, refunded after it)
+  can leave the ledger off by one `quota_cost` until the next refresh.
 - With `max_connection_retries > 0`, a read timeout is retried, so one
   deduction can be billed upstream more than once. Prefer leaving it at 0 for
   APIs serving quota-limited models.
