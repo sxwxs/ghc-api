@@ -531,10 +531,15 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
 
             def iter_lines(self):
                 yield b'data: {"choices":[{"index":0,"delta":{"content":"Checking","role":"assistant"}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
+                yield b""
                 yield b'data: {"choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"function":{"name":"get_weather"},"id":"tooluse_1","index":2,"type":"function"}]}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
+                yield b""
                 yield b'data: {"choices":[{"index":0,"delta":{"content":null,"tool_calls":[{"function":{"arguments":"{\\"location\\":\\"SF\\"}"},"index":2,"type":"function"}]}}],"created":1,"id":"chat-1","model":"claude-sonnet-4.6"}'
+                yield b""
                 yield b'data: {"choices":[{"finish_reason":"tool_calls","index":0,"delta":{"content":null}}],"created":1,"id":"chat-1","usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8},"model":"claude-sonnet-4.6"}'
+                yield b""
                 yield b"data: [DONE]"
+                yield b""
 
             def close(self):
                 pass
@@ -579,7 +584,9 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
 
             def iter_lines(self):
                 yield b'data: {"choices":[{"index":0,"delta":{"content":"Hi","role":"assistant"}}],"id":"chat-1"}'
+                yield b""
                 yield b'data: {"choices":[{"index":0,"delta":{"content":" there"}}],"id":"chat-1"}'
+                yield b""
 
             def close(self):
                 pass
