@@ -27,15 +27,7 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class ProxyRequestError(RuntimeError):
-    """Raised before an upstream HTTP response can be returned.
-
-    ``request_sent`` is True when at least one attempt was already delivered
-    to the upstream (a read timeout), so it may have been processed and billed.
-    """
-
-    def __init__(self, message: str, *, request_sent: bool = False) -> None:
-        super().__init__(message)
-        self.request_sent = request_sent
+    """Raised before an upstream HTTP response can be returned."""
 
 
 @dataclass
@@ -168,7 +160,6 @@ class ProxyRuntime:
         auth_provider = self._auth_provider(profile)
         connection_attempt = 0
         auth_retry_attempted = False
-        request_sent = False
         affinity_token = initial_affinity_token
 
         while True:
@@ -186,13 +177,10 @@ class ProxyRuntime:
                     timeout=api.timeout_seconds,
                 )
             except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as exc:
-                # A read timeout means the request reached the upstream.
-                request_sent = request_sent or isinstance(exc, requests.exceptions.ReadTimeout)
                 if connection_attempt >= api.max_connection_retries:
                     raise ProxyRequestError(
                         f"Configured upstream connection failed after {connection_attempt + 1} attempt(s): "
-                        f"{type(exc).__name__}",
-                        request_sent=request_sent,
+                        f"{type(exc).__name__}"
                     ) from exc
                 time.sleep(min(2 ** connection_attempt, 8))
                 connection_attempt += 1

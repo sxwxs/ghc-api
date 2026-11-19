@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple
 
+import requests
 from flask import Blueprint, Response, g, jsonify, request
 
 from ..auth import ANONYMOUS_USER_ID, redact_auth_headers, require_auth
@@ -352,7 +353,8 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             dynamic_headers=dynamic_headers,
         )
     except ProxyRequestError as exc:
-        if not exc.request_sent:
+        # A read timeout means the upstream got the request and may bill it.
+        if not isinstance(exc.__cause__, requests.exceptions.ReadTimeout):
             quota_manager.refund(profile.name, reservation.receipt)
         print(f"[Configured Proxy] Request {request_id} could not start: {exc}")
         return _error(
