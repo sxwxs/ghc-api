@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import threading
@@ -204,8 +205,8 @@ def _parse_positive_int(value, default: int, field_name: str, allow_zero: bool =
 def _parse_number(value, default, field_name: str, *, positive: bool) -> Optional[float]:
     if value is None:
         return default
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ProxyConfigError(f"'{field_name}' must be a number")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ProxyConfigError(f"'{field_name}' must be a finite number")
     if positive and value <= 0:
         raise ProxyConfigError(f"'{field_name}' must be > 0")
     if not positive and value < 0:

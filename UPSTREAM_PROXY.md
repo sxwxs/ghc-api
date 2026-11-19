@@ -204,8 +204,9 @@ Refunds:
 
 - The request could not be sent (connection failure, credential unavailable): refund.
 - The upstream returned a non-2xx status: refund.
-- Everything else is not refunded, including a stream that breaks mid-response
-  or a client cancellation.
+- Everything else is not refunded, including a read timeout (the request was
+  already sent and may be billed), a stream that breaks mid-response, or a
+  client cancellation.
 - A refund goes back to the batch it was deducted from; if that batch has
   already expired, it is not refunded.
 
@@ -241,6 +242,8 @@ compared with the fetched data per batch (by `expires_at`):
   recorded: emit an alert.
 - Our ledger lower is expected (`quota_cost` set high): no alert.
 - A new batch in the fetched data that our ledger lacks: no alert.
+- An unexpired batch in our ledger that the fetched data lacks counts as 0
+  fetched (used up upstream). Expired batches are not compared.
 - A difference below 0.01 points: no alert.
 - No comparison if the previous fetch failed (the ledger was cleared), nor on
   the first fetch.
@@ -256,9 +259,9 @@ remaining points, `min_remaining`, each batch (amount, expiry, time left), last
 fetch / last success / last error, and the alert list. The dashboard shows a
 block for these values, hidden when no profile configures a quota.
 
-The endpoint contains numbers only — no credentials or command content. It is
-listed in `PROTECTED_PATHS`, so when authentication is enabled it requires a
-login; the dashboard block hides itself for unauthenticated viewers.
+The endpoint contains numbers only — no credentials or command content. Like
+`/api/stats` and the other dashboard endpoints, it is not in `PROTECTED_PATHS`
+and needs no token when authentication is enabled.
 
 ### Limits
 
@@ -270,6 +273,13 @@ login; the dashboard block hides itself for unauthenticated viewers.
   discover divergence through calibration.
 - No retries or queuing: insufficient quota returns 429 immediately.
 - `quota_cost` is not learned automatically.
+- Requests already in flight when a refresh starts are not re-deducted. If
+  the upstream charges only when a request completes, the new ledger can be
+  higher than reality until the next refresh, and the next calibration may
+  report that difference as an alert. Keep `min_remaining` as a buffer.
+- With `max_connection_retries > 0`, a read timeout is retried, so one
+  deduction can be billed upstream more than once. Prefer leaving it at 0 for
+  APIs serving quota-limited models.
 
 ## Authentication
 

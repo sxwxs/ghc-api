@@ -57,7 +57,6 @@ PROTECTED_PATHS = frozenset({
     "/v1/search",
     "/v1/extract",
     "/v1/sub-domains",
-    "/api/quota",
 })
 
 

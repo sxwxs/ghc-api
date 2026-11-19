@@ -116,7 +116,10 @@ def _run_command(quota: ProxyQuotaConfig) -> Tuple[bool, object]:
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            # Never fail on undecodable bytes: bad output then simply fails
+            # JSON validation like any other malformed output.
+            encoding="utf-8",
+            errors="replace",
             timeout=quota.command_timeout_seconds,
             shell=False,
         )
@@ -163,7 +166,7 @@ class QuotaManager:
             if not account.initialized or account.had_failure:
                 return ReserveResult(allowed=False, reason="unavailable")
             total = sum(account.batches.values())
-            if total - cost < account.quota.min_remaining:
+            if total - cost < profile.quota.min_remaining:
                 return ReserveResult(allowed=False, reason="exhausted")
             receipt = _deduct(account.batches, cost)
             if account.fetch_in_progress:
@@ -206,7 +209,10 @@ class QuotaManager:
 
         # The command runs WITHOUT holding the ledger lock, so requests are
         # never slowed down by a slow quota command.
-        ok, payload = _run_command(quota)
+        try:
+            ok, payload = _run_command(quota)
+        except Exception as exc:  # never leave fetch_in_progress stuck
+            ok, payload = False, f"quota command failed: {type(exc).__name__}"
 
         now = self._now()
         with account.lock:
@@ -219,11 +225,14 @@ class QuotaManager:
                 account.pre_fetch_batches = None
                 account.deductions_during_fetch = []
             else:
-                fetched: Dict[int, float] = payload  # type: ignore[assignment]
+                # Drop expired batches first, so calibration ignores them and
+                # in-flight deductions are replayed onto usable points only.
+                new_batches: Dict[int, float] = dict(payload)  # type: ignore[arg-type]
+                _prune_expired(new_batches, now)
                 if (account.initialized and not account.had_failure
                         and account.pre_fetch_batches is not None):
-                    self._calibrate(account, account.pre_fetch_batches, fetched, now)
-                new_batches = dict(fetched)
+                    _prune_expired(account.pre_fetch_batches, now)
+                    self._calibrate(account, account.pre_fetch_batches, new_batches, now)
                 for expires_at, amount in account.deductions_during_fetch:
                     _deduct(new_batches, amount)
                 account.batches = new_batches
@@ -244,10 +253,9 @@ class QuotaManager:
         now: float,
     ) -> None:
         for expires_at, ours_amount in ours.items():
-            fetched_amount = fetched.get(expires_at)
-            if fetched_amount is None:
-                # A batch that disappeared upstream is not an over-charge signal.
-                continue
+            # Both sides are already pruned, so an unexpired batch missing from
+            # the fetched data has been used up upstream: compare it as 0.
+            fetched_amount = fetched.get(expires_at, 0.0)
             diff = ours_amount - fetched_amount
             # Our ledger higher than reality => upstream charged more than we
             # recorded (quota_cost too small). New batches and small deltas are

@@ -10,12 +10,14 @@ clock so expiry / retry / calibration can be tested without sleeping.
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
+import requests
 import yaml
 
 from ghc_api.app import PROTECTED_PATHS, create_app
@@ -108,12 +110,12 @@ class QuotaConfigTest(unittest.TestCase):
             parse_proxy_config(make_config(quota=False))
 
     def test_quota_cost_must_be_positive_number(self):
-        for value in (0, -1, -0.5, True, "2"):
+        for value in (0, -1, -0.5, True, "2", float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ProxyConfigError):
                 parse_proxy_config(make_config(cost=value))
 
     def test_min_remaining_must_be_non_negative_number(self):
-        for value in (-1, -0.5, True, "1"):
+        for value in (-1, -0.5, True, "1", float("nan"), float("inf")):
             with self.subTest(value=value), self.assertRaises(ProxyConfigError):
                 parse_proxy_config(make_config(min_remaining=value))
 
@@ -167,8 +169,9 @@ class QuotaManagerTest(unittest.TestCase):
     def write_config(self, data, *, reset_ledgers=True):
         self.config_path.write_text(yaml.safe_dump(data), encoding="utf-8")
         # Force a distinct mtime so the mtime-based registry always reloads.
+        # Step whole seconds: NTFS keeps mtime at 100 ns resolution only.
         self._mtime_counter += 1
-        stamp = 1_000_000_000_000_000 + self._mtime_counter
+        stamp = 1_000_000_000_000_000_000 + self._mtime_counter * 1_000_000_000
         os.utime(self.config_path, ns=(stamp, stamp))
         if reset_ledgers:
             with self.manager._lock:
@@ -289,6 +292,35 @@ class QuotaManagerTest(unittest.TestCase):
         # New ledger = fetched (10) - in-flight deductions (2).
         self.assertEqual(self.remaining(), 8.0)
 
+    def test_deductions_during_fetch_skip_nearly_expired_batches(self):
+        self.write_config(make_config())
+        e_soon = int(self.now + 30)   # inside the 60s margin
+        e_ok = int(self.now + 3600)
+        self.seed([{"amount": 10, "expires_at": e_ok}])
+
+        def fake_run(*args, **kwargs):
+            self.manager.reserve(self.profile(), 2)
+            return quota_output([
+                {"amount": 5, "expires_at": e_soon},
+                {"amount": 8, "expires_at": e_ok},
+            ])
+
+        with mock.patch("ghc_api.proxy.quota.subprocess.run", side_effect=fake_run):
+            self.manager.refresh_now("demo")
+        # The replayed 2 points come out of the usable batch, not e_soon.
+        self.assertEqual(self.remaining(), 6.0)
+
+    def test_reserve_uses_request_profile_min_remaining(self):
+        self.write_config(make_config(min_remaining=0))
+        e = int(self.now + 3600)
+        self.seed([{"amount": 10, "expires_at": e}])
+        # The request path already sees the new threshold; the refresh loop
+        # has not reconciled yet.
+        self.write_config(make_config(min_remaining=9), reset_ledgers=False)
+        result = self.manager.reserve(self.profile(), 2)
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason, "exhausted")
+
     # -- request admission ------------------------------------------------
 
     def test_429_below_min_remaining_and_upstream_not_called(self):
@@ -358,11 +390,23 @@ class QuotaManagerTest(unittest.TestCase):
         self.write_config(make_config())
         e = int(self.now + 3600)
         self.seed([{"amount": 10, "expires_at": e}])
+        for error in (requests.exceptions.ConnectionError("refused"), ProxyRequestError("boom")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch("ghc_api.proxy.client.requests.post", side_effect=error):
+                    response = self.post_model()
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(self.remaining(), 10.0)
+
+    def test_no_refund_on_read_timeout(self):
+        # The request reached the upstream and may have been billed.
+        self.write_config(make_config())
+        e = int(self.now + 3600)
+        self.seed([{"amount": 10, "expires_at": e}])
         with mock.patch("ghc_api.proxy.client.requests.post",
-                        side_effect=ProxyRequestError("boom")):
+                        side_effect=requests.exceptions.ReadTimeout("slow")):
             response = self.post_model()
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(self.remaining(), 10.0)
+        self.assertEqual(self.remaining(), 8.0)
 
     def test_refund_on_upstream_non_2xx(self):
         self.write_config(make_config())
@@ -447,6 +491,28 @@ class QuotaManagerTest(unittest.TestCase):
         self.assertFalse(result.allowed)
         self.assertEqual(result.reason, "unavailable")
 
+    def test_undecodable_command_output_is_a_failed_fetch(self):
+        command = [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'\\xff\\xfe')"]
+        self.write_config(make_config(command=command))
+        self.manager._reconcile()
+        result = self.manager.reserve(self.profile(), 2)
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.reason, "unavailable")
+        self.assertIn("invalid quota command output",
+                      self.manager.api_snapshot()["profiles"][0]["last_error"])
+
+    def test_unexpected_command_error_does_not_stall_refresh(self):
+        self.write_config(make_config())
+        error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch("ghc_api.proxy.quota.subprocess.run", side_effect=error):
+            self.manager._reconcile()
+        self.assertFalse(self.manager.reserve(self.profile(), 2).allowed)
+        # Still scheduled for the 60s retry instead of stuck "in progress".
+        self.now += 60
+        e = int(self.now + 3600)
+        self.seed([{"amount": 10, "expires_at": e}])
+        self.assertTrue(self.manager.reserve(self.profile(), 2).allowed)
+
     def test_retry_after_60_seconds_then_recovers(self):
         self.write_config(make_config())
         e = int(self.now + 3600)
@@ -498,6 +564,23 @@ class QuotaManagerTest(unittest.TestCase):
             {"amount": 10, "expires_at": e1},
             {"amount": 20, "expires_at": e2},
         ])
+        self.assertEqual(self.alerts(), [])
+
+    def test_calibration_alerts_when_batch_used_up_upstream(self):
+        self.write_config(make_config())
+        e = int(self.now + 3600)
+        self.seed([{"amount": 5, "expires_at": e}])
+        self.refetch([{"amount": 0, "expires_at": e}])
+        self.assertEqual(len(self.alerts()), 1)
+        self.assertEqual(self.alerts()[0]["fetched"], 0.0)
+        self.assertEqual(self.alerts()[0]["diff"], 5.0)
+
+    def test_calibration_ignores_expired_batch(self):
+        self.write_config(make_config())
+        e = int(self.now + 3600)
+        self.seed([{"amount": 5, "expires_at": e}])
+        self.now = e + 1
+        self.refetch([])
         self.assertEqual(self.alerts(), [])
 
     def test_calibration_ignores_small_deltas(self):
@@ -600,8 +683,12 @@ class QuotaManagerTest(unittest.TestCase):
         self.assertEqual(data["profiles"][0]["remaining"], 0.0)
         self.assertNotIn("/path/to/quota-command", json.dumps(data))
 
-    def test_api_quota_is_in_protected_paths(self):
-        self.assertIn("/api/quota", PROTECTED_PATHS)
+    def test_api_quota_is_not_auth_gated(self):
+        # Same as /api/stats: the dashboard has no way to send a token.
+        self.assertNotIn("/api/quota", PROTECTED_PATHS)
+        state.enable_auth = True
+        with self.app.test_client() as client:
+            self.assertEqual(client.get("/api/quota").status_code, 200)
 
 
 if __name__ == "__main__":

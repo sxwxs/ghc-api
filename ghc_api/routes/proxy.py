@@ -352,7 +352,8 @@ def _handle_proxy_request(profile_name: str, api_name: str):
             dynamic_headers=dynamic_headers,
         )
     except ProxyRequestError as exc:
-        quota_manager.refund(profile.name, reservation.receipt)
+        if not exc.request_sent:
+            quota_manager.refund(profile.name, reservation.receipt)
         print(f"[Configured Proxy] Request {request_id} could not start: {exc}")
         return _error(
             "Configured upstream request could not be started.",

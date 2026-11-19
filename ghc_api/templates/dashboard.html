@@ -707,7 +707,6 @@
             const section = document.getElementById('quota-section');
             try {
                 const response = await fetch('/api/quota');
-                // Auth-gated endpoint: hide the block for unauthenticated viewers.
                 if (!response.ok) {
                     section.style.display = 'none';
                     return;
