@@ -201,11 +201,13 @@ def refresh_copilot_token(force: bool = False) -> None:
 def fetch_models() -> bool:
     """Fetch available models from Copilot API and report whether it succeeded."""
     ensure_copilot_token()
+    headers = get_copilot_headers()
     response = requests.get(
         f"{get_copilot_base_url()}/models",
-        headers=get_copilot_headers(),
+        headers=headers,
         timeout=30,
     )
+    reset_copilot_token_on_auth_error(response, headers)
 
     if response.ok:
         state.models = response.json()
@@ -223,6 +225,34 @@ def ensure_copilot_token() -> None:
     """Ensure we have a valid Copilot token"""
     if not state.copilot_token or time.time() >= state.token_expires_at - 60:
         refresh_copilot_token()
+
+
+def reset_copilot_token_on_auth_error(response, headers: Dict[str, str]) -> None:
+    """Expire the cached Copilot token after the Copilot API rejects it.
+
+    GitHub can revoke a Copilot token long before its advertised
+    ``expires_at``. Like VS Code Copilot Chat, treat any 401/403 from the
+    Copilot API as an expired or invalid token so the next request fetches a
+    new one instead of reusing the dead token until ``refresh_in`` elapses.
+    The rejected request itself is not retried.
+    """
+    status_code = getattr(response, "status_code", None)
+    if status_code not in (401, 403):
+        return
+    sent_authorization = (headers or {}).get("Authorization")
+    with state.token_lock:
+        # Another request may already have replaced the token; keep the new one.
+        if not state.copilot_token or sent_authorization != f"Bearer {state.copilot_token}":
+            return
+        state.token_expires_at = 0
+    print(f"Copilot API returned HTTP {status_code}; refreshing the Copilot token before the next request")
+
+
+def copilot_post(url: str, headers: Dict[str, str], **kwargs) -> requests.Response:
+    """``requests.post`` for Copilot API calls; expires the cached token on 401/403."""
+    response = requests.post(url, headers=headers, **kwargs)
+    reset_copilot_token_on_auth_error(response, headers)
+    return response
 
 
 def apply_configured_chat_completions_support(models: Dict, reset_tracking: bool = False) -> int:

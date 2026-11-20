@@ -351,6 +351,8 @@ The Code Agent Manager shows the latest Copilot token refresh attempt/result and
 
 Copilot token refresh failures are appended as structured JSON lines to `error.log` in the ghc-api config directory. The upstream response body is retained for debugging up to 64 KiB; authentication headers and tokens are not logged.
 
+The Copilot token is refreshed on the schedule GitHub returns (`refresh_in`, currently about 24 hours). GitHub can revoke a token before then. As VS Code Copilot Chat does, any 401 or 403 from the Copilot API expires the cached token. The rejected request returns its error unchanged, and the next request fetches a new token, so a revoked token no longer fails every request until the scheduled refresh.
+
 ### Config Sync and OneDrive
 
 `ghc-api` can manage and sync these files:
