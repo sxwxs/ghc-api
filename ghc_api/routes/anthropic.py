@@ -15,6 +15,7 @@ import requests
 from flask import Blueprint, Response, g, jsonify, request, stream_with_context
 
 from ..api_helpers import (
+    copilot_post,
     ensure_copilot_token,
     get_copilot_base_url,
     get_copilot_headers,
@@ -402,7 +403,7 @@ def _direct_anthropic_stream_handler_cls():
 
 
 def _start_direct_anthropic_post(headers: Dict, payload: Dict, stream: bool):
-    return BackgroundResult(lambda: requests.post(
+    return BackgroundResult(lambda: copilot_post(
         f"{get_copilot_base_url()}/v1/messages",
         headers=headers,
         json=payload,
@@ -1307,7 +1308,7 @@ def _stream_pending_anthropic_responses_request(
                         # just been replaced by ensure_copilot_token() below,
                         # and each attempt needs its own X-Request-Id.
                         retry_headers = build_request_headers()
-                        active_pending = BackgroundResult(lambda: requests.post(
+                        active_pending = BackgroundResult(lambda: copilot_post(
                             f"{get_copilot_base_url()}/v1/responses",
                             headers=retry_headers,
                             json=responses_payload,
@@ -1666,7 +1667,7 @@ def handle_responses_anthropic_request(
 
     def retry_early_failed_stream() -> requests.Response:
         ensure_copilot_token()
-        return requests.post(
+        return copilot_post(
             f"{get_copilot_base_url()}/v1/responses",
             headers=build_request_headers(),
             json=responses_payload,
@@ -1684,7 +1685,7 @@ def handle_responses_anthropic_request(
                 responses_payload.get("stream")
                 and state.sse_keepalive_interval > 0
             ):
-                pending_response = BackgroundResult(lambda: requests.post(
+                pending_response = BackgroundResult(lambda: copilot_post(
                     f"{get_copilot_base_url()}/v1/responses",
                     headers=headers,
                     json=responses_payload,
@@ -1728,7 +1729,7 @@ def handle_responses_anthropic_request(
                         request_audit=request_audit,
                     )
             else:
-                response = requests.post(
+                response = copilot_post(
                     f"{get_copilot_base_url()}/v1/responses",
                     headers=headers,
                     json=responses_payload,
@@ -2145,7 +2146,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
                             conn_attempt=conn_attempt,
                         )
                 else:
-                    response = requests.post(
+                    response = copilot_post(
                         f"{get_copilot_base_url()}/v1/messages",
                         headers=headers,
                         json=filtered_payload,
@@ -2327,7 +2328,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
         last_connection_error = None
         for conn_attempt in range(connection_retries + 1):
             try:
-                response = requests.post(
+                response = copilot_post(
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
                     json=openai_payload,
@@ -2460,7 +2461,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
             # Update state to sending
             cache.update_request_state(request_id, cache.STATE_SENDING)
 
-            pending_response = BackgroundResult(lambda: requests.post(
+            pending_response = BackgroundResult(lambda: copilot_post(
                 f"{get_copilot_base_url()}/chat/completions",
                 headers=headers,
                 json=openai_payload,
@@ -2486,7 +2487,7 @@ def stream_anthropic_messages(openai_payload: Dict, headers: Dict, request_id: s
                     request_body=new_openai_payload,
                     request_size=final_request_size,
                 )
-                pending_response = BackgroundResult(lambda: requests.post(
+                pending_response = BackgroundResult(lambda: copilot_post(
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
                     json=new_openai_payload,

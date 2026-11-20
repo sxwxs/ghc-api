@@ -23,7 +23,11 @@ import uuid
 
 import requests
 
-from .api_helpers import is_configured_chat_completions_support_added, supports_responses_api
+from .api_helpers import (
+    is_configured_chat_completions_support_added,
+    reset_copilot_token_on_auth_error,
+    supports_responses_api,
+)
 from .state import state
 
 
@@ -76,6 +80,7 @@ def post(base_url, headers, payload, stream, timeout):
         stream=stream,
         timeout=timeout,
     )
+    reset_copilot_token_on_auth_error(response, headers)
     return ChatCompletionResponsesAdapter(response, payload)
 
 
