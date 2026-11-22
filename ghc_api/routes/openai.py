@@ -1770,6 +1770,29 @@ def chat_completions():
         return jsonify({"error": str(e)}), 500
 
 
+def _is_empty_gemini_chat_chunk(chunk: Dict) -> bool:
+    """Whether a chunk contains only role/usage metadata, with no model output."""
+    if not isinstance(chunk, dict) or chunk.get("error"):
+        return False
+    choices = chunk.get("choices")
+    if not isinstance(choices, list):
+        return False
+    for choice in choices:
+        if not isinstance(choice, dict) or choice.get("finish_reason"):
+            return False
+        if any(value for key, value in choice.items() if key not in ("index", "delta", "finish_reason")):
+            return False
+        delta = choice.get("delta")
+        if delta is not None and not isinstance(delta, dict):
+            return False
+        delta = delta or {}
+        if any(value for key, value in delta.items() if key != "role"):
+            return False
+        if delta.get("role") not in (None, "assistant"):
+            return False
+    return True
+
+
 def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
                             request_body: str, request_size: int, start_time: float,
                             original_model: str, translated_model: str,
@@ -1801,54 +1824,98 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
         status_code = 200
         output_started = False
         tool_index_map = {}
+        failed_input_tokens = failed_output_tokens = failed_cache_read_tokens = 0
 
         try:
-            # Update state to sending
             cache.update_request_state(request_id, cache.STATE_SENDING)
+            is_gemini = translated_model.lower().startswith("gemini-")
+            # Copilot can terminate Gemini with a usage-only chunk and [DONE],
+            # but neither output nor a finish reason. Buffer metadata until we
+            # know whether replay is safe; never replay once output is visible.
+            max_empty_retries = 1 if is_gemini and state.max_connection_retries > 0 else 0
 
-            response = requests.post(
-                f"{get_copilot_base_url()}/chat/completions",
-                headers=headers,
-                json=payload,
-                stream=True,
-                timeout=state.upstream_read_timeout,
-            )
-            status_code = response.status_code
+            for attempt in range(max_empty_retries + 1):
+                total_input_tokens = total_output_tokens = total_cache_read_input_tokens = 0
+                response = requests.post(
+                    f"{get_copilot_base_url()}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    stream=True,
+                    timeout=state.upstream_read_timeout,
+                )
+                status_code = response.status_code
+                pending_chunks = []
+                buffering = is_gemini and response.status_code < 400
+                saw_usage = False
+                saw_done = False
+                malformed_data = False
 
-            for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
-                if line is KEEPALIVE:
-                    counters.incr("ping_sent")
-                    yield ": keepalive\n\n"
-                    continue
+                for line in iter_lines_with_keepalive(response, state.sse_keepalive_interval):
+                    if line is KEEPALIVE:
+                        counters.incr("ping_sent")
+                        yield ": keepalive\n\n"
+                        continue
 
-                if not line:
-                    continue
-
-                line = line.decode("utf-8")
-                if line.startswith("data: "):
+                    if not line:
+                        continue
+                    line = line.decode("utf-8")
+                    if not line.startswith("data: "):
+                        continue
                     data = line[6:]
                     if data == "[DONE]":
-                        yield "data: [DONE]\n\n"
+                        saw_done = True
                         break
-
                     try:
                         chunk = json.loads(data)
-                        chunk = _normalize_stream_tool_calls(chunk, tool_index_map)
-                        response_chunks.append(chunk)
+                    except json.JSONDecodeError:
+                        malformed_data = True
+                        continue
+                    chunk = _normalize_stream_tool_calls(chunk, tool_index_map)
+                    if chunk.get("usage"):
+                        saw_usage = True
+                        total_output_tokens = chunk["usage"].get("completion_tokens", 0)
+                        total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
+                        total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
 
-                        if not output_started and is_output_event(chunk):
+                    if buffering:
+                        pending_chunks.append(chunk)
+                        if _is_empty_gemini_chat_chunk(chunk) and len(pending_chunks) < 16:
+                            continue
+                        buffering = False
+                        chunks_to_send = pending_chunks
+                        pending_chunks = []
+                    else:
+                        chunks_to_send = [chunk]
+                    for outgoing in chunks_to_send:
+                        response_chunks.append(outgoing)
+                        if not output_started and is_output_event(outgoing):
                             output_started = True
                             cache.update_request_state(request_id, cache.STATE_RECEIVING)
+                        yield f"data: {json.dumps(outgoing)}\n\n"
 
-                        # Track tokens from streaming chunks
-                        if chunk.get("usage"):
-                            total_output_tokens = chunk["usage"].get("completion_tokens", 0)
-                            total_cache_read_input_tokens = chunk["usage"].get("prompt_tokens_details", {}).get("cached_tokens", 0)
-                            total_input_tokens = chunk["usage"].get("prompt_tokens", 0) - total_cache_read_input_tokens
+                empty_finished_stream = buffering and saw_usage and saw_done and not malformed_data
+                if empty_finished_stream and attempt < max_empty_retries:
+                    failed_input_tokens += total_input_tokens
+                    failed_output_tokens += total_output_tokens
+                    failed_cache_read_tokens += total_cache_read_input_tokens
+                    continue
+                if empty_finished_stream:
+                    error_occurred = True
+                    status_code = 502
+                    response_chunks = [{"error": {
+                        "message": "Upstream Gemini stream ended without output or a finish reason.",
+                        "type": "upstream_error",
+                        "code": "empty_stream",
+                    }}]
+                    yield f"data: {json.dumps(response_chunks[0])}\n\n"
+                    break
+                for outgoing in pending_chunks:
+                    response_chunks.append(outgoing)
+                    yield f"data: {json.dumps(outgoing)}\n\n"
+                if saw_done:
+                    yield "data: [DONE]\n\n"
+                break
 
-                        yield f"data: {json.dumps(chunk)}\n\n"
-                    except json.JSONDecodeError:
-                        continue
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             # Timeout or connection error from upstream - log but don't try to yield after client disconnect
             error_occurred = True
@@ -1868,10 +1935,16 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             except GeneratorExit:
                 status_code = 499
 
+        total_input_tokens += failed_input_tokens
+        total_output_tokens += failed_output_tokens
+        total_cache_read_input_tokens += failed_cache_read_tokens
         duration = round(time.time() - start_time, 2)
 
         # Reconstruct the full response from chunks
-        reconstructed_response = reconstruct_openai_response_from_chunks(response_chunks)
+        reconstructed_response = (
+            response_chunks[-1] if error_occurred and response_chunks and response_chunks[-1].get("error")
+            else reconstruct_openai_response_from_chunks(response_chunks)
+        )
         if error_occurred and not reconstructed_response:
             reconstructed_response = {"error": "Stream interrupted"}
 

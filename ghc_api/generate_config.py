@@ -154,7 +154,9 @@ system_prompt_add: []
 # Retry Settings
 # ---------------
 # Maximum number of retries for upstream connection errors (e.g., RemoteDisconnected,
-# ReadTimeout). Set to 0 to disable retries.
+# ReadTimeout). Also permits one retry for a Gemini Chat Completions stream that
+# ends with usage but no output or finish reason. Retries consume upstream quota.
+# Set to 0 to disable retries.
 max_connection_retries: 3
 
 # Read timeout (in seconds) for each upstream request to GitHub Copilot. If the upstream
