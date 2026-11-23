@@ -14,7 +14,7 @@ from flask import Blueprint, Response, g, jsonify, request
 from werkzeug.exceptions import RequestEntityTooLarge
 
 from ..api_helpers import (
-    ensure_copilot_token, fetch_models, get_copilot_base_url,
+    copilot_post, ensure_copilot_token, fetch_models, get_copilot_base_url,
     get_copilot_headers, image_upstream_path,
 )
 from ..auth import redact_auth_headers
@@ -160,7 +160,7 @@ def _forward_image_request(operation):
         cache.start_request(request_id, record)
         cache.update_request_state(request_id, cache.STATE_SENDING)
         try:
-            response = requests.post(
+            response = copilot_post(
                 f"{get_copilot_base_url()}{upstream_path}", headers=headers,
                 timeout=state.upstream_read_timeout, **kwargs,
             )

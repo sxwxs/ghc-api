@@ -16,6 +16,7 @@ import requests
 from flask import Blueprint, Response, g, jsonify, request, stream_with_context
 
 from ..api_helpers import (
+    copilot_post,
     decisions_upstream_path,
     ensure_copilot_token,
     get_copilot_base_url,
@@ -69,7 +70,7 @@ def _post_responses_request(headers: Dict, payload: Dict, stream: bool):
         return gemini_responses_bridge.post(
             get_copilot_base_url(), headers, payload, stream, state.upstream_read_timeout,
         )
-    return requests.post(
+    return copilot_post(
         f"{get_copilot_base_url()}/v1/responses",
         headers=headers,
         json=payload,
@@ -1051,7 +1052,7 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
     last_connection_error = None
     for conn_attempt in range(connection_retries + 1):
         try:
-            response = requests.post(
+            response = copilot_post(
                 f"{get_copilot_base_url()}/v1/responses",
                 headers=headers,
                 json=responses_payload,
@@ -1394,7 +1395,7 @@ def embeddings():
         last_connection_error = None
         for conn_attempt in range(connection_retries + 1):
             try:
-                response = requests.post(
+                response = copilot_post(
                     f"{get_copilot_base_url()}/embeddings",
                     headers=headers,
                     json=upstream_payload,
@@ -1548,7 +1549,7 @@ def _decision_passthrough(api: str):
         last_connection_error = None
         for conn_attempt in range(connection_retries + 1):
             try:
-                response = requests.post(
+                response = copilot_post(
                     f"{get_copilot_base_url()}{upstream_path}",
                     headers=headers,
                     json=upstream_payload,
@@ -1689,7 +1690,7 @@ def chat_completions():
         last_connection_error = None
         for conn_attempt in range(connection_retries + 1):
             try:
-                response = requests.post(
+                response = copilot_post(
                     f"{get_copilot_base_url()}/chat/completions",
                     headers=headers,
                     json=payload,
@@ -1806,7 +1807,7 @@ def stream_chat_completions(payload: Dict, headers: Dict, request_id: str,
             # Update state to sending
             cache.update_request_state(request_id, cache.STATE_SENDING)
 
-            response = requests.post(
+            response = copilot_post(
                 f"{get_copilot_base_url()}/chat/completions",
                 headers=headers,
                 json=payload,
