@@ -197,6 +197,10 @@ enable_responses_early_failure_retry: true # Transparently retry a stream that r
                               # max_connection_retries. Each retry costs upstream quota.
                               # Set false to disable.
 
+# Gemini Chat Completions: an upstream stream that ends with usage but no output
+# or finish reason is retried once with the same request, provided
+# max_connection_retries > 0. A retry consumes additional upstream quota.
+
 # Streaming reliability
 upstream_read_timeout: 1800   # Read timeout (seconds) for each upstream Copilot request
 sse_keepalive_interval: 30    # Send a keepalive ping to the client when a stream is idle
