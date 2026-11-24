@@ -317,6 +317,19 @@ class GeminiResponsesTest(unittest.TestCase):
             response.close()
         self.assertTrue(upstream.closed)
 
+    def test_only_none_effort_is_adapted_on_chat_and_responses_routes(self):
+        state.models["data"][0]["capabilities"] = {"supports": {"reasoning_effort": ["low", "medium", "high"]}}
+        for effort, expected in [("none", "low"), ("minimal", "minimal"), ("xhigh", "xhigh"), ("max", "max")]:
+            for path, body in [
+                ("/v1/chat/completions", {"messages": [{"role": "user", "content": "Hi"}], "reasoning_effort": effort}),
+                ("/v1/responses", {"input": "Hi", "reasoning": {"effort": effort}}),
+            ]:
+                with self.subTest(path=path, effort=effort):
+                    self.post.return_value = self.completion()
+                    response = self.client.post(path, json={"model": MODEL, **body})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(self.post.call_args.kwargs["json"]["reasoning_effort"], expected)
+
 
 if __name__ == "__main__":
     unittest.main()

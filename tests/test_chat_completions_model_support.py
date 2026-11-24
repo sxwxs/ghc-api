@@ -222,6 +222,58 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
 
         self.assertEqual(result["max_output_tokens"], 64)
 
+    def test_astra_streaming_connection_probe(self):
+        model = "gpt-6.2-astra"
+        chat_completions_model_support.load_from_config({"chat_completions_model_support": {"prefix": ["gpt-"]}})
+        ghc_api.state.state.models = {"data": [{"id": model, "supported_endpoints": ["/responses"]}]}
+        upstream = mock.Mock(ok=True, status_code=200)
+        upstream.iter_lines.return_value = [
+            b'data: {"type":"response.output_text.delta","delta":"OK"}',
+            b'data: {"type":"response.completed","response":{"output":[]}}',
+        ]
+        with (
+            mock.patch("ghc_api.routes.openai.ensure_copilot_token"),
+            mock.patch("ghc_api.routes.openai.get_copilot_headers", return_value={}),
+            mock.patch("ghc_api.routes.openai.requests.post", return_value=upstream) as post,
+        ):
+            response = create_app().test_client().post("/v1/chat/completions", json={
+                "model": model, "messages": [{"role": "user", "content": "Reply with OK."}],
+                "stream": True, "max_tokens": 1,
+            }, buffered=True)
+        self.assertTrue(post.call_args.args[0].endswith("/v1/responses"))
+        self.assertEqual(post.call_args.kwargs["json"]["max_output_tokens"], 16)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'"content": "OK"', response.data)
+        self.assertIn(b"data: [DONE]", response.data)
+
+    def test_astra_token_floor_only_applies_to_small_positive_integers(self):
+        for model, limit, expected in [
+            ("gpt-6.2-astra", 15, 16), ("gpt-6.2-astra", 16, 16), ("gpt-6.2-astra", 32, 32),
+            ("gpt-6.2-astra", 0, 0), ("gpt-6.2-astra", True, True), ("gpt-other", 1, 1),
+        ]:
+            with self.subTest(model=model, limit=limit):
+                result = _chat_completions_to_responses_payload({"model": model, "max_completion_tokens": limit})
+                self.assertEqual(result["max_output_tokens"], expected)
+
+    def test_chat_reasoning_effort_falls_back_only_for_unsupported_none(self):
+        model = "gpt-6.2-astra"
+        for supported, effort, expected in [
+            (["low"], "none", "low"), (["none", "low"], "none", "none"), (["high"], "none", "none"),
+            (["low", "high"], "minimal", "minimal"), (["low", "high"], "xhigh", "xhigh"),
+        ]:
+            with self.subTest(supported=supported, effort=effort):
+                ghc_api.state.state.models = {"data": [{
+                    "id": model, "capabilities": {"supports": {"reasoning_effort": supported}},
+                }]}
+                result = _chat_completions_to_responses_payload({
+                    "model": model, "reasoning_effort": effort, "reasoning": {"summary": "auto"},
+                })
+                self.assertEqual(result["reasoning"], {"effort": expected, "summary": "auto"})
+        result = _chat_completions_to_responses_payload({
+            "model": "unknown", "reasoning": {"effort": "none"}, "reasoning_effort": "high",
+        })
+        self.assertEqual(result["reasoning"], {"effort": "none"})
+
     def test_chat_completion_payload_prefers_max_completion_tokens_over_max_tokens(self):
         payload = {
             "model": "mai-code-1-flash-internal",

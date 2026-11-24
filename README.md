@@ -34,6 +34,13 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 - [Async JSONL logging](ASYNC_JSONL_LOGGING.md) - agreed design for moving request/search file appends off the request thread (not yet implemented)
 - [Responses pre-header keepalive](docs/decisions/RESPONSES_PRE_HEADER_KEEPALIVE.md) - review notes and decisions behind the `/v1/responses` pre-header keepalive (PR #42): why upstream errors keep their HTTP status, why the synthetic event is `error`, and what is still open
 
+### OpenAI Chat clients
+
+When ghc-api routes Chat Completions requests for `gpt-6.2-astra` through
+Responses, it raises output limits of 1–15 tokens to Astra's minimum of 16.
+For models that advertise `low` and omit `none`, the OpenAI routes translate
+`none` to `low`. All other reasoning efforts pass through as requested.
+
 ### Gemini through the Responses API (experimental)
 
 > **Experimental.** Implemented in `ghc_api/gemini_responses_bridge.py`. Gemini 3
