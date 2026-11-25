@@ -60,6 +60,8 @@ class GeminiResponsesTest(unittest.TestCase):
             "max_connection_retries": 0,
             "enable_responses_early_failure_retry": False,
             "auto_remove_encrypted_content_on_parse_error": False,
+            "fallback_unsupported_reasoning_effort_none": False,
+            "retry_chat_to_responses_min_output_tokens": False,
             "responses_pre_header_grace": 0,
         }.items():
             self.stack.enter_context(mock.patch.object(state, field, value))
@@ -317,14 +319,25 @@ class GeminiResponsesTest(unittest.TestCase):
             response.close()
         self.assertTrue(upstream.closed)
 
-    def test_only_none_effort_is_adapted_on_chat_and_responses_routes(self):
+    def test_none_effort_passes_through_by_default_and_falls_back_when_enabled(self):
         state.models["data"][0]["capabilities"] = {"supports": {"reasoning_effort": ["low", "medium", "high"]}}
+        for path, body in [
+            ("/v1/chat/completions", {"messages": [{"role": "user", "content": "Hi"}], "reasoning_effort": "none"}),
+            ("/v1/responses", {"input": "Hi", "reasoning": {"effort": "none"}}),
+        ]:
+            with self.subTest(flag=False, path=path):
+                self.post.return_value = self.completion()
+                response = self.client.post(path, json={"model": MODEL, **body})
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(self.post.call_args.kwargs["json"]["reasoning_effort"], "none")
+
+        state.fallback_unsupported_reasoning_effort_none = True
         for effort, expected in [("none", "low"), ("minimal", "minimal"), ("xhigh", "xhigh"), ("max", "max")]:
             for path, body in [
                 ("/v1/chat/completions", {"messages": [{"role": "user", "content": "Hi"}], "reasoning_effort": effort}),
                 ("/v1/responses", {"input": "Hi", "reasoning": {"effort": effort}}),
             ]:
-                with self.subTest(path=path, effort=effort):
+                with self.subTest(flag=True, path=path, effort=effort):
                     self.post.return_value = self.completion()
                     response = self.client.post(path, json={"model": MODEL, **body})
                     self.assertEqual(response.status_code, 200)

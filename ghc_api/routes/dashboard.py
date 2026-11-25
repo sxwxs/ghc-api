@@ -71,6 +71,8 @@ def _runtime_config() -> Dict[str, Any]:
         "upstream_read_timeout": state.upstream_read_timeout,
         "sse_keepalive_interval": state.sse_keepalive_interval,
         "auto_remove_encrypted_content_on_parse_error": state.auto_remove_encrypted_content_on_parse_error,
+        "fallback_unsupported_reasoning_effort_none": state.fallback_unsupported_reasoning_effort_none,
+        "retry_chat_to_responses_min_output_tokens": state.retry_chat_to_responses_min_output_tokens,
         "request_log_retention_days": state.request_log_retention_days,
         "log_webiq_requests": state.log_webiq_requests,
         "log_anysearch_requests": state.log_anysearch_requests,
@@ -240,6 +242,8 @@ def api_runtime_config_update():
         "upstream_read_timeout",
         "sse_keepalive_interval",
         "auto_remove_encrypted_content_on_parse_error",
+        "fallback_unsupported_reasoning_effort_none",
+        "retry_chat_to_responses_min_output_tokens",
         "request_log_retention_days",
         "log_webiq_requests",
         "log_anysearch_requests",
@@ -308,6 +312,18 @@ def api_runtime_config_update():
             if not isinstance(flag, bool):
                 raise ValueError("'auto_remove_encrypted_content_on_parse_error' must be a boolean")
             state.auto_remove_encrypted_content_on_parse_error = flag
+
+        if "fallback_unsupported_reasoning_effort_none" in payload:
+            state.fallback_unsupported_reasoning_effort_none = _validate_bool(
+                payload["fallback_unsupported_reasoning_effort_none"],
+                "fallback_unsupported_reasoning_effort_none",
+            )
+
+        if "retry_chat_to_responses_min_output_tokens" in payload:
+            state.retry_chat_to_responses_min_output_tokens = _validate_bool(
+                payload["retry_chat_to_responses_min_output_tokens"],
+                "retry_chat_to_responses_min_output_tokens",
+            )
 
         if "request_log_retention_days" in payload:
             state.request_log_retention_days = validate_retention_days(

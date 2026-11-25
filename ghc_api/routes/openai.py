@@ -7,6 +7,7 @@ Copilot requests omit the unsupported OpenAI service_tier parameter.
 import copy
 import json
 import queue
+import re
 import time
 import uuid
 from datetime import datetime
@@ -557,13 +558,48 @@ def _chat_tool_call_to_responses_item(tool_call: Dict) -> Dict | None:
     }
 
 
+_MIN_MAX_OUTPUT_TOKENS_ERROR_RE = re.compile(
+    r"invalid\s+['\"]max_output_tokens['\"].*?(?:>=|at\s+least)\s*(\d+)",
+    re.IGNORECASE,
+)
+
+
 def _model_reasoning_effort(model_id: str, effort):
-    """Use low for models that cannot turn reasoning off."""
-    if effort == "none":
+    """Rewrite unsupported ``none`` reasoning effort to ``low`` when opted in."""
+    if effort == "none" and state.fallback_unsupported_reasoning_effort_none:
         supported = supported_reasoning_efforts(model_id)
         if "none" not in supported and "low" in supported:
+            counters.incr("mod.reasoning_effort_none_fallback")
+            print(
+                f"[OpenAI Compat] Model {model_id} does not support reasoning effort 'none' "
+                "(supported includes 'low'); falling back to 'low'"
+            )
             return "low"
     return effort
+
+
+def _responses_min_max_output_tokens_from_error(
+    status_code: int, response_text: str, current_limit
+) -> int | None:
+    """Return the upstream minimum max_output_tokens from a HTTP 400 error, or None."""
+    if status_code != 400 or type(current_limit) is not int or current_limit <= 0:
+        return None
+    try:
+        error = json.loads(response_text).get("error", {})
+    except (AttributeError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(error, dict):
+        return None
+    message = error.get("message", "")
+    if not isinstance(message, str):
+        return None
+    match = _MIN_MAX_OUTPUT_TOKENS_ERROR_RE.search(message)
+    if not match:
+        return None
+    minimum = int(match.group(1))
+    if minimum > current_limit:
+        return minimum
+    return None
 
 
 def _chat_completions_to_responses_payload(payload: Dict) -> Dict:
@@ -632,9 +668,13 @@ def _chat_completions_to_responses_payload(payload: Dict) -> Dict:
         if source in payload:
             responses_payload[target] = payload[source]
 
-    reasoning = responses_payload.get("reasoning", {})
+    reasoning = responses_payload.get("reasoning")
+    if reasoning is None:
+        reasoning = {}
     if isinstance(reasoning, dict):
-        effort = reasoning.get("effort", payload.get("reasoning_effort"))
+        effort = reasoning.get("effort")
+        if effort is None:
+            effort = payload.get("reasoning_effort")
         if effort is not None:
             responses_payload["reasoning"] = {
                 **reasoning, "effort": _model_reasoning_effort(responses_payload["model"], effort),
@@ -644,11 +684,6 @@ def _chat_completions_to_responses_payload(payload: Dict) -> Dict:
         responses_payload["max_output_tokens"] = payload["max_completion_tokens"]
     elif payload.get("max_tokens") is not None:
         responses_payload["max_output_tokens"] = payload["max_tokens"]
-
-    # Copilot rejects output limits below 16 for Astra on the Responses endpoint.
-    limit = responses_payload.get("max_output_tokens")
-    if responses_payload["model"] == "gpt-6.2-astra" and type(limit) is int and 0 < limit < 16:
-        responses_payload["max_output_tokens"] = 16
 
     if payload.get("stop") is not None:
         responses_payload["stop"] = payload["stop"]
@@ -1072,7 +1107,10 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
 
     connection_retries = state.max_connection_retries
     last_connection_error = None
-    for conn_attempt in range(connection_retries + 1):
+    min_tokens_retry_attempted = False
+    response = None
+    conn_attempt = 0
+    while conn_attempt <= connection_retries:
         try:
             response = requests.post(
                 f"{get_copilot_base_url()}/v1/responses",
@@ -1082,6 +1120,27 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
                 timeout=state.upstream_read_timeout,
             )
             last_connection_error = None
+            if (
+                not response.ok
+                and state.retry_chat_to_responses_min_output_tokens
+                and not min_tokens_retry_attempted
+            ):
+                current_limit = responses_payload.get("max_output_tokens")
+                min_tokens = _responses_min_max_output_tokens_from_error(
+                    response.status_code, response.text, current_limit
+                )
+                if min_tokens is not None:
+                    min_tokens_retry_attempted = True
+                    counters.incr("mod.chat_responses_min_output_tokens_retry")
+                    print(
+                        f"[OpenAI Compat] Retrying {translated_model} with "
+                        f"max_output_tokens={min_tokens} (was {current_limit}) for request {request_id}"
+                    )
+                    responses_payload = dict(responses_payload)
+                    responses_payload["max_output_tokens"] = min_tokens
+                    response.close()
+                    response = None
+                    continue
             break
         except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             last_connection_error = e
@@ -1090,8 +1149,10 @@ def chat_completions_via_responses(payload: Dict, headers: Dict, request_id: str
             if conn_attempt < connection_retries:
                 print(f"[OpenAI Compat] Connection error (attempt {conn_attempt + 1}/{connection_retries + 1}) for request {request_id}: {type(e).__name__}: {e}")
                 time.sleep(min(2 ** conn_attempt, 8))
+                conn_attempt += 1
                 continue
             print(f"[OpenAI Compat] Connection error (final attempt) for request {request_id}: {type(e).__name__}: {e}")
+            break
 
     if last_connection_error is not None:
         return jsonify({"error": f"Upstream connection error after {connection_retries + 1} attempts: {type(last_connection_error).__name__}"}), 504

@@ -67,6 +67,18 @@ class State:
         # Enabled by default; encrypted-content recovery has its own opt-in flag.
         self.enable_responses_early_failure_retry: bool = True
 
+        # Optional OpenAI client compatibility workarounds (both off by default).
+        # - fallback_unsupported_reasoning_effort_none: on OpenAI routes
+        #   (/v1/chat/completions and /v1/responses), rewrite an explicit
+        #   reasoning effort of "none" to "low" when the target model advertises
+        #   "low" and omits "none".
+        # - retry_chat_to_responses_min_output_tokens: when a Chat Completions
+        #   request routed through Responses fails with HTTP 400 because
+        #   max_output_tokens is below the upstream minimum (e.g. 16), retry once
+        #   with the reported minimum.
+        self.fallback_unsupported_reasoning_effort_none: bool = False
+        self.retry_chat_to_responses_min_output_tokens: bool = False
+
         # Retry settings
         self.max_connection_retries: int = 3  # Max retries for upstream connection errors
 

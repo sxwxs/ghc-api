@@ -36,10 +36,21 @@ A Python Flask application that serves as a proxy server for GitHub Copilot API,
 
 ### OpenAI Chat clients
 
-When ghc-api routes Chat Completions requests for `gpt-6.2-astra` through
-Responses, it raises output limits of 1–15 tokens to Astra's minimum of 16.
-For models that advertise `low` and omit `none`, the OpenAI routes translate
-`none` to `low`. All other reasoning efforts pass through as requested.
+When ghc-api routes Chat Completions requests through Responses, it forwards
+Chat's `reasoning_effort` field as Responses' `reasoning.effort`.
+
+Two optional compatibility workarounds are available and **disabled by default**
+so normal requests keep exact upstream semantics:
+
+- `retry_chat_to_responses_min_output_tokens: true` — if a Chat Completions
+  request routed through Responses fails with HTTP 400 because
+  `max_output_tokens` is below the upstream minimum (for example, a
+  `max_tokens: 1` connection probe rejected with `>= 16`), retry once using the
+  minimum reported in the error message.
+- `fallback_unsupported_reasoning_effort_none: true` — on `/v1/chat/completions`
+  and `/v1/responses`, rewrite an explicit reasoning effort of `none` to `low`
+  when Copilot reports that the model supports `low` and omits `none`. All other
+  reasoning efforts pass through as requested.
 
 ### Gemini through the Responses API (experimental)
 
@@ -235,6 +246,14 @@ auto_remove_encrypted_content_on_parse_error: false # If /v1/responses returns H
                               # because encrypted reasoning or tool output content cannot
                               # be decrypted, clean request.input and retry once.
                               # Lossy; see "Encrypted Content Recovery" below.
+
+# Optional OpenAI client compatibility workarounds (disabled by default)
+fallback_unsupported_reasoning_effort_none: false # Rewrite reasoning effort "none" to
+                              # "low" on OpenAI routes when the model supports "low"
+                              # and omits "none".
+retry_chat_to_responses_min_output_tokens: false # Retry once with the reported minimum
+                              # when a Chat-via-Responses request gets HTTP 400 for
+                              # max_output_tokens below the upstream minimum (e.g. 16).
 ```
 
 ### Anthropic Messages → Responses wire profiles

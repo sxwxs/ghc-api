@@ -307,6 +307,10 @@ def main():
         apply_anthropic_responses_config(config)
         if 'enable_responses_early_failure_retry' in config:
             state.enable_responses_early_failure_retry = bool(config['enable_responses_early_failure_retry'])
+        if 'fallback_unsupported_reasoning_effort_none' in config:
+            state.fallback_unsupported_reasoning_effort_none = bool(config['fallback_unsupported_reasoning_effort_none'])
+        if 'retry_chat_to_responses_min_output_tokens' in config:
+            state.retry_chat_to_responses_min_output_tokens = bool(config['retry_chat_to_responses_min_output_tokens'])
         if 'session_flush_interval' in config:
             state.session_flush_interval = int(config['session_flush_interval'])
 

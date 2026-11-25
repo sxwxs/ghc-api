@@ -10,8 +10,11 @@ from ghc_api.api_helpers import (
 from ghc_api.app import create_app
 from ghc_api.cache import cache
 from ghc_api.config import chat_completions_model_support
+from ghc_api.counters import counters
+from ghc_api.generate_config import generate_config_file
 from ghc_api.routes.openai import (
     _chat_completions_to_responses_payload,
+    _responses_min_max_output_tokens_from_error,
     _responses_to_chat_completion,
     _should_route_chat_completions_via_responses,
     chat_completions_via_responses,
@@ -25,11 +28,17 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
         self._saved_exact = list(chat_completions_model_support.exact_model_names)
         self._saved_prefix = list(chat_completions_model_support.prefix_model_names)
         self._saved_models = ghc_api.state.state.models
+        self._saved_fallback_none = ghc_api.state.state.fallback_unsupported_reasoning_effort_none
+        self._saved_retry_min_tokens = ghc_api.state.state.retry_chat_to_responses_min_output_tokens
+        ghc_api.state.state.fallback_unsupported_reasoning_effort_none = False
+        ghc_api.state.state.retry_chat_to_responses_min_output_tokens = False
 
     def tearDown(self):
         chat_completions_model_support.exact_model_names = self._saved_exact
         chat_completions_model_support.prefix_model_names = self._saved_prefix
         ghc_api.state.state.models = self._saved_models
+        ghc_api.state.state.fallback_unsupported_reasoning_effort_none = self._saved_fallback_none
+        ghc_api.state.state.retry_chat_to_responses_min_output_tokens = self._saved_retry_min_tokens
         cache.cache.clear()
         _configured_chat_completions_support_by_models_id.clear()
 
@@ -222,40 +231,185 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
 
         self.assertEqual(result["max_output_tokens"], 64)
 
-    def test_astra_streaming_connection_probe(self):
+    def test_openai_compat_flags_are_disabled_by_default_and_configurable(self):
+        fresh = ghc_api.state.State()
+        self.assertFalse(fresh.fallback_unsupported_reasoning_effort_none)
+        self.assertFalse(fresh.retry_chat_to_responses_min_output_tokens)
+
+        client = create_app().test_client()
+        config_body = client.get("/api/runtime-config").get_json()
+        self.assertFalse(config_body["fallback_unsupported_reasoning_effort_none"])
+        self.assertFalse(config_body["retry_chat_to_responses_min_output_tokens"])
+
+        bad = client.post(
+            "/api/runtime-config",
+            json={"fallback_unsupported_reasoning_effort_none": "yes"},
+        )
+        self.assertEqual(bad.status_code, 400)
+        bad_min = client.post(
+            "/api/runtime-config",
+            json={"retry_chat_to_responses_min_output_tokens": 1},
+        )
+        self.assertEqual(bad_min.status_code, 400)
+
+        ok = client.post(
+            "/api/runtime-config",
+            json={
+                "fallback_unsupported_reasoning_effort_none": True,
+                "retry_chat_to_responses_min_output_tokens": True,
+            },
+        )
+        self.assertEqual(ok.status_code, 200)
+        self.assertTrue(ghc_api.state.state.fallback_unsupported_reasoning_effort_none)
+        self.assertTrue(ghc_api.state.state.retry_chat_to_responses_min_output_tokens)
+
+    def test_generate_config_includes_opt_in_openai_compat_flags(self):
+        import tempfile
+        import yaml
+
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch("ghc_api.generate_config.get_config_dir", return_value=directory):
+                path = generate_config_file()
+            with open(path, "r", encoding="utf-8") as fh:
+                parsed = yaml.safe_load(fh)
+        self.assertIs(parsed["fallback_unsupported_reasoning_effort_none"], False)
+        self.assertIs(parsed["retry_chat_to_responses_min_output_tokens"], False)
+
+    def test_small_max_tokens_passes_through_unchanged_by_default(self):
         model = "gpt-6.2-astra"
         chat_completions_model_support.load_from_config({"chat_completions_model_support": {"prefix": ["gpt-"]}})
         ghc_api.state.state.models = {"data": [{"id": model, "supported_endpoints": ["/responses"]}]}
-        upstream = mock.Mock(ok=True, status_code=200)
-        upstream.iter_lines.return_value = [
-            b'data: {"type":"response.output_text.delta","delta":"OK"}',
-            b'data: {"type":"response.completed","response":{"output":[]}}',
-        ]
+        error_body = json.dumps({
+            "error": {
+                "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got 1 instead.",
+                "code": "invalid_request_body",
+            }
+        })
+        upstream_400 = mock.Mock(ok=False, status_code=400, text=error_body)
         with (
             mock.patch("ghc_api.routes.openai.ensure_copilot_token"),
             mock.patch("ghc_api.routes.openai.get_copilot_headers", return_value={}),
-            mock.patch("ghc_api.routes.openai.requests.post", return_value=upstream) as post,
+            mock.patch("ghc_api.routes.openai.requests.post", return_value=upstream_400) as post,
         ):
             response = create_app().test_client().post("/v1/chat/completions", json={
                 "model": model, "messages": [{"role": "user", "content": "Reply with OK."}],
                 "stream": True, "max_tokens": 1,
             }, buffered=True)
-        self.assertTrue(post.call_args.args[0].endswith("/v1/responses"))
-        self.assertEqual(post.call_args.kwargs["json"]["max_output_tokens"], 16)
-        self.assertEqual(response.status_code, 200)
-        self.assertIn(b'"content": "OK"', response.data)
-        self.assertIn(b"data: [DONE]", response.data)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(post.call_args.kwargs["json"]["max_output_tokens"], 1)
+        self.assertEqual(response.status_code, 400)
 
-    def test_astra_token_floor_only_applies_to_small_positive_integers(self):
-        for model, limit, expected in [
-            ("gpt-6.2-astra", 15, 16), ("gpt-6.2-astra", 16, 16), ("gpt-6.2-astra", 32, 32),
-            ("gpt-6.2-astra", 0, 0), ("gpt-6.2-astra", True, True), ("gpt-other", 1, 1),
-        ]:
-            with self.subTest(model=model, limit=limit):
-                result = _chat_completions_to_responses_payload({"model": model, "max_completion_tokens": limit})
-                self.assertEqual(result["max_output_tokens"], expected)
+    def test_chat_via_responses_retries_on_min_max_output_tokens_error_when_enabled(self):
+        ghc_api.state.state.retry_chat_to_responses_min_output_tokens = True
+        chat_completions_model_support.load_from_config({"chat_completions_model_support": {"prefix": ["gpt-"]}})
+        for model in ("gpt-6.2-astra", "gpt-5.4-nano"):
+            with self.subTest(model=model):
+                ghc_api.state.state.models = {"data": [{"id": model, "supported_endpoints": ["/responses"]}]}
+                error_body = json.dumps({
+                    "error": {
+                        "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got 1 instead.",
+                        "code": "invalid_request_body",
+                    }
+                })
+                upstream_400 = mock.Mock(ok=False, status_code=400, text=error_body)
+                upstream_ok = mock.Mock(ok=True, status_code=200)
+                upstream_ok.iter_lines.return_value = [
+                    b'data: {"type":"response.output_text.delta","delta":"OK"}',
+                    b'data: {"type":"response.completed","response":{"output":[]}}',
+                ]
+                before_counter = counters.snapshot().get("mod.chat_responses_min_output_tokens_retry", 0)
+                with (
+                    mock.patch("ghc_api.routes.openai.ensure_copilot_token"),
+                    mock.patch("ghc_api.routes.openai.get_copilot_headers", return_value={}),
+                    mock.patch("ghc_api.routes.openai.requests.post", side_effect=[upstream_400, upstream_ok]) as post,
+                ):
+                    response = create_app().test_client().post("/v1/chat/completions", json={
+                        "model": model, "messages": [{"role": "user", "content": "Reply with OK."}],
+                        "stream": True, "max_tokens": 1,
+                    }, buffered=True)
+                self.assertEqual(post.call_count, 2)
+                self.assertTrue(post.call_args_list[0].args[0].endswith("/v1/responses"))
+                self.assertEqual(post.call_args_list[0].kwargs["json"]["max_output_tokens"], 1)
+                self.assertEqual(post.call_args_list[1].kwargs["json"]["max_output_tokens"], 16)
+                upstream_400.close.assert_called_once()
+                self.assertEqual(response.status_code, 200)
+                self.assertIn(b'"content": "OK"', response.data)
+                self.assertIn(b"data: [DONE]", response.data)
+                after_counter = counters.snapshot().get("mod.chat_responses_min_output_tokens_retry", 0)
+                self.assertEqual(after_counter, before_counter + 1)
 
-    def test_chat_reasoning_effort_falls_back_only_for_unsupported_none(self):
+    def test_chat_via_responses_min_max_output_tokens_retry_works_non_streaming_and_caps_at_one_retry(self):
+        ghc_api.state.state.retry_chat_to_responses_min_output_tokens = True
+        model = "gpt-6.2-astra"
+        chat_completions_model_support.load_from_config({"chat_completions_model_support": {"prefix": ["gpt-"]}})
+        ghc_api.state.state.models = {"data": [{"id": model, "supported_endpoints": ["/responses"]}]}
+        error_16 = mock.Mock(ok=False, status_code=400, text=json.dumps({
+            "error": {
+                "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got 1 instead.",
+                "code": "invalid_request_body",
+            }
+        }))
+        error_32 = mock.Mock(ok=False, status_code=400, text=json.dumps({
+            "error": {
+                "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 32, but got 16 instead.",
+                "code": "invalid_request_body",
+            }
+        }))
+        with (
+            mock.patch("ghc_api.routes.openai.ensure_copilot_token"),
+            mock.patch("ghc_api.routes.openai.get_copilot_headers", return_value={}),
+            mock.patch("ghc_api.routes.openai.requests.post", side_effect=[error_16, error_32]) as post,
+        ):
+            response = create_app().test_client().post("/v1/chat/completions", json={
+                "model": model, "messages": [{"role": "user", "content": "Reply with OK."}],
+                "max_completion_tokens": 1,
+            })
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].kwargs["json"]["max_output_tokens"], 1)
+        self.assertEqual(post.call_args_list[1].kwargs["json"]["max_output_tokens"], 16)
+        self.assertEqual(response.status_code, 400)
+
+    def test_min_max_output_tokens_error_parser_only_matches_valid_positive_lower_bounds(self):
+        valid_body = json.dumps({
+            "error": {
+                "message": "Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got 1 instead.",
+                "code": "invalid_request_body",
+            }
+        })
+        self.assertEqual(_responses_min_max_output_tokens_from_error(400, valid_body, 1), 16)
+        self.assertEqual(_responses_min_max_output_tokens_from_error(400, valid_body, 15), 16)
+        self.assertIsNone(_responses_min_max_output_tokens_from_error(400, valid_body, 16))
+        self.assertIsNone(_responses_min_max_output_tokens_from_error(400, valid_body, 0))
+        self.assertIsNone(_responses_min_max_output_tokens_from_error(400, valid_body, True))
+        self.assertIsNone(_responses_min_max_output_tokens_from_error(500, valid_body, 1))
+        self.assertIsNone(_responses_min_max_output_tokens_from_error(400, "not json", 1))
+        unrelated = json.dumps({"error": {"message": "Invalid 'temperature': expected >= 0", "code": "invalid_request_body"}})
+        self.assertIsNone(_responses_min_max_output_tokens_from_error(400, unrelated, 1))
+
+    def test_chat_reasoning_effort_is_forwarded_without_rewriting_by_default(self):
+        model = "gpt-6.2-astra"
+        ghc_api.state.state.models = {"data": [{
+            "id": model, "capabilities": {"supports": {"reasoning_effort": ["low", "high"]}},
+        }]}
+        result = _chat_completions_to_responses_payload({
+            "model": model, "reasoning_effort": "none", "reasoning": {"summary": "auto"},
+        })
+        self.assertEqual(result["reasoning"], {"effort": "none", "summary": "auto"})
+
+        # Explicit reasoning.effort=None falls back to top-level reasoning_effort.
+        result_none_effort = _chat_completions_to_responses_payload({
+            "model": model, "reasoning_effort": "high", "reasoning": {"effort": None, "summary": "auto"},
+        })
+        self.assertEqual(result_none_effort["reasoning"], {"effort": "high", "summary": "auto"})
+
+        # Non-null reasoning.effort takes precedence over top-level reasoning_effort.
+        result_precedence = _chat_completions_to_responses_payload({
+            "model": "unknown", "reasoning": {"effort": "none"}, "reasoning_effort": "high",
+        })
+        self.assertEqual(result_precedence["reasoning"], {"effort": "none"})
+
+    def test_chat_reasoning_effort_falls_back_only_for_unsupported_none_when_enabled(self):
+        ghc_api.state.state.fallback_unsupported_reasoning_effort_none = True
         model = "gpt-6.2-astra"
         for supported, effort, expected in [
             (["low"], "none", "low"), (["none", "low"], "none", "none"), (["high"], "none", "none"),
@@ -269,10 +423,6 @@ class ChatCompletionsModelSupportTest(unittest.TestCase):
                     "model": model, "reasoning_effort": effort, "reasoning": {"summary": "auto"},
                 })
                 self.assertEqual(result["reasoning"], {"effort": expected, "summary": "auto"})
-        result = _chat_completions_to_responses_payload({
-            "model": "unknown", "reasoning": {"effort": "none"}, "reasoning_effort": "high",
-        })
-        self.assertEqual(result["reasoning"], {"effort": "none"})
 
     def test_chat_completion_payload_prefers_max_completion_tokens_over_max_tokens(self):
         payload = {

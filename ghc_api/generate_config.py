@@ -238,6 +238,18 @@ anthropic_responses_model_profiles:
 # default; set false to disable this retry. Encrypted-content recovery is independent.
 enable_responses_early_failure_retry: true
 
+# If true, on OpenAI routes (/v1/chat/completions and /v1/responses), rewrite an
+# explicit reasoning effort of "none" to "low" when Copilot reports that the model
+# supports "low" and does not support "none". Disabled by default so unsupported
+# values pass through to upstream unchanged.
+fallback_unsupported_reasoning_effort_none: false
+
+# If true, when a Chat Completions request routed through Responses fails with
+# HTTP 400 because max_output_tokens is below the upstream minimum (e.g. a
+# max_tokens=1 client probe rejected with ">= 16"), retry once with that minimum.
+# Disabled by default; normal requests pay zero overhead and never get rewritten.
+retry_chat_to_responses_min_output_tokens: false
+
 # Session File Flush Interval
 # ---------------------------
 # How often (in seconds) buffered session updates are flushed to disk.
