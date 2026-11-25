@@ -22,6 +22,7 @@ from ..api_helpers import (
     get_copilot_headers,
     is_configured_chat_completions_support_added,
     is_non_chat_model,
+    supported_reasoning_efforts,
     supports_embeddings_api,
     supports_responses_api,
     systemone_upstream_path,
@@ -556,6 +557,15 @@ def _chat_tool_call_to_responses_item(tool_call: Dict) -> Dict | None:
     }
 
 
+def _model_reasoning_effort(model_id: str, effort):
+    """Use low for models that cannot turn reasoning off."""
+    if effort == "none":
+        supported = supported_reasoning_efforts(model_id)
+        if "none" not in supported and "low" in supported:
+            return "low"
+    return effort
+
+
 def _chat_completions_to_responses_payload(payload: Dict) -> Dict:
     responses_payload = {
         "model": payload.get("model"),
@@ -622,10 +632,23 @@ def _chat_completions_to_responses_payload(payload: Dict) -> Dict:
         if source in payload:
             responses_payload[target] = payload[source]
 
+    reasoning = responses_payload.get("reasoning", {})
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort", payload.get("reasoning_effort"))
+        if effort is not None:
+            responses_payload["reasoning"] = {
+                **reasoning, "effort": _model_reasoning_effort(responses_payload["model"], effort),
+            }
+
     if payload.get("max_completion_tokens") is not None:
         responses_payload["max_output_tokens"] = payload["max_completion_tokens"]
     elif payload.get("max_tokens") is not None:
         responses_payload["max_output_tokens"] = payload["max_tokens"]
+
+    # Copilot rejects output limits below 16 for Astra on the Responses endpoint.
+    limit = responses_payload.get("max_output_tokens")
+    if responses_payload["model"] == "gpt-6.2-astra" and type(limit) is int and 0 < limit < 16:
+        responses_payload["max_output_tokens"] = 16
 
     if payload.get("stop") is not None:
         responses_payload["stop"] = payload["stop"]
@@ -1669,10 +1692,14 @@ def chat_completions():
         headers = get_copilot_headers(enable_vision)
         headers["X-Initiator"] = "agent" if is_agent_call else "user"
 
+        via_responses = _should_route_chat_completions_via_responses(translated_model)
+        if not via_responses and "reasoning_effort" in payload:
+            payload["reasoning_effort"] = _model_reasoning_effort(translated_model, payload["reasoning_effort"])
+
         request_body = json.dumps(payload)
         request_size = len(request_body)
 
-        if _should_route_chat_completions_via_responses(translated_model):
+        if via_responses:
             return chat_completions_via_responses(
                 payload, headers, request_id, request_body, request_size, start_time,
                 original_model, translated_model, original_request_body, request_headers,
@@ -2025,6 +2052,10 @@ def responses():
                     "code": "unsupported_model",
                 }
             }), 400
+
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict) and "effort" in reasoning:
+            reasoning["effort"] = _model_reasoning_effort(translated_model, reasoning["effort"])
 
         # Check for vision content in input
         enable_vision = False
