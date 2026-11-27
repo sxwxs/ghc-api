@@ -386,6 +386,32 @@ def adjust_max_tokens_for_thinking(payload: Dict) -> Dict:
     return payload
 
 
+def _anthropic_messages_have_vision(messages: Any, include_document: bool = False) -> bool:
+    """Return True if any message or nested tool_result block contains vision content."""
+    target_types = ("image", "image_url", "document") if include_document else ("image", "image_url")
+    if not isinstance(messages, list):
+        return False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype in target_types:
+                return True
+            if ptype == "tool_result":
+                tr_content = part.get("content")
+                if isinstance(tr_content, list):
+                    for inner in tr_content:
+                        if isinstance(inner, dict) and inner.get("type") in target_types:
+                            return True
+    return False
+
+
 def get_anthropic_headers(enable_vision: bool = False) -> Dict[str, str]:
     """Get headers for direct Anthropic API requests to Copilot."""
     headers = get_copilot_headers(enable_vision)
@@ -1636,15 +1662,7 @@ def handle_responses_anthropic_request(
     # converted payload would let a 1 MB body be retained under a 219-byte
     # accounting, once per cached entry.
     request_size = len(original_request_raw)
-    enable_vision = any(
-        isinstance(message, dict)
-        and isinstance(message.get("content"), list)
-        and any(
-            isinstance(part, dict) and part.get("type") in ("image", "document")
-            for part in message.get("content", [])
-        )
-        for message in anthropic_payload.get("messages", [])
-    )
+    enable_vision = _anthropic_messages_have_vision(anthropic_payload.get("messages", []), include_document=True)
     is_agent_call = any(
         isinstance(message, dict) and message.get("role") == "assistant"
         for message in anthropic_payload.get("messages", [])
@@ -2085,11 +2103,7 @@ def handle_direct_anthropic_request(anthropic_payload: Dict, request_id: str, st
     """Handle request using direct Anthropic API (no translation needed)."""
 
     # Check for vision content
-    enable_vision = any(
-        isinstance(msg.get("content"), list) and
-        any(p.get("type") == "image" for p in msg.get("content", []))
-        for msg in anthropic_payload.get("messages", [])
-    )
+    enable_vision = _anthropic_messages_have_vision(anthropic_payload.get("messages", []))
 
     # Agent/user check for X-Initiator header
     is_agent_call = any(
@@ -2293,11 +2307,7 @@ def handle_translated_request(anthropic_payload: Dict, request_id: str, start_ti
                                user_id: str = "anonymous") -> Response:
     """Handle request using OpenAI translation path."""
     # Check for vision content
-    enable_vision = any(
-        isinstance(msg.get("content"), list) and
-        any(p.get("type") == "image" for p in msg.get("content", []))
-        for msg in anthropic_payload.get("messages", [])
-    )
+    enable_vision = _anthropic_messages_have_vision(anthropic_payload.get("messages", []))
 
     max_retries = 3
     current_payload = anthropic_payload

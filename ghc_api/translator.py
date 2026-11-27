@@ -100,9 +100,7 @@ def translate_anthropic_to_openai(payload: Dict) -> Dict:
 
                 # Tool results become tool messages
                 for tr in tool_results:
-                    tool_content = tr.get("content", "")
-                    if isinstance(tool_content, str):
-                        tool_content = apply_tool_result_suffix_filter(tool_content)
+                    tool_content = translate_tool_result_content(tr.get("content", ""))
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tr.get("tool_use_id"),
@@ -165,17 +163,24 @@ def translate_anthropic_to_openai(payload: Dict) -> Dict:
 
     # Translate tools
     if payload.get("tools"):
-        openai_payload["tools"] = [
-            {
+        translated_tools = []
+        for tool in payload["tools"]:
+            if not isinstance(tool, dict):
+                continue
+            # Skip Anthropic server/built-in tool_search declarations (no input_schema)
+            tool_type = tool.get("type")
+            if isinstance(tool_type, str) and tool_type.startswith("tool_search_tool_"):
+                continue
+            translated_tools.append({
                 "type": "function",
                 "function": {
                     "name": tool.get("name"),
                     "description": tool.get("description"),
-                    "parameters": tool.get("input_schema", {}),
+                    "parameters": normalize_tool_parameters_schema(tool.get("input_schema")),
                 },
-            }
-            for tool in payload["tools"]
-        ]
+            })
+        if translated_tools:
+            openai_payload["tools"] = translated_tools
 
     # Translate tool_choice
     tool_choice = payload.get("tool_choice")
@@ -196,35 +201,125 @@ def translate_anthropic_to_openai(payload: Dict) -> Dict:
     return openai_payload
 
 
+def normalize_tool_parameters_schema(schema: Any) -> Dict[str, Any]:
+    """Normalize Anthropic tool input_schema for OpenAI / Gemini chat/completions.
+
+    Some MCP tools emit {"type": "object", "additionalProperties": false} without
+    a "properties" key, which upstream chat/completions backends reject with 400.
+    """
+    if not isinstance(schema, dict) or not schema:
+        return {"type": "object", "properties": {}}
+    if schema.get("type") == "object" and "properties" not in schema:
+        normalized = dict(schema)
+        normalized["properties"] = {}
+        return normalized
+    return schema
+
+
+def _anthropic_image_to_openai_part(block: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert an Anthropic image content block to an OpenAI image_url part."""
+    source = block.get("source") if isinstance(block.get("source"), dict) else {}
+    source_type = source.get("type")
+    if source_type == "url" and source.get("url"):
+        url = source["url"]
+    else:
+        media_type = source.get("media_type") or "image/png"
+        data = source.get("data") or ""
+        url = f"data:{media_type};base64,{data}"
+    return {
+        "type": "image_url",
+        "image_url": {"url": url},
+    }
+
+
+def _block_to_text_or_part(block: Any) -> Optional[Dict[str, Any]]:
+    """Translate a single Anthropic content block to an OpenAI text or image_url part."""
+    if not isinstance(block, dict):
+        return {"type": "text", "text": str(block)} if block is not None else None
+    btype = block.get("type")
+    if btype == "text":
+        return {"type": "text", "text": block.get("text", "")}
+    if btype == "thinking":
+        return {"type": "text", "text": block.get("thinking", "")}
+    if btype == "image":
+        return _anthropic_image_to_openai_part(block)
+    if btype == "image_url":
+        return block
+    if btype == "tool_reference":
+        tool_name = block.get("tool_name") or block.get("name") or ""
+        text = f"Loaded tool: {tool_name}" if tool_name else json.dumps(block, ensure_ascii=False)
+        return {"type": "text", "text": text}
+    return {"type": "text", "text": json.dumps(block, ensure_ascii=False)}
+
+
+def translate_tool_result_content(tool_content: Any) -> Any:
+    """Translate Anthropic tool_result.content to OpenAI tool message content.
+
+    Strings pass through the suffix filter. Block lists are converted to OpenAI
+    content parts (image -> image_url, tool_reference -> text, etc.) when images
+    are present, or joined into text when all blocks are textual.
+    """
+    if isinstance(tool_content, str):
+        return apply_tool_result_suffix_filter(tool_content)
+    if isinstance(tool_content, list):
+        has_image = any(
+            isinstance(b, dict) and b.get("type") in ("image", "image_url")
+            for b in tool_content
+        )
+        if not has_image:
+            texts: List[str] = []
+            for b in tool_content:
+                part = _block_to_text_or_part(b)
+                if part and part.get("type") == "text":
+                    texts.append(apply_tool_result_suffix_filter(part.get("text", "")))
+            return "\n\n".join(texts)
+
+        parts: List[Dict[str, Any]] = []
+        for b in tool_content:
+            part = _block_to_text_or_part(b)
+            if part is None:
+                continue
+            if part.get("type") == "text":
+                part = {"type": "text", "text": apply_tool_result_suffix_filter(part.get("text", ""))}
+            parts.append(part)
+        return parts if parts else ""
+    if tool_content is None:
+        return ""
+    return json.dumps(tool_content, ensure_ascii=False)
+
+
 def translate_content_blocks(blocks: List[Dict]) -> Any:
     """Translate Anthropic content blocks to OpenAI format"""
-    has_image = any(b.get("type") == "image" for b in blocks)
+    has_image = any(
+        isinstance(b, dict) and b.get("type") in ("image", "image_url")
+        for b in blocks
+    )
 
     if not has_image:
         # Just combine text
         texts = []
         for b in blocks:
+            if not isinstance(b, dict):
+                continue
             if b.get("type") == "text":
                 texts.append(b.get("text", ""))
             elif b.get("type") == "thinking":
                 texts.append(b.get("thinking", ""))
+            elif b.get("type") == "tool_reference":
+                part = _block_to_text_or_part(b)
+                if part:
+                    texts.append(part.get("text", ""))
         return "\n\n".join(texts) if texts else None
 
     # Handle mixed content with images
     parts = []
     for b in blocks:
-        if b.get("type") == "text":
-            parts.append({"type": "text", "text": b.get("text", "")})
-        elif b.get("type") == "thinking":
-            parts.append({"type": "text", "text": b.get("thinking", "")})
-        elif b.get("type") == "image":
-            source = b.get("source", {})
-            parts.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{source.get('media_type')};base64,{source.get('data')}",
-                },
-            })
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") in ("text", "thinking", "image", "image_url", "tool_reference"):
+            part = _block_to_text_or_part(b)
+            if part is not None:
+                parts.append(part)
     return parts if parts else None
 
 
